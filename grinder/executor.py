@@ -10,6 +10,7 @@ import random
 import socket
 import threading
 import typing
+from contextlib import suppress
 from multiprocessing.queues import JoinableQueue
 from queue import Empty
 from traceback import format_exception
@@ -34,7 +35,6 @@ class TaskExecutor:
     max_tasks: int = 0
     max_tasks_jitter: int = 0
     task_timeout: datetime.timedelta = datetime.timedelta(hours=1)
-    acquire_timeout: datetime.timedelta = datetime.timedelta(seconds=1)
     is_acquiring: bool = dataclasses.field(default=True, init=False)
     is_publishing: bool = dataclasses.field(default=True, init=False)
     worker_processes: list[WorkerProcess] = dataclasses.field(
@@ -64,7 +64,6 @@ class TaskExecutor:
             return (
                 self.max_tasks + random.randint(0, self.max_tasks_jitter)  # noqa: S311
             ) // self.thread_count
-        return None
 
     def create_worker_process(self) -> WorkerProcess:
         """Create and start a new worker process."""
@@ -78,12 +77,12 @@ class TaskExecutor:
         worker.start()
         return worker
 
-    def run(self) -> None:
+    async def run(self) -> None:
         """Start consuming tasks until shutdown is requested."""
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)
         ]
-        asyncio.gather(
+        await asyncio.gather(
             asyncio.create_task(self.acquire_tasks()),
             asyncio.create_task(self.acknowledge_tasks()),
             asyncio.create_task(self.maintain_worker_pool()),
@@ -103,10 +102,12 @@ class TaskExecutor:
     def shutdown(self) -> None:
         """Stop queue consumption and terminate all worker processes."""
         self.is_acquiring = False
-        self.shared_task_queue.join()
+        with suppress(ValueError):
+            self.shared_task_queue.join()
         for worker in self.worker_processes:
             worker.shutdown()
-        self.processed_task_queue.join()
+        with suppress(ValueError):
+            self.processed_task_queue.join()
         self.is_publishing = False
 
     async def maintain_worker_pool(self) -> None:
@@ -117,6 +118,7 @@ class TaskExecutor:
                     continue
                 worker.join(timeout=0)
                 self.worker_processes[index] = self.create_worker_process()
+            await asyncio.sleep(0.01)
 
 
 class WorkerProcess(multiprocessing.Process):

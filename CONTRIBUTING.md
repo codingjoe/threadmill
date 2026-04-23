@@ -24,6 +24,18 @@ To run the tests, use the following command:
 uv run pytest
 ```
 
+To run only integration tests:
+
+```bash
+uv run pytest -m integration
+```
+
+To run only integration benchmarks:
+
+```bash
+uv run pytest -m "integration and benchmark"
+```
+
 Benchmarking snapshots are created automatically.
 To compare your feature branch against the main branch,
 run the test suite on main, followed by:

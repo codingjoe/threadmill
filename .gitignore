@@ -170,3 +170,6 @@ grinder/_version.py
 
 # uv
 uv.lock
+
+# pytest-benchmark
+.benchmarks/

@@ -1,3 +1,4 @@
+import asyncio
 import signal
 import sys
 
@@ -100,7 +101,7 @@ class Command(BaseCommand):
             task_timeout=task_timeout,
         )
         try:
-            exe.run()
+            asyncio.run(exe.run())
         except KeyboardInterrupt as e:
             self.stdout.write(self.style.WARNING(str(e)))
             self.stdout.write(self.style.NOTICE("Shutting down scheduler…"))

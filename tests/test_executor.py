@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import collections.abc
 import datetime
 import threading
+import time
 from queue import Empty
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -11,6 +13,7 @@ import pytest
 from django.tasks import TaskResult
 from django.tasks.base import TaskResultStatus
 from grinder import executor
+from grinder.backends import AcknowledgeableTaskBackend
 
 
 class RecordingTask:
@@ -24,6 +27,7 @@ class RecordingTask:
         self.takes_context = takes_context
         self.return_value = return_value
         self.exception = exception
+        self.module_path = "tests.test_executor.RecordingTask.call"
         self.calls: list[tuple[tuple, dict]] = []
 
     def call(self, *args, **kwargs):
@@ -31,6 +35,64 @@ class RecordingTask:
         if self.exception is not None:
             raise self.exception
         return self.return_value
+
+
+class CPUHeavyTask:
+    def __init__(
+        self,
+        *,
+        matrix_size: int,
+        iteration_count: int,
+        raise_error: bool,
+    ):
+        self.takes_context = False
+        self.module_path = "tests.test_executor.CPUHeavyTask.call"
+        self.matrix_size = matrix_size
+        self.iteration_count = iteration_count
+        self.raise_error = raise_error
+
+    def call(self):
+        prime_limit = self.matrix_size * 80
+        prime_count = sum(self.is_prime(number) for number in range(2, prime_limit))
+        fibonacci_value = self.calculate_fibonacci(self.iteration_count + 18)
+        pi_estimate = self.calculate_pi_leibniz(self.matrix_size * 120)
+        if self.raise_error:
+            raise ValueError("task failed")
+        return {
+            "prime_count": prime_count,
+            "fibonacci_value": fibonacci_value,
+            "pi_estimate": pi_estimate,
+        }
+
+    @staticmethod
+    def is_prime(number: int) -> bool:
+        if number < 2:
+            return False
+        if number in (2, 3):
+            return True
+        if number % 2 == 0:
+            return False
+        for divisor in range(3, int(number**0.5) + 1, 2):
+            if number % divisor == 0:
+                return False
+        return True
+
+    @staticmethod
+    def calculate_fibonacci(index: int) -> int:
+        if index < 2:
+            return index
+        previous = 0
+        current = 1
+        for _ in range(2, index + 1):
+            previous, current = current, previous + current
+        return current
+
+    @staticmethod
+    def calculate_pi_leibniz(iteration_count: int) -> float:
+        return 4 * sum(
+            ((-1) ** iteration_index) / (2 * iteration_index + 1)
+            for iteration_index in range(iteration_count)
+        )
 
 
 class FakeJoinableQueue:
@@ -88,6 +150,27 @@ class QueueRaiseThenReturn:
         self.task_done_calls += 1
 
 
+class QueueRaiseThenReturnAndEmpty:
+    def __init__(self, *, item):
+        self.item = item
+        self.calls = 0
+        self.task_done_calls = 0
+        self.is_empty = False
+
+    def get(self, *, timeout: float | None = None, block: bool = True):
+        self.calls += 1
+        if self.calls == 1:
+            raise Empty
+        self.is_empty = True
+        return self.item
+
+    def empty(self) -> bool:
+        return self.is_empty
+
+    def task_done(self):
+        self.task_done_calls += 1
+
+
 class FakeWorkerProcess:
     def __init__(self, *, alive: bool):
         self.alive = alive
@@ -128,19 +211,127 @@ def create_task_error_from_value_error() -> None:
         executor.WorkerThread.create_task_error(exception)
 
 
+class IntegrationTaskBackend(AcknowledgeableTaskBackend):
+    def __init__(
+        self,
+        *,
+        task_result_generator: collections.abc.Iterator[TaskResult],
+        task_result_count: int,
+    ):
+        super().__init__(alias="default", params={})
+        self.task_result_generator = task_result_generator
+        self.task_result_count = task_result_count
+        self.acknowledged_task_results: list[TaskResult] = []
+        self.task_executor: executor.TaskExecutor | None = None
+
+    def enqueue(self, task):
+        return task
+
+    def acquire(self, timeout: datetime.timedelta | None = None) -> TaskResult:
+        try:
+            task_result = next(self.task_result_generator)
+        except StopIteration:
+            if self.task_executor is not None:
+                self.task_executor.is_acquiring = False
+            raise TimeoutError
+        return task_result
+
+    def acknowledge(self, task_result: TaskResult) -> None:
+        self.acknowledged_task_results.append(task_result)
+        if (
+            self.task_executor is not None
+            and len(self.acknowledged_task_results) >= self.task_result_count
+        ):
+            self.task_executor.is_publishing = False
+
+
+def execute_task_pipeline(*, task_result: TaskResult) -> TaskResult:
+    return execute_cpu_heavy_task_pipeline(
+        task_result_generator=iter([task_result]),
+        task_result_count=1,
+    )[0]
+
+
+def create_cpu_heavy_task_result_generator(
+    *,
+    task_count: int,
+    fail_every_count: int,
+) -> collections.abc.Iterator[TaskResult]:
+    return (
+        TaskResult(
+            task=CPUHeavyTask(
+                matrix_size=64,
+                iteration_count=24,
+                raise_error=fail_every_count > 0 and task_index % fail_every_count == 0,
+            ),
+            id=f"cpu-task-{task_index}",
+            status=TaskResultStatus.READY,
+            enqueued_at=None,
+            started_at=None,
+            finished_at=None,
+            last_attempted_at=None,
+            args=[],
+            kwargs={},
+            backend="default",
+            errors=[],
+            worker_ids=[],
+        )
+        for task_index in range(task_count)
+    )
+
+
+def execute_cpu_heavy_task_pipeline(
+    *,
+    task_result_generator: collections.abc.Iterator[TaskResult],
+    task_result_count: int,
+) -> list[TaskResult]:
+    backend = IntegrationTaskBackend(
+        task_result_generator=task_result_generator,
+        task_result_count=task_result_count,
+    )
+    task_executor = executor.TaskExecutor(backend=backend, workers=1, threads=1)
+    backend.task_executor = task_executor
+
+    def shutdown_stale_executor() -> None:
+        timeout_at = time.monotonic() + 30
+        while (
+            len(backend.acknowledged_task_results) < backend.task_result_count
+            and time.monotonic() < timeout_at
+        ):
+            time.sleep(0.01)
+        task_executor.shutdown()
+
+    shutdown_thread = threading.Thread(target=shutdown_stale_executor, daemon=True)
+    shutdown_thread.start()
+    task_executor.run()
+    shutdown_thread.join()
+    return backend.acknowledged_task_results
+
+
+def execute_cpu_heavy_task_pipeline_for_benchmark(
+    *,
+    task_count: int,
+    fail_every_count: int,
+) -> list[TaskResult]:
+    return execute_cpu_heavy_task_pipeline(
+        task_result_generator=create_cpu_heavy_task_result_generator(
+            task_count=task_count,
+            fail_every_count=fail_every_count,
+        ),
+        task_result_count=task_count,
+    )
+
+
 class TestTaskExecutor:
     def test_run__create_tasks_for_all_executor_loops(self, monkeypatch) -> None:
         """Create orchestration tasks for acquire, acknowledge, and maintenance loops."""
-        created_tasks = []
+        started_coroutines = []
 
-        def create_task(coroutine):
-            created_tasks.append(coroutine.cr_code.co_name)
+        def run(coroutine):
+            started_coroutines.append(coroutine.cr_code.co_name)
             coroutine.close()
-            return coroutine.cr_code.co_name
 
-        gather = Mock()
-        monkeypatch.setattr(executor.asyncio, "create_task", create_task)
-        monkeypatch.setattr(executor.asyncio, "gather", gather)
+        monkeypatch.setattr(executor.asyncio, "run", run)
         monkeypatch.setattr(
             executor.TaskExecutor,
             "create_worker_process",
@@ -152,14 +343,7 @@ class TestTaskExecutor:
         task_executor.run()
 
         assert len(task_executor.worker_processes) == 1
-        assert created_tasks == [
-            "acquire_tasks",
-            "acknowledge_tasks",
-            "maintain_worker_pool",
-        ]
-        gather.assert_called_once_with(
-            "acquire_tasks", "acknowledge_tasks", "maintain_worker_pool"
-        )
+        assert started_coroutines == ["start_orchestration"]
 
     def test_acquire_tasks__put_acquired_task_in_shared_queue(self) -> None:
         """Put acquired task result into shared queue."""
@@ -168,7 +352,7 @@ class TestTaskExecutor:
             def __init__(self):
                 self.task_executor = None
 
-            def acquire(self):
+            def acquire(self, timeout=None):
                 self.task_executor.is_acquiring = False
                 return "task-result"
 
@@ -178,6 +362,30 @@ class TestTaskExecutor:
 
         asyncio.run(task_executor.acquire_tasks())
 
+        assert task_executor.shared_task_queue.get(timeout=0.1) == "task-result"
+
+    def test_acquire_tasks__retry_after_timeout_error(self) -> None:
+        """Retry task acquisition after backend timeout errors."""
+
+        class AcquireBackend:
+            def __init__(self):
+                self.task_executor = None
+                self.acquire_count = 0
+
+            def acquire(self, timeout=None):
+                self.acquire_count += 1
+                if self.acquire_count == 1:
+                    raise TimeoutError
+                self.task_executor.is_acquiring = False
+                return "task-result"
+
+        backend = AcquireBackend()
+        task_executor = executor.TaskExecutor(backend=backend, workers=1)
+        backend.task_executor = task_executor
+
+        asyncio.run(task_executor.acquire_tasks())
+
+        assert backend.acquire_count == 2
         assert task_executor.shared_task_queue.get(timeout=0.1) == "task-result"
 
     def test_acknowledge_tasks__acknowledge_processed_task_and_mark_done(self) -> None:
@@ -196,6 +404,29 @@ class TestTaskExecutor:
         task_executor = executor.TaskExecutor(backend=backend, workers=1)
         backend.task_executor = task_executor
         task_executor.processed_task_queue.put("processed-result")
+
+        asyncio.run(task_executor.acknowledge_tasks())
+
+        assert backend.calls == ["processed-result"]
+
+    def test_acknowledge_tasks__retry_after_empty_queue(self) -> None:
+        """Retry acknowledgement after queue timeout without stopping loop."""
+
+        class AcknowledgeBackend:
+            def __init__(self):
+                self.calls: list = []
+                self.task_executor = None
+
+            def acknowledge(self, task_result):
+                self.calls.append(task_result)
+                self.task_executor.is_publishing = False
+
+        backend = AcknowledgeBackend()
+        task_executor = executor.TaskExecutor(backend=backend, workers=1)
+        backend.task_executor = task_executor
+        task_executor.processed_task_queue = QueueRaiseThenReturnAndEmpty(
+            item="processed-result",
+        )
 
         asyncio.run(task_executor.acknowledge_tasks())
 
@@ -391,6 +622,118 @@ class TestWorkerProcess:
 
         assert worker_process.shutdown_requested.is_set() is True
         join.assert_called_once_with()
+
+
+class TestTaskExecutorIntegration:
+    @pytest.mark.integration
+    def test_execute_task_pipeline__acknowledge_successful_task_result(self) -> None:
+        """Acknowledge successful task result in executor pipeline."""
+        acknowledged_task_result = execute_task_pipeline(
+            task_result=create_task_result(
+                task=RecordingTask(takes_context=False, return_value={"value": 7})
+            )
+        )
+
+        assert acknowledged_task_result.status is TaskResultStatus.SUCCESSFUL
+        assert acknowledged_task_result.errors == []
+        assert acknowledged_task_result.finished_at is not None
+
+    @pytest.mark.integration
+    def test_execute_task_pipeline__acknowledge_failed_task_result(self) -> None:
+        """Acknowledge failed task result in executor pipeline."""
+        acknowledged_task_result = execute_task_pipeline(
+            task_result=create_task_result(
+                task=RecordingTask(takes_context=False, exception=ValueError("broken"))
+            )
+        )
+
+        assert acknowledged_task_result.status is TaskResultStatus.FAILED
+        assert len(acknowledged_task_result.errors) == 1
+        assert (
+            acknowledged_task_result.errors[0].exception_class_path
+            == "builtins.ValueError"
+        )
+
+    @pytest.mark.integration
+    def test_execute_cpu_heavy_task_pipeline__process_multiple_cpu_heavy_tasks(
+        self,
+    ) -> None:
+        """Process multiple CPU heavy tasks without losing task results."""
+        acknowledged_task_results = execute_cpu_heavy_task_pipeline(
+            task_result_generator=create_cpu_heavy_task_result_generator(
+                task_count=100,
+                fail_every_count=0,
+            ),
+            task_result_count=100,
+        )
+
+        assert len(acknowledged_task_results) == 100
+        assert all(
+            task_result.status is TaskResultStatus.SUCCESSFUL
+            for task_result in acknowledged_task_results
+        )
+        assert {task_result.id for task_result in acknowledged_task_results} == {
+            f"cpu-task-{task_index}" for task_index in range(100)
+        }
+
+    @pytest.mark.integration
+    def test_execute_cpu_heavy_task_pipeline__process_failures_without_data_loss(
+        self,
+    ) -> None:
+        """Process failing CPU heavy tasks while acknowledging all task results."""
+        acknowledged_task_results = execute_cpu_heavy_task_pipeline(
+            task_result_generator=create_cpu_heavy_task_result_generator(
+                task_count=100,
+                fail_every_count=15,
+            ),
+            task_result_count=100,
+        )
+
+        assert len(acknowledged_task_results) == 100
+        assert (
+            sum(
+                task_result.status is TaskResultStatus.FAILED
+                for task_result in acknowledged_task_results
+            )
+            == 7
+        )
+        assert (
+            sum(
+                task_result.status is TaskResultStatus.SUCCESSFUL
+                for task_result in acknowledged_task_results
+            )
+            == 93
+        )
+
+    @pytest.mark.integration
+    @pytest.mark.benchmark
+    def test_execute_task_pipeline__benchmark_successful_task(self, benchmark) -> None:
+        """Benchmark successful task processing in executor pipeline."""
+        benchmark.pedantic(
+            execute_cpu_heavy_task_pipeline_for_benchmark,
+            kwargs={
+                "task_count": 100,
+                "fail_every_count": 0,
+            },
+            rounds=1,
+            iterations=1,
+            warmup_rounds=0,
+        )
+
+    @pytest.mark.integration
+    @pytest.mark.benchmark
+    def test_execute_task_pipeline__benchmark_failed_task(self, benchmark) -> None:
+        """Benchmark failed task processing in executor pipeline."""
+        benchmark.pedantic(
+            execute_cpu_heavy_task_pipeline_for_benchmark,
+            kwargs={
+                "task_count": 100,
+                "fail_every_count": 15,
+            },
+            rounds=1,
+            iterations=1,
+            warmup_rounds=0,
+        )
 
 
 class TestWorkerThread:
