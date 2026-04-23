@@ -15,7 +15,7 @@
 
 **A queue agnostic worker for Django's task framework.**
 
-- self-healing workers
+- durable, self-healing workers
 - graceful shutdown
 - CPU, IO, or memory optimized workers
 
@@ -53,6 +53,5 @@ The executor currently consumes tasks from a Python `queue.PriorityQueue`.
 
 - `--backends` and `--queues` are accepted but not used yet.
 - Queue items must be `django.tasks.TaskResult` or `(priority, TaskResult)`.
-
 
 [django-tasks]: https://docs.djangoproject.com/en/6.0/topics/tasks/
