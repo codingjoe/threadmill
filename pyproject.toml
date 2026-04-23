@@ -102,6 +102,7 @@ dev = [
 test = [
   "pytest",
   "pytest-benchmark",
+  "pytest-asyncio",
   "pytest-cov",
   "pytest-django",
 ]

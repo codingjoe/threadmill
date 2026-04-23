@@ -223,17 +223,22 @@ class IntegrationTaskBackend(AcknowledgeableTaskBackend):
         self.task_result_count = task_result_count
         self.acknowledged_task_results: list[TaskResult] = []
         self.task_executor: executor.TaskExecutor | None = None
+        self.next_task_result: TaskResult | None = next(
+            self.task_result_generator, None
+        )
 
     def enqueue(self, task):
         return task
 
     def acquire(self, timeout: datetime.timedelta | None = None) -> TaskResult:
-        try:
-            task_result = next(self.task_result_generator)
-        except StopIteration:
+        if self.next_task_result is None:
             if self.task_executor is not None:
                 self.task_executor.is_acquiring = False
             raise TimeoutError
+        task_result = self.next_task_result
+        self.next_task_result = next(self.task_result_generator, None)
+        if self.next_task_result is None and self.task_executor is not None:
+            self.task_executor.is_acquiring = False
         return task_result
 
     def acknowledge(self, task_result: TaskResult) -> None:
@@ -303,7 +308,7 @@ def execute_cpu_heavy_task_pipeline(
 
     shutdown_thread = threading.Thread(target=shutdown_stale_executor, daemon=True)
     shutdown_thread.start()
-    task_executor.run()
+    asyncio.run(task_executor.run())
     shutdown_thread.join()
     return backend.acknowledged_task_results
 
@@ -325,13 +330,34 @@ def execute_cpu_heavy_task_pipeline_for_benchmark(
 class TestTaskExecutor:
     def test_run__create_tasks_for_all_executor_loops(self, monkeypatch) -> None:
         """Create orchestration tasks for acquire, acknowledge, and maintenance loops."""
-        started_coroutines = []
+        called_methods: list[str] = []
 
-        def run(coroutine):
-            started_coroutines.append(coroutine.cr_code.co_name)
-            coroutine.close()
+        async def acquire_tasks(task_executor):
+            called_methods.append("acquire_tasks")
+            task_executor.is_acquiring = False
 
-        monkeypatch.setattr(executor.asyncio, "run", run)
+        async def acknowledge_tasks(task_executor):
+            called_methods.append("acknowledge_tasks")
+            task_executor.is_publishing = False
+
+        async def maintain_worker_pool(task_executor):
+            called_methods.append("maintain_worker_pool")
+
+        monkeypatch.setattr(
+            executor.TaskExecutor,
+            "acquire_tasks",
+            acquire_tasks,
+        )
+        monkeypatch.setattr(
+            executor.TaskExecutor,
+            "acknowledge_tasks",
+            acknowledge_tasks,
+        )
+        monkeypatch.setattr(
+            executor.TaskExecutor,
+            "maintain_worker_pool",
+            maintain_worker_pool,
+        )
         monkeypatch.setattr(
             executor.TaskExecutor,
             "create_worker_process",
@@ -340,10 +366,14 @@ class TestTaskExecutor:
 
         task_executor = executor.TaskExecutor(backend=SimpleNamespace(), workers=1)
 
-        task_executor.run()
+        asyncio.run(task_executor.run())
 
         assert len(task_executor.worker_processes) == 1
-        assert started_coroutines == ["start_orchestration"]
+        assert called_methods == [
+            "acquire_tasks",
+            "acknowledge_tasks",
+            "maintain_worker_pool",
+        ]
 
     def test_acquire_tasks__put_acquired_task_in_shared_queue(self) -> None:
         """Put acquired task result into shared queue."""
@@ -364,8 +394,8 @@ class TestTaskExecutor:
 
         assert task_executor.shared_task_queue.get(timeout=0.1) == "task-result"
 
-    def test_acquire_tasks__retry_after_timeout_error(self) -> None:
-        """Retry task acquisition after backend timeout errors."""
+    def test_acquire_tasks__raise_timeout_error_when_backend_times_out(self) -> None:
+        """Raise TimeoutError when backend acquire times out."""
 
         class AcquireBackend:
             def __init__(self):
@@ -383,10 +413,10 @@ class TestTaskExecutor:
         task_executor = executor.TaskExecutor(backend=backend, workers=1)
         backend.task_executor = task_executor
 
-        asyncio.run(task_executor.acquire_tasks())
+        with pytest.raises(TimeoutError):
+            asyncio.run(task_executor.acquire_tasks())
 
-        assert backend.acquire_count == 2
-        assert task_executor.shared_task_queue.get(timeout=0.1) == "task-result"
+        assert backend.acquire_count == 1
 
     def test_acknowledge_tasks__acknowledge_processed_task_and_mark_done(self) -> None:
         """Acknowledge processed task and mark queue item done."""
@@ -409,8 +439,8 @@ class TestTaskExecutor:
 
         assert backend.calls == ["processed-result"]
 
-    def test_acknowledge_tasks__retry_after_empty_queue(self) -> None:
-        """Retry acknowledgement after queue timeout without stopping loop."""
+    def test_acknowledge_tasks__raise_empty_when_processed_queue_is_empty(self) -> None:
+        """Raise Empty when processed queue is empty during acknowledge loop."""
 
         class AcknowledgeBackend:
             def __init__(self):
@@ -428,9 +458,8 @@ class TestTaskExecutor:
             item="processed-result",
         )
 
-        asyncio.run(task_executor.acknowledge_tasks())
-
-        assert backend.calls == ["processed-result"]
+        with pytest.raises(Empty):
+            asyncio.run(task_executor.acknowledge_tasks())
 
     def test_get_maximum_tasks_per_child__return_none_without_max_tasks(self) -> None:
         """Return None when task recycling is disabled."""

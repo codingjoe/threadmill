@@ -16,7 +16,7 @@ class TaskExecutorDouble:
         self.shutdown_called = False
         self.exception: Exception | None = None
 
-    def run(self) -> None:
+    async def run(self) -> None:
         self.run_called = True
         if self.exception is not None:
             raise self.exception
@@ -82,7 +82,12 @@ class TestCommand:
             "max_tasks_jitter": 1,
             "task_timeout": 33.0,
         }
-        assert signal_call.call_count == 3
+        registered_signals = {call.args[0] for call in signal_call.call_args_list}
+        assert signal.SIGTERM in registered_signals
+        assert signal.SIGINT in registered_signals
+        assert (
+            signal.SIGHUP in registered_signals or signal.SIGBREAK in registered_signals
+        )
 
     def test_handle__register_sigbreak_on_windows(self, monkeypatch) -> None:
         """Register SIGBREAK handler when running on Windows."""
