@@ -82,7 +82,10 @@ DATABASES = {
     }
 }
 
-TASKS = {"default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"}}
+TASKS = {
+    "default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"},
+    "cpu": {"BACKEND": "tests.testapp.backends.CPUHeavyTaskBackend"},
+}
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators

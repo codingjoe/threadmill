@@ -68,6 +68,11 @@ class Command(BaseCommand):
             default=3600.0,
             help="Kill hung tasks after timeout seconds. Defaults to one hour.",
         )
+        parser.add_argument(
+            "--exit-empty",
+            action="store_true",
+            help="Drain the task queue and exit.",
+        )
 
     def handle(
         self,
@@ -80,6 +85,7 @@ class Command(BaseCommand):
         max_tasks,
         max_tasks_jitter,
         task_timeout,
+        exit_empty,
         **options,
     ):
         match sys.platform:
@@ -99,6 +105,7 @@ class Command(BaseCommand):
             max_tasks=max_tasks,
             max_tasks_jitter=max_tasks_jitter,
             task_timeout=task_timeout,
+            exit_empty=exit_empty,
         )
         try:
             asyncio.run(exe.run())

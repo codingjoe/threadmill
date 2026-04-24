@@ -48,6 +48,7 @@ class TaskExecutor:
     processed_task_queue: multiprocessing.JoinableQueue[TaskResult] = dataclasses.field(
         init=False
     )
+    exit_empty: bool = False
 
     def __post_init__(self) -> None:
         """Initialize derived orchestration fields and queues."""
@@ -91,7 +92,13 @@ class TaskExecutor:
     async def acquire_tasks(self) -> None:
         """Buffer tasks in shared task queue."""
         while self.is_acquiring:
-            self.shared_task_queue.put(self.backend.acquire())
+            try:
+                work = self.backend.acquire()
+            except Empty:
+                if self.exit_empty:
+                    self.shutdown()
+            else:
+                self.shared_task_queue.put(work)
 
     async def acknowledge_tasks(self) -> None:
         """Acknowledge processed tasks and publish updated results in main process."""

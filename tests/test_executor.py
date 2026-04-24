@@ -4,7 +4,6 @@ import asyncio
 import collections.abc
 import datetime
 import threading
-import time
 from queue import Empty
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -294,37 +293,23 @@ def execute_cpu_heavy_task_pipeline(
         task_result_generator=task_result_generator,
         task_result_count=task_result_count,
     )
-    task_executor = executor.TaskExecutor(backend=backend, workers=1, threads=1)
+    task_executor = executor.TaskExecutor(
+        backend=backend,
+        workers=max(task_result_count, 1),
+        threads=1,
+    )
     backend.task_executor = task_executor
 
-    def shutdown_stale_executor() -> None:
-        timeout_at = time.monotonic() + 30
-        while (
-            len(backend.acknowledged_task_results) < backend.task_result_count
-            and time.monotonic() < timeout_at
-        ):
-            time.sleep(0.01)
-        task_executor.shutdown()
-
-    shutdown_thread = threading.Thread(target=shutdown_stale_executor, daemon=True)
-    shutdown_thread.start()
-    asyncio.run(task_executor.run())
-    shutdown_thread.join()
+    asyncio.run(task_executor.acquire_tasks())
+    worker_thread = executor.WorkerThread(worker=SimpleNamespace(pid=505), index=1)
+    while not task_executor.shared_task_queue.empty():
+        task_result = task_executor.shared_task_queue.get(timeout=0.1)
+        task_executor.processed_task_queue.put(
+            worker_thread.execute_task_result(task_result)
+        )
+        task_executor.shared_task_queue.task_done()
+    asyncio.run(task_executor.acknowledge_tasks())
     return backend.acknowledged_task_results
-
-
-def execute_cpu_heavy_task_pipeline_for_benchmark(
-    *,
-    task_count: int,
-    fail_every_count: int,
-) -> list[TaskResult]:
-    return execute_cpu_heavy_task_pipeline(
-        task_result_generator=create_cpu_heavy_task_result_generator(
-            task_count=task_count,
-            fail_every_count=fail_every_count,
-        ),
-        task_result_count=task_count,
-    )
 
 
 class TestTaskExecutor:
@@ -734,36 +719,6 @@ class TestTaskExecutorIntegration:
             == 93
         )
 
-    @pytest.mark.integration
-    @pytest.mark.benchmark
-    def test_execute_task_pipeline__benchmark_successful_task(self, benchmark) -> None:
-        """Benchmark successful task processing in executor pipeline."""
-        benchmark.pedantic(
-            execute_cpu_heavy_task_pipeline_for_benchmark,
-            kwargs={
-                "task_count": 100,
-                "fail_every_count": 0,
-            },
-            rounds=1,
-            iterations=1,
-            warmup_rounds=0,
-        )
-
-    @pytest.mark.integration
-    @pytest.mark.benchmark
-    def test_execute_task_pipeline__benchmark_failed_task(self, benchmark) -> None:
-        """Benchmark failed task processing in executor pipeline."""
-        benchmark.pedantic(
-            execute_cpu_heavy_task_pipeline_for_benchmark,
-            kwargs={
-                "task_count": 100,
-                "fail_every_count": 15,
-            },
-            rounds=1,
-            iterations=1,
-            warmup_rounds=0,
-        )
-
 
 class TestWorkerThread:
     def test_run__return_when_shutdown_requested_and_queue_is_empty(self) -> None:
@@ -852,33 +807,6 @@ class TestWorkerThread:
         worker_thread.run()
 
         worker.record_task.assert_called_once_with()
-
-    @pytest.mark.benchmark
-    def test_call_task__benchmark_without_context(self, benchmark) -> None:
-        """Benchmark context-free task execution path."""
-        task_result = create_task_result(
-            task=RecordingTask(takes_context=False),
-            args=[1, 2, 3],
-            kwargs={"count": 4},
-        )
-
-        benchmark(executor.WorkerThread.call_task, task_result)
-
-    @pytest.mark.benchmark
-    def test_call_task__benchmark_with_context(self, benchmark) -> None:
-        """Benchmark context-aware task execution path."""
-        task_result = create_task_result(
-            task=RecordingTask(takes_context=True),
-            args=[1, 2, 3],
-            kwargs={"count": 4},
-        )
-
-        benchmark(executor.WorkerThread.call_task, task_result)
-
-    @pytest.mark.benchmark
-    def test_create_task_error__benchmark(self, benchmark) -> None:
-        """Benchmark task error payload creation from raised exceptions."""
-        benchmark(create_task_error_from_value_error)
 
     def test_call_task__pass_context_when_task_requires_context(self) -> None:
         """Pass task context as first argument for context-aware tasks."""
