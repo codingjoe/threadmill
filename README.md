@@ -47,5 +47,4 @@ Finally, you launch the scheduler in a separate process:
 uv run manage.py grinder
 ```
 
-
 [django-tasks]: https://docs.djangoproject.com/en/6.0/topics/tasks/

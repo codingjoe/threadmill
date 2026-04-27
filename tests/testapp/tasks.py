@@ -1,7 +1,7 @@
 import logging
 
-from grinder import cron
 from django.tasks import task
+from grinder import cron
 
 logger = logging.getLogger(__name__)
 
