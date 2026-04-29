@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime
+import logging
 import multiprocessing
 import random
 import socket
@@ -23,6 +24,8 @@ from django.utils.json import normalize_json
 
 if typing.TYPE_CHECKING:
     from .backends import AcknowledgeableTaskBackend
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -153,21 +156,16 @@ class WorkerProcess(multiprocessing.Process):
 
     def run(self) -> None:
         """Start consumer execution inside this process."""
+        logger.info("Starting worker process %s", self.name)
         self.lock = threading.Lock()
         self.expired = threading.Event()
-        self.run_worker_process(self)
-
-    @staticmethod
-    def run_worker_process(worker: WorkerProcess) -> None:
-        """Run consumer threads in a process that read from shared task queue."""
         consumer_threads = [
-            WorkerThread(worker=worker, index=index)
-            for index in range(worker.thread_count)
+            WorkerThread(worker=self, index=index) for index in range(self.thread_count)
         ]
         for consumer_thread in consumer_threads:
             consumer_thread.start()
         for consumer_thread in consumer_threads:
-            consumer_thread.join(worker.task_timeout.total_seconds())
+            consumer_thread.join(self.task_timeout.total_seconds())
 
     def record_task(self) -> None:
         """Record one processed task and stop when max_tasks is reached."""
@@ -182,6 +180,7 @@ class WorkerProcess(multiprocessing.Process):
 
     def shutdown(self) -> None:
         """Request graceful worker stop and wait for process exit."""
+        logger.info("Stopping worker process %s", self.name)
         self.shutdown_requested.set()
         self.join()
 
@@ -225,6 +224,7 @@ class WorkerThread(threading.Thread):
 
     def execute_task_result(self, task_result: TaskResult) -> TaskResult:
         """Execute task from task result and update result lifecycle state."""
+        logger.info("Executing task %r", task_result.id)
         started_at = timezone.now()
         task_result = dataclasses.replace(
             task_result,
@@ -244,6 +244,7 @@ class WorkerThread(threading.Thread):
                 status=TaskResultStatus.FAILED,
                 errors=[*task_result.errors, WorkerThread.create_task_error(exception)],
             )
+            logger.exception("Task failed %r", task_result.id)
         else:
             task_result = dataclasses.replace(
                 task_result,
@@ -252,6 +253,7 @@ class WorkerThread(threading.Thread):
             object.__setattr__(
                 task_result, "_return_value", normalize_json(return_value)
             )
+            logger.info("Task successful %r", task_result.id)
         finally:
             task_result = dataclasses.replace(
                 task_result,

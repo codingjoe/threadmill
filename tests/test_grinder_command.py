@@ -58,6 +58,7 @@ class TestCommand:
                     verbosity=0,
                     backends="cpu",
                     queues=["default"],
+                    exit_empty=True,
                 )
             finally:
                 signal.setitimer(signal.ITIMER_REAL, 0)

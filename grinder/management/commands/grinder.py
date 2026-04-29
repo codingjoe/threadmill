@@ -1,4 +1,6 @@
 import asyncio
+import datetime
+import logging
 import signal
 import sys
 
@@ -88,6 +90,12 @@ class Command(BaseCommand):
         exit_empty,
         **options,
     ):
+        console = logging.StreamHandler()
+        logging.basicConfig(
+            level=max(10, 10 * (4 - verbosity)),
+            handlers=[console],
+        )
+        logging.getLogger("grinder").setLevel(max(10, 10 * (3 - verbosity)))
         match sys.platform:
             case "win32":
                 signal.signal(signal.SIGBREAK, kill_softly)
@@ -104,7 +112,7 @@ class Command(BaseCommand):
             threads=threads,
             max_tasks=max_tasks,
             max_tasks_jitter=max_tasks_jitter,
-            task_timeout=task_timeout,
+            task_timeout=datetime.timedelta(seconds=task_timeout),
             exit_empty=exit_empty,
         )
         try:
