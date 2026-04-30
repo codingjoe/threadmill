@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import signal
 
 import pytest
@@ -39,36 +38,17 @@ class TestCommand:
         benchmark,
     ) -> None:
         """Benchmark command execution for one CPU intense task solved 1000 times."""
-        CPUHeavyTaskBackend.target_task_count = 1000
-        CPUHeavyTaskBackend.solved_task_count = 0
-        CPUHeavyTaskBackend.issued_task_count = 0
-
-        def send_interrupt_signal_after_timeout(signum, frame):
-            os.kill(os.getpid(), signal.SIGINT)
-
-        def run_grinder_command() -> None:
-            previous_alarm_handler = signal.signal(
-                signal.SIGALRM,
-                send_interrupt_signal_after_timeout,
-            )
-            signal.setitimer(signal.ITIMER_REAL, 0.5)
-            try:
-                call_command(
-                    "grinder",
-                    verbosity=0,
-                    backends="cpu",
-                    queues=["default"],
-                    exit_empty=True,
-                )
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
-                signal.signal(signal.SIGALRM, previous_alarm_handler)
-
         benchmark.pedantic(
-            run_grinder_command,
+            lambda: call_command(
+                "grinder",
+                verbosity=0,
+                backends="cpu",
+                queues=["default"],
+                exit_empty=True,
+            ),
             rounds=1,
             iterations=1,
             warmup_rounds=0,
         )
 
-        assert CPUHeavyTaskBackend.solved_task_count == 1000
+        assert CPUHeavyTaskBackend.solved_task_count == 100

@@ -33,7 +33,7 @@ classifiers = [
   "Framework :: Django :: 6.0",
 ]
 requires-python = ">=3.12"
-dependencies = ["django>=6.0"]
+dependencies = ["django @ git+https://github.com/django/django.git@main#egg=django"]
 
 [project.urls]
 # https://packaging.python.org/en/latest/specifications/well-known-project-urls/#well-known-labels

@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-import logging
 import signal
 import sys
 
@@ -90,12 +89,6 @@ class Command(BaseCommand):
         exit_empty,
         **options,
     ):
-        console = logging.StreamHandler()
-        logging.basicConfig(
-            level=max(10, 10 * (4 - verbosity)),
-            handlers=[console],
-        )
-        logging.getLogger("grinder").setLevel(max(10, 10 * (3 - verbosity)))
         match sys.platform:
             case "win32":
                 signal.signal(signal.SIGBREAK, kill_softly)
@@ -103,7 +96,7 @@ class Command(BaseCommand):
                 signal.signal(signal.SIGHUP, kill_softly)
         signal.signal(signal.SIGTERM, kill_softly)
         signal.signal(signal.SIGINT, kill_softly)
-        self.stdout.write(self.style.SUCCESS("Starting worker…"))
+        self.stdout.write(self.style.SUCCESS("Starting workers…"))
         backend_alias = backends[0] if isinstance(backends, list) else backends
         backend = task_backends[backend_alias]
         exe = TaskExecutor(
@@ -119,5 +112,5 @@ class Command(BaseCommand):
             asyncio.run(exe.run())
         except KeyboardInterrupt as e:
             self.stdout.write(self.style.WARNING(str(e)))
-            self.stdout.write(self.style.NOTICE("Shutting down scheduler…"))
+            self.stdout.write(self.style.NOTICE("Shutting down workers…"))
             exe.shutdown()

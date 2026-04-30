@@ -28,7 +28,7 @@ def cpu_heavy_task():
 
     prime_count = 0
     number = 2
-    while prime_count < 1000:
+    while prime_count < 100_000:
         if is_prime(number):
             prime_count += 1
         number += 1

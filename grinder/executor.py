@@ -11,6 +11,7 @@ import random
 import socket
 import threading
 import typing
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from multiprocessing.queues import JoinableQueue
 from queue import Empty
@@ -25,7 +26,15 @@ from django.utils.json import normalize_json
 if typing.TYPE_CHECKING:
     from .backends import AcknowledgeableTaskBackend
 
-logger = logging.getLogger(__name__)
+
+logger = multiprocessing.get_logger()
+formatter = logging.Formatter(
+    "%(levelname)s: %(asctime)s - pid=%(process)s - %(message)s"
+)
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -87,9 +96,9 @@ class TaskExecutor:
             self.create_worker_process() for _ in range(self.process_count)
         ]
         await asyncio.gather(
-            asyncio.create_task(self.acquire_tasks()),
             asyncio.create_task(self.acknowledge_tasks()),
             asyncio.create_task(self.maintain_worker_pool()),
+            asyncio.create_task(self.acquire_tasks()),
         )
 
     async def acquire_tasks(self) -> None:
@@ -99,25 +108,34 @@ class TaskExecutor:
                 work = self.backend.acquire()
             except Empty:
                 if self.exit_empty:
-                    self.shutdown()
+                    logger.info("No more tasks to solve. Shutting down.")
+                    loop = asyncio.get_running_loop()
+                    loop.run_in_executor(None, self.shutdown)
+                await asyncio.sleep(0.01)
             else:
                 self.shared_task_queue.put(work)
 
     async def acknowledge_tasks(self) -> None:
         """Acknowledge processed tasks and publish updated results in main process."""
         while self.is_publishing:
-            self.backend.acknowledge(self.processed_task_queue.get(block=True))
-            self.processed_task_queue.task_done()
+            try:
+                task = self.processed_task_queue.get_nowait()
+            except Empty:
+                await asyncio.sleep(0.01)
+            else:
+                self.backend.acknowledge(task)
+                self.processed_task_queue.task_done()
 
     def shutdown(self) -> None:
         """Stop queue consumption and terminate all worker processes."""
+        logger.info("Shutting down task executor")
         self.is_acquiring = False
         with suppress(ValueError):
             self.shared_task_queue.join()
-        for worker in self.worker_processes:
-            worker.shutdown()
         with suppress(ValueError):
             self.processed_task_queue.join()
+        with ThreadPoolExecutor(max_workers=self.process_count) as executor:
+            executor.map(lambda worker: worker.shutdown(), self.worker_processes)
         self.is_publishing = False
 
     async def maintain_worker_pool(self) -> None:
@@ -128,7 +146,7 @@ class TaskExecutor:
                     continue
                 worker.join(timeout=0)
                 self.worker_processes[index] = self.create_worker_process()
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(1)
 
 
 class WorkerProcess(multiprocessing.Process):

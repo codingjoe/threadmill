@@ -1,8 +1,9 @@
-import uuid
+from queue import Empty
 
 from django.tasks import TaskResult, TaskResultStatus
 from django.utils import timezone
-from grinder.backends import AcknowledgeableTaskBackend, SerializableTaskResult
+from django.utils.module_loading import import_string
+from grinder.backends import AcknowledgeableTaskBackend
 
 
 class CPUHeavyTaskBackend(AcknowledgeableTaskBackend):
@@ -18,11 +19,11 @@ class CPUHeavyTaskBackend(AcknowledgeableTaskBackend):
         CPUHeavyTaskBackend.solved_task_count = 0
         CPUHeavyTaskBackend.issued_task_count = 0
         self._task_generator = (
-            SerializableTaskResult(
-                task_path="tests.testapp.tasks.cpu_heavy_task",
+            TaskResult(
+                task=import_string("tests.testapp.tasks.cpu_heavy_task"),
                 enqueued_at=timezone.now(),
                 status=TaskResultStatus.READY,
-                id=str(uuid.uuid4()),
+                id=str(i + 1),
                 args=[],
                 kwargs={},
                 worker_ids=[],
@@ -32,7 +33,7 @@ class CPUHeavyTaskBackend(AcknowledgeableTaskBackend):
                 backend=self.alias,
                 last_attempted_at=None,
             )
-            for _ in range(CPUHeavyTaskBackend.target_task_count)
+            for i in range(CPUHeavyTaskBackend.target_task_count)
         )
 
     def enqueue(self, task):
@@ -44,10 +45,8 @@ class CPUHeavyTaskBackend(AcknowledgeableTaskBackend):
         CPUHeavyTaskBackend.issued_task_count += 1
         try:
             return next(self._task_generator)
-        except StopIteration:
-            raise TimeoutError("No tasks available within the specified timeout.")
-        finally:
-            self._task_generator = None
+        except StopIteration as e:
+            raise Empty("No more tasks to solve.") from e
 
     def acknowledge(self, task_result: TaskResult) -> None:
         CPUHeavyTaskBackend.solved_task_count += 1
