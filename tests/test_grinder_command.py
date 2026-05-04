@@ -5,9 +5,8 @@ import signal
 
 import pytest
 from django.core.management import call_command
+from django.tasks import default_task_backend
 from grinder.management.commands import grinder
-
-from tests.testapp.backends import CPUHeavyTaskBackend
 
 
 class TestKillSoftly:
@@ -33,17 +32,17 @@ class TestCommand:
         assert parsed_arguments.task_timeout == 3600.0
 
     @pytest.mark.benchmark
-    def test_call_command__benchmark_cpu_intense_task_1000_times(
+    def test_call_command__benchmark_compute(
         self,
         benchmark,
     ) -> None:
-        """Benchmark command execution for one CPU intense task solved 1000 times."""
+        """Benchmark command execution for one CPU intense task solved 100 times."""
+        default_task_backend.reset()
         benchmark.pedantic(
             lambda: call_command(
                 "grinder",
                 verbosity=0,
-                backends="cpu",
-                queues=["default"],
+                queues=["compute"],
                 exit_empty=True,
             ),
             rounds=1,
@@ -51,4 +50,68 @@ class TestCommand:
             warmup_rounds=0,
         )
 
-        assert CPUHeavyTaskBackend.solved_task_count == 100
+        assert default_task_backend.solved_task_count == 100
+
+    @pytest.mark.benchmark
+    def test_call_command__benchmark_io(
+        self,
+        benchmark,
+    ) -> None:
+        """Benchmark command execution for one CPU intense task solved 100 times."""
+        default_task_backend.reset()
+        benchmark.pedantic(
+            lambda: call_command(
+                "grinder",
+                verbosity=0,
+                queues=["io"],
+                threads=6,
+                exit_empty=True,
+            ),
+            rounds=1,
+            iterations=1,
+            warmup_rounds=0,
+        )
+
+        assert default_task_backend.solved_task_count == 100
+
+    @pytest.mark.benchmark
+    def test_call_command__benchmark_compute_and_io(
+        self,
+        benchmark,
+    ) -> None:
+        """Benchmark command execution for one CPU intense task solved 100 times."""
+        default_task_backend.reset()
+        benchmark.pedantic(
+            lambda: call_command(
+                "grinder",
+                verbosity=0,
+                queues=["compute", "io"],
+                exit_empty=True,
+                threads=2,
+            ),
+            rounds=1,
+            iterations=1,
+            warmup_rounds=0,
+        )
+
+        assert default_task_backend.solved_task_count == 200
+
+    @pytest.mark.benchmark
+    def test_call_command__benchmark_memory_leak_recovery(
+        self,
+        benchmark,
+    ) -> None:
+        """Benchmark command execution for one CPU intense task solved 100 times."""
+        default_task_backend.reset(1000)
+        benchmark.pedantic(
+            lambda: call_command(
+                "grinder",
+                verbosity=0,
+                queues=["memory"],
+                exit_empty=True,
+                # max_tasks=10,
+            ),
+            rounds=1,
+            iterations=1,
+            warmup_rounds=0,
+        )

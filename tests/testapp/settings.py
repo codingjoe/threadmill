@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 
+from django.tasks import DEFAULT_TASK_QUEUE_NAME
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -83,8 +85,10 @@ DATABASES = {
 }
 
 TASKS = {
-    "default": {"BACKEND": "django.tasks.backends.immediate.ImmediateBackend"},
-    "cpu": {"BACKEND": "tests.testapp.backends.CPUHeavyTaskBackend"},
+    "default": {
+        "BACKEND": "tests.testapp.backends.GeneratingTaskBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory"],
+    },
 }
 
 # Password validation

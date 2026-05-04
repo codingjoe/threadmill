@@ -10,11 +10,14 @@ from django.tasks.backends.base import BaseTaskBackend
 class AcknowledgeableTaskBackend(BaseTaskBackend, ABC):
     """Provide an interface for tasks queues to be processed by the executor."""
 
-    def acquire(self, timeout: datetime.timedelta | None = None) -> TaskResult:
+    def acquire(
+        self, *queue_names: str, timeout: datetime.timedelta | None = None
+    ) -> TaskResult:
         """
         Return and lock the next task to be processed without removing it from the queue.
 
         Args:
+            queue_names: The names of the queues to acquire tasks from.
             timeout: The maximum time to wait for a task. If None, wait indefinitely.
 
         Raises:

@@ -1,4 +1,3 @@
-import asyncio
 import datetime
 import signal
 import sys
@@ -10,7 +9,7 @@ from ...executor import TaskExecutor
 
 
 def kill_softly(signum, frame):
-    """Raise a KeyboardInterrupt to stop the scheduler and release the lock."""
+    """Raise a KeyboardInterrupt to stop the worker gracefully."""
     signame = signal.Signals(signum).name
     raise KeyboardInterrupt(f"Received {signame} ({signum}), shutting down…")
 
@@ -72,7 +71,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--exit-empty",
             action="store_true",
-            help="Drain the task queue and exit.",
+            help="Drain the task queue and exit with 0.",
         )
 
     def handle(
@@ -99,6 +98,11 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("Starting workers…"))
         backend_alias = backends[0] if isinstance(backends, list) else backends
         backend = task_backends[backend_alias]
+        if not set(queues).issubset(backend.queues):
+            self.stderr.write(
+                self.style.ERROR("Backend does not support all specified queues.")
+            )
+            exit(1)
         exe = TaskExecutor(
             backend=backend,
             workers=workers,
@@ -107,9 +111,10 @@ class Command(BaseCommand):
             max_tasks_jitter=max_tasks_jitter,
             task_timeout=datetime.timedelta(seconds=task_timeout),
             exit_empty=exit_empty,
+            queues=queues,
         )
         try:
-            asyncio.run(exe.run())
+            exe.run()
         except KeyboardInterrupt as e:
             self.stdout.write(self.style.WARNING(str(e)))
             self.stdout.write(self.style.NOTICE("Shutting down workers…"))
