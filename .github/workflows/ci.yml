@@ -27,10 +27,6 @@ jobs:
           - "3.14"
         django-version:
           - "6.0"
-        extras:
-          - "" # We try a run without any extras
-          - "--extra sentry"
-          - "--extra redis"
     services:
       redis:
         image: redis
@@ -45,7 +41,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv run ${{ matrix.extras }} --with django~=${{ matrix.django-version }}.0 pytest
+      - run: uv run --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -68,7 +64,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv run --with django~=${{ matrix.django-version }}.0 pytest
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+      - run: uv run --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"

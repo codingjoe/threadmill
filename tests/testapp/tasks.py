@@ -36,7 +36,7 @@ def compute_workload():
 @task(queue_name="io")
 async def io_workload():
     """Sleep for a random amount of time."""
-    await asyncio.sleep(random.uniform(0.1, 0.5))
+    await asyncio.sleep(random.uniform(0.1, 0.5))  # noqa: S311
 
 
 leak = {}

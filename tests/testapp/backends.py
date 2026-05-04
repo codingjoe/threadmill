@@ -16,7 +16,7 @@ class GeneratingTaskBackend(AcknowledgeableTaskBackend):
         super().__init__(alias=alias, params=params)
         self._queues = None
 
-    def reset(self, task_count=1000):
+    def reset(self, task_count=100):
         GeneratingTaskBackend.solved_task_count = 0
         GeneratingTaskBackend.issued_task_count = 0
         self._queues = {

@@ -12,7 +12,6 @@ import socket
 import threading
 import time
 import typing
-from asyncio import iscoroutine
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from inspect import iscoroutinefunction
