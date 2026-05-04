@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 import logging
@@ -11,8 +12,10 @@ import socket
 import threading
 import time
 import typing
+from asyncio import iscoroutine
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from inspect import iscoroutinefunction
 from multiprocessing.queues import JoinableQueue
 from queue import Empty
 from traceback import format_exception
@@ -291,12 +294,15 @@ class WorkerThread(threading.Thread):
         """Call a task with context when required."""
         task = task_result.task
         if task.takes_context:
-            return task.call(
-                TaskContext(task_result=task_result),
-                *task_result.args,
-                **task_result.kwargs,
-            )
-        return task.call(*task_result.args, **task_result.kwargs)
+            args = [TaskContext(task_result=task_result), *task_result.args]
+        else:
+            args = task_result.args
+        if iscoroutinefunction(task.func):
+            return asyncio.run(task.func(*args, **task_result.kwargs))
+        return task.func(
+            *args,
+            **task_result.kwargs,
+        )
 
     @staticmethod
     def create_task_error(exception: BaseException) -> TaskError:
