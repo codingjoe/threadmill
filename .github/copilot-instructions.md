@@ -5,3 +5,5 @@ Use the following command to access the guidelines:
 ```console
 curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/main/README.md | cat
 ```
+
+Read the CONTRIBUTING.md file for more information.

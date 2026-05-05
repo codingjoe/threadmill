@@ -166,7 +166,10 @@ cython_debug/
 
 # Packaging
 
-grinder/_version.py
+threadmill/_version.py
 
 # uv
 uv.lock
+
+# pytest-benchmark
+.benchmarks/
