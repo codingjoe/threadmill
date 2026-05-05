@@ -46,3 +46,10 @@ leak = {}
 def memory_workload():
     """Allocate and leak 100MB of memory."""
     leak[uuid.uuid4()] = "x" * 1024 * 1024 * 100
+
+
+@task()
+def random_crash():
+    """Raise a random exception."""
+    if random.random() < 0.75:  # noqa: S311
+        exit(1)

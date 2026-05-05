@@ -10,14 +10,14 @@ from threadmill.management.commands import threadmill
 
 
 class TestKillSoftly:
-    def test_kill_softly__raise_keyboard_interrupt_with_signal_name(self) -> None:
+    def test_kill_softly__raise_keyboard_interrupt_with_signal_name(self):
         """Raise KeyboardInterrupt with signal metadata in message."""
         with pytest.raises(KeyboardInterrupt, match="SIGINT"):
             threadmill.kill_softly(signal.SIGINT, None)
 
 
 class TestCommand:
-    def test_add_arguments__register_all_worker_options(self) -> None:
+    def test_add_arguments__register_all_worker_options(self):
         """Register command arguments for worker runtime configuration."""
         parser = argparse.ArgumentParser()
 
@@ -35,7 +35,7 @@ class TestCommand:
     def test_call_command__benchmark_compute(
         self,
         benchmark,
-    ) -> None:
+    ):
         """Benchmark command execution for one CPU intense task solved 100 times."""
         default_task_backend.reset()
         benchmark.pedantic(
@@ -56,7 +56,7 @@ class TestCommand:
     def test_call_command__benchmark_io(
         self,
         benchmark,
-    ) -> None:
+    ):
         """Benchmark command execution for one CPU intense task solved 100 times."""
         default_task_backend.reset()
         benchmark.pedantic(
@@ -78,7 +78,7 @@ class TestCommand:
     def test_call_command__benchmark_compute_and_io(
         self,
         benchmark,
-    ) -> None:
+    ):
         """Benchmark command execution for one CPU intense task solved 100 times."""
         default_task_backend.reset()
         benchmark.pedantic(
@@ -100,7 +100,7 @@ class TestCommand:
     def test_call_command__benchmark_memory_leak_recovery(
         self,
         benchmark,
-    ) -> None:
+    ):
         """Benchmark command execution for one CPU intense task solved 100 times."""
         default_task_backend.reset(1000)
         benchmark.pedantic(
@@ -114,4 +114,22 @@ class TestCommand:
             rounds=1,
             iterations=1,
             warmup_rounds=0,
+        )
+
+    @pytest.mark.benchmark
+    def test_call_command__benchmark_random_crash(self, benchmark):
+        """Benchmark command execution for one CPU intense task solved 100 times."""
+        default_task_backend.reset()
+        benchmark.pedantic(
+            lambda: call_command(
+                "threadmill",
+                verbosity=0,
+                exit_empty=True,
+            ),
+            rounds=1,
+            iterations=1,
+            warmup_rounds=0,
+        )
+        assert default_task_backend.issued_task_count == 100, (
+            "All tasks should be issued."
         )

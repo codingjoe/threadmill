@@ -20,6 +20,23 @@ class GeneratingTaskBackend(AcknowledgeableTaskBackend):
         GeneratingTaskBackend.solved_task_count = 0
         GeneratingTaskBackend.issued_task_count = 0
         self._queues = {
+            "default": [
+                TaskResult(
+                    task=import_string("tests.testapp.tasks.random_crash"),
+                    enqueued_at=timezone.now(),
+                    status=TaskResultStatus.READY,
+                    id=f"default-{i + 1}",
+                    args=[],
+                    kwargs={},
+                    worker_ids=[],
+                    started_at=None,
+                    finished_at=None,
+                    errors=[],
+                    backend=self.alias,
+                    last_attempted_at=None,
+                )
+                for i in range(task_count)
+            ],
             "compute": [
                 TaskResult(
                     task=import_string("tests.testapp.tasks.compute_workload"),
@@ -86,6 +103,7 @@ class GeneratingTaskBackend(AcknowledgeableTaskBackend):
             for queue in sorted(queues, key=len, reverse=True):
                 return queue.pop(0)
         except IndexError as e:
+            GeneratingTaskBackend.issued_task_count -= 1
             raise Empty("No more tasks to solve.") from e
         raise Empty("No more tasks to solve.")
 
