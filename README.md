@@ -21,6 +21,9 @@
 - **Consistency** – We never lose data, even if someone unplugs the power or network.
 - **Utilization** – We keep the CPU saturated with tasks, not with idle time or waiting for locks.
 
+> [!WARNING]
+> Threadmill requires a development version of Django and is in a preview stage.
+
 [![PyPi Version](https://img.shields.io/pypi/v/threadmill.svg)](https://pypi.python.org/pypi/threadmill/)
 [![Test Coverage](https://codecov.io/gh/codingjoe/threadmill/branch/main/graph/badge.svg)](https://codecov.io/gh/codingjoe/threadmill)
 [![GitHub License](https://img.shields.io/github/license/codingjoe/threadmill)](https://raw.githubusercontent.com/codingjoe/threadmill/master/LICENSE)
