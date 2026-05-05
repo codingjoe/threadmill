@@ -2,8 +2,13 @@ import datetime
 import signal
 import sys
 
-from django.core.management import BaseCommand
-from django.tasks import task_backends
+from django.core.management import BaseCommand, CommandError
+from django.tasks import (
+    DEFAULT_TASK_BACKEND_ALIAS,
+    DEFAULT_TASK_QUEUE_NAME,
+    InvalidTaskBackend,
+    task_backends,
+)
 
 from ...executor import TaskExecutor
 
@@ -22,17 +27,16 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "-b",
-            "--backends",
-            nargs="+",
-            default="default",
+            "--backend",
+            default=DEFAULT_TASK_BACKEND_ALIAS,
             help="Alias of the tasks backend to use.",
         )
         parser.add_argument(
             "-q",
             "--queues",
             nargs="+",
-            default="default",
-            help="Queue names to listen too and process tasks from.",
+            default=[DEFAULT_TASK_QUEUE_NAME],
+            help="Queue names to listen to and process tasks from.",
         )
         parser.add_argument(
             "-w",
@@ -45,7 +49,7 @@ class Command(BaseCommand):
             "--threads",
             type=int,
             default=1,
-            help="Number of threads to use. Defaults to the number of CPU cores minus one. ",
+            help="Number of threads to use. Defaults to 1. ",
         )
         parser.add_argument(
             "--max-tasks",
@@ -84,7 +88,7 @@ class Command(BaseCommand):
         self,
         *,
         verbosity,
-        backends,
+        backend,
         queues,
         workers,
         threads,
@@ -102,13 +106,14 @@ class Command(BaseCommand):
         signal.signal(signal.SIGTERM, kill_softly)
         signal.signal(signal.SIGINT, kill_softly)
         self.stdout.write(self.style.SUCCESS("Starting workers…"))
-        backend_alias = backends[0] if isinstance(backends, list) else backends
-        backend = task_backends[backend_alias]
-        if not set(queues).issubset(backend.queues):
-            self.stderr.write(
-                self.style.ERROR("Backend does not support all specified queues.")
+        try:
+            backend = task_backends[backend]
+        except InvalidTaskBackend:
+            raise CommandError(f"Invalid backend: {backend!r}")
+        if _non_queues := set(queues) - set(backend.queues):
+            raise CommandError(
+                f"Backend does not support all specified queues: {_non_queues!r}"
             )
-            exit(1)
         exe = TaskExecutor(
             backend=backend,
             workers=workers,

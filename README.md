@@ -93,6 +93,9 @@ uv run manage.py threadmill --prefetch 100
 
 ### Task Timeouts
 
+> [!WARNING]
+> Work in progress, this feature is not yet stable.
+
 Task timeouts are important to ensure the long-term health of your pool.
 However, they need to be aligned with your queueing system's timeout settings.
 The message queue needs to requeue a task that hasn't been acknowledged within the timeout.

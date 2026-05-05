@@ -25,6 +25,7 @@ class AcknowledgeableTaskBackend(BaseTaskBackend, ABC):
 
         Raises:
             TimeoutError: If no task is available within the specified timeout.
+            queue.Empty: If no task is available and timeout is None.
         """
         raise NotImplementedError
 

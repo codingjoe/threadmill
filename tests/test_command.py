@@ -109,7 +109,7 @@ class TestCommand:
                 verbosity=0,
                 queues=["memory"],
                 exit_empty=True,
-                # max_tasks=10,
+                max_tasks=10,
             ),
             rounds=1,
             iterations=1,

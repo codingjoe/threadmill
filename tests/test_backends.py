@@ -16,7 +16,7 @@ class TestAcknowledgeableTaskBackend:
         """Raise NotImplementedError for backend acquire API."""
         with pytest.raises(NotImplementedError):
             BackendDouble(alias="default", params={}).acquire(
-                datetime.timedelta(seconds=1)
+                timeout=datetime.timedelta(seconds=1)
             )
 
     def test_acknowledge__raise_not_implemented_error(self) -> None:

@@ -21,7 +21,7 @@ from traceback import format_exception
 
 from django.tasks import TaskResult
 from django.tasks.base import TaskContext, TaskError, TaskResultStatus
-from django.tasks.signals import task_enqueued, task_finished, task_started
+from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
 
@@ -41,7 +41,7 @@ logger.setLevel(logging.INFO)
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class TaskExecutor:
-    """Consume tasks from a priority queue with process and thread pools."""
+    """Consume tasks from shared joinable queues with process and thread pools."""
 
     backend: AcknowledgeableTaskBackend
     workers: int | None = None
@@ -226,11 +226,6 @@ class WorkerThread(threading.Thread):
     def run(self) -> None:
         """Start consuming tasks for this thread."""
         while self.worker.expired is None or not self.worker.expired.is_set():
-            if (
-                self.worker.shutdown_requested.is_set()
-                and self.worker.task_queue.empty()
-            ):
-                return
             try:
                 task_result = self.worker.task_queue.get(timeout=1.0)
             except Empty:
@@ -258,7 +253,6 @@ class WorkerThread(threading.Thread):
             last_attempted_at=started_at,
             worker_ids=[*task_result.worker_ids, self.name],
         )
-        task_enqueued.send(TaskExecutor, task_result=task_result)
         task_started.send(TaskExecutor, task_result=task_result)
 
         try:
