@@ -24,8 +24,8 @@ class TestCommand:
         threadmill.Command().add_arguments(parser)
         parsed_arguments = parser.parse_args([])
 
-        assert parsed_arguments.backends == "default"
-        assert parsed_arguments.queues == "default"
+        assert parsed_arguments.backend == "default"
+        assert parsed_arguments.queues == ["default"]
         assert parsed_arguments.threads == 1
         assert parsed_arguments.max_tasks == 0
         assert parsed_arguments.max_tasks_jitter == 0
