@@ -11,7 +11,6 @@ curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/m
 
 - Consistency – We never lose data, even if someone unplugs the power or network.
 - Durability – We recover from any failures, even poorly written tasks.
-- Overhead – We focus resources on running tasks, not on managing the scheduler.
 - Utilization – We keep the CPU saturated with tasks, not with idle time or waiting for locks.
 
 ## Testing

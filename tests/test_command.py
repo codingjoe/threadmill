@@ -6,14 +6,14 @@ import signal
 import pytest
 from django.core.management import call_command
 from django.tasks import default_task_backend
-from grinder.management.commands import grinder
+from threadmill.management.commands import threadmill
 
 
 class TestKillSoftly:
     def test_kill_softly__raise_keyboard_interrupt_with_signal_name(self) -> None:
         """Raise KeyboardInterrupt with signal metadata in message."""
         with pytest.raises(KeyboardInterrupt, match="SIGINT"):
-            grinder.kill_softly(signal.SIGINT, None)
+            threadmill.kill_softly(signal.SIGINT, None)
 
 
 class TestCommand:
@@ -21,7 +21,7 @@ class TestCommand:
         """Register command arguments for worker runtime configuration."""
         parser = argparse.ArgumentParser()
 
-        grinder.Command().add_arguments(parser)
+        threadmill.Command().add_arguments(parser)
         parsed_arguments = parser.parse_args([])
 
         assert parsed_arguments.backends == "default"
@@ -40,7 +40,7 @@ class TestCommand:
         default_task_backend.reset()
         benchmark.pedantic(
             lambda: call_command(
-                "grinder",
+                "threadmill",
                 verbosity=0,
                 queues=["compute"],
                 exit_empty=True,
@@ -61,7 +61,7 @@ class TestCommand:
         default_task_backend.reset()
         benchmark.pedantic(
             lambda: call_command(
-                "grinder",
+                "threadmill",
                 verbosity=0,
                 queues=["io"],
                 threads=6,
@@ -83,7 +83,7 @@ class TestCommand:
         default_task_backend.reset()
         benchmark.pedantic(
             lambda: call_command(
-                "grinder",
+                "threadmill",
                 verbosity=0,
                 queues=["compute", "io"],
                 exit_empty=True,
@@ -105,7 +105,7 @@ class TestCommand:
         default_task_backend.reset(1000)
         benchmark.pedantic(
             lambda: call_command(
-                "grinder",
+                "threadmill",
                 verbosity=0,
                 queues=["memory"],
                 exit_empty=True,

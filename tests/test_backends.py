@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 
 import pytest
-from grinder.backends import AcknowledgeableTaskBackend
+from threadmill.backends import AcknowledgeableTaskBackend
 
 
 class BackendDouble(AcknowledgeableTaskBackend):

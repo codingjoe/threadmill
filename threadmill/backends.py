@@ -10,6 +10,9 @@ from django.tasks.backends.base import BaseTaskBackend
 class AcknowledgeableTaskBackend(BaseTaskBackend, ABC):
     """Provide an interface for tasks queues to be processed by the executor."""
 
+    supports_async_task = True
+    supports_get_result = True
+
     def acquire(
         self, *queue_names: str, timeout: datetime.timedelta | None = None
     ) -> TaskResult:

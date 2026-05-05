@@ -15,7 +15,7 @@ def kill_softly(signum, frame):
 
 
 class Command(BaseCommand):
-    """Run task worker for all tasks with the `cron` decorator."""
+    """Run task workers to process enqueued tasks from the specified backends and queues."""
 
     help = __doc__
 
@@ -67,6 +67,12 @@ class Command(BaseCommand):
             type=float,
             default=3600.0,
             help="Kill hung tasks after timeout seconds. Defaults to one hour.",
+        )
+        parser.add_argument(
+            "--task-backlog-size",
+            type=int,
+            default=1,
+            help="The number of tasks to prefetch from the message queue while all workers are busy. Defaults to 1.",
         )
         parser.add_argument(
             "--exit-empty",

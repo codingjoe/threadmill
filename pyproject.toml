@@ -3,7 +3,7 @@ requires = ["flit_core>=3.2", "flit_scm", "wheel"]
 build-backend = "flit_scm:buildapi"
 
 [project]
-name = "django-grinder"
+name = "threadmill"
 authors = [
   { name = "Johannes Maron", email = "johannes@maron.family" },
 ]
@@ -37,19 +37,19 @@ dependencies = ["django @ git+https://github.com/django/django.git@main#egg=djan
 
 [project.urls]
 # https://packaging.python.org/en/latest/specifications/well-known-project-urls/#well-known-labels
-Homepage = "https://github.com/codingjoe/django-grinder"
-Changelog = "https://github.com/codingjoe/django-grinder/releases"
-Source = "https://github.com/codingjoe/django-grinder"
-Releasenotes = "https://github.com/codingjoe/django-grinder/releases/latest"
-Documentation = "https://django-grinder.rtfd.io/"
-Issues = "https://github.com/codingjoe/django-grinder/issues"
+Homepage = "https://github.com/codingjoe/threadmill"
+Changelog = "https://github.com/codingjoe/threadmill/releases"
+Source = "https://github.com/codingjoe/threadmill"
+Releasenotes = "https://github.com/codingjoe/threadmill/releases/latest"
+Documentation = "https://github.com/codingjoe/threadmill/"
+Issues = "https://github.com/codingjoe/threadmill/issues"
 Funding = "https://github.com/sponsors/codingjoe"
 
 [tool.flit.module]
-name = "grinder"
+name = "threadmill"
 
 [tool.setuptools_scm]
-write_to = "grinder/_version.py"
+write_to = "threadmill/_version.py"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
@@ -62,14 +62,14 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["grinder"]
+source = ["threadmill"]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
 
 [tool.ruff]
-src = ["grinder", "tests"]
+src = ["threadmill", "tests"]
 
 [tool.ruff.lint]
 select = [

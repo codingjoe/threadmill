@@ -3,7 +3,7 @@ from queue import Empty
 from django.tasks import TaskResult, TaskResultStatus
 from django.utils import timezone
 from django.utils.module_loading import import_string
-from grinder.backends import AcknowledgeableTaskBackend
+from threadmill.backends import AcknowledgeableTaskBackend
 
 
 class GeneratingTaskBackend(AcknowledgeableTaskBackend):
