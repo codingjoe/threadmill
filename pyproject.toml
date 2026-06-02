@@ -30,10 +30,10 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Framework :: Django",
-  "Framework :: Django :: 6.0",
+  "Framework :: Django :: 6.1",
 ]
 requires-python = ">=3.12"
-dependencies = ["django @ git+https://github.com/django/django.git@main#egg=django"]
+dependencies = ["django>=6.1a1"]
 
 [project.urls]
 # https://packaging.python.org/en/latest/specifications/well-known-project-urls/#well-known-labels
