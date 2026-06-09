@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv run --with django~=${{ matrix.django-version }} pytest -m "not benchmark"
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
   pytest-windows-macos:
@@ -64,7 +64,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
       - run: uv run --with django~=${{ matrix.django-version }} pytest -m "not benchmark"
