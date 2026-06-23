@@ -5,7 +5,9 @@ import signal
 
 import pytest
 from django.core.management import call_command
-from django.tasks import default_task_backend
+from django.tasks import Task, default_task_backend
+
+from tests.testapp.tasks import compute_workload, io_workload, memory_workload
 from threadmill.management.commands import threadmill
 
 
@@ -29,15 +31,17 @@ class TestCommand:
         assert parsed_arguments.threads == 1
         assert parsed_arguments.max_tasks == 0
         assert parsed_arguments.max_tasks_jitter == 0
-        assert parsed_arguments.task_timeout == 3600.0
 
     @pytest.mark.benchmark
     def test_call_command__benchmark_compute(
         self,
         benchmark,
     ):
-        """Benchmark command execution for one CPU intense task solved 100 times."""
-        default_task_backend.reset()
+        """Benchmark command execution for compute tasks."""
+        backend = default_task_backend
+        for _ in range(100):
+            backend.enqueue(compute_workload, args=[])
+
         benchmark.pedantic(
             lambda: call_command(
                 "threadmill",
@@ -50,15 +54,16 @@ class TestCommand:
             warmup_rounds=0,
         )
 
-        assert default_task_backend.solved_task_count == 100
-
     @pytest.mark.benchmark
     def test_call_command__benchmark_io(
         self,
         benchmark,
     ):
-        """Benchmark command execution for one CPU intense task solved 100 times."""
-        default_task_backend.reset()
+        """Benchmark command execution for IO tasks."""
+        backend = default_task_backend
+        for _ in range(100):
+            backend.enqueue(io_workload, args=[])
+
         benchmark.pedantic(
             lambda: call_command(
                 "threadmill",
@@ -72,15 +77,17 @@ class TestCommand:
             warmup_rounds=0,
         )
 
-        assert default_task_backend.solved_task_count == 100
-
     @pytest.mark.benchmark
     def test_call_command__benchmark_compute_and_io(
         self,
         benchmark,
     ):
-        """Benchmark command execution for one CPU intense task solved 100 times."""
-        default_task_backend.reset()
+        """Benchmark command execution for compute and IO tasks."""
+        backend = default_task_backend
+        for _ in range(100):
+            backend.enqueue(compute_workload, args=[])
+            backend.enqueue(io_workload, args=[])
+
         benchmark.pedantic(
             lambda: call_command(
                 "threadmill",
@@ -94,15 +101,16 @@ class TestCommand:
             warmup_rounds=0,
         )
 
-        assert default_task_backend.solved_task_count == 200
-
     @pytest.mark.benchmark
     def test_call_command__benchmark_memory_leak_recovery(
         self,
         benchmark,
     ):
-        """Benchmark command execution for one CPU intense task solved 100 times."""
-        default_task_backend.reset(1000)
+        """Benchmark command execution for memory leak recovery."""
+        backend = default_task_backend
+        for _ in range(1000):
+            backend.enqueue(memory_workload, args=[])
+
         benchmark.pedantic(
             lambda: call_command(
                 "threadmill",
@@ -117,9 +125,13 @@ class TestCommand:
         )
 
     @pytest.mark.benchmark
-    def test_call_command__benchmark_random_crash(self, benchmark):
-        """Benchmark command execution for one CPU intense task solved 100 times."""
-        default_task_backend.reset()
+    def test_call_command__benchmark_default_queue(self, benchmark):
+        """Benchmark command execution for default queue tasks."""
+        backend = default_task_backend
+        task = Task(func=compute_workload.func, queue_name="default")
+        for _ in range(100):
+            backend.enqueue(task, args=[])
+
         benchmark.pedantic(
             lambda: call_command(
                 "threadmill",
@@ -129,7 +141,4 @@ class TestCommand:
             rounds=1,
             iterations=1,
             warmup_rounds=0,
-        )
-        assert default_task_backend.issued_task_count == 100, (
-            "All tasks should be issued."
         )

@@ -8,6 +8,18 @@ from django.tasks import task
 logger = logging.getLogger(__name__)
 
 
+@task()
+def echo(value):
+    """Return the given value (fast, deterministic, for tests)."""
+    return value
+
+
+@task()
+def boom():
+    """Raise ValueError (deterministic failure, for tests)."""
+    raise ValueError("boom")
+
+
 @task(queue_name="compute")
 def compute_workload():
     """Calculate the first 1000 prime numbers."""
