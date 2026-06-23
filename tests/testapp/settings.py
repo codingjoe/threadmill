@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 from django.tasks import DEFAULT_TASK_QUEUE_NAME
@@ -53,7 +54,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "testapp.urls"
+ROOT_URLCONF = "tests.testapp.urls"
 
 TEMPLATES = [
     {
@@ -86,8 +87,12 @@ DATABASES = {
 
 TASKS = {
     "default": {
-        "BACKEND": "tests.testapp.backends.GeneratingTaskBackend",
+        "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory"],
+        "REDIS_URL": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+    },
+    "immediate": {
+        "BACKEND": "django.tasks.backends.immediate.ImmediateTaskBackend",
     },
 }
 

@@ -9,8 +9,8 @@ curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/m
 
 ## Design Principles
 
-- Consistency – We never lose data, even if someone unplugs the power or network.
 - Durability – We recover from any failures, even poorly written tasks.
+- Consistency – We never lose data, even if someone unplugs the power or network.
 - Utilization – We keep the CPU saturated with tasks, not with idle time or waiting for locks.
 
 ## Testing

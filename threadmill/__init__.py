@@ -1,4 +1,4 @@
-"""A queue agnostic worker for Django's task framework."""
+"""The most reliable backend for Django's task framework."""
 
 from . import _version
 

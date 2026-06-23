@@ -4,7 +4,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/images/logo-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/images/logo-light.svg">
-    <img alt="Django Grinder: A queue agnostic worker for Django's task framework." src="https://github.com/codingjoe/threadmill/raw/main/images/logo-light.svg">
+    <img alt="Threadmill: A queue agnostic worker for Django's task framework." src="https://github.com/codingjoe/threadmill/raw/main/images/logo-light.svg">
   </picture>
 <br>
   <a href="https://github.com/codingjoe/threadmill/">Documentation</a> |
@@ -34,20 +34,31 @@
 
 ## Setup
 
-You need to have [Django's Task framework][django-tasks] setup properly.
+You need to have [Django's Task framework][django-tasks] set up properly.
 
 ```console
-uv add threadmill
+uv add threadmill[redis]
 ```
 
-Add `threadmill` to your `INSTALLED_APPS` in `settings.py`:
+Add `threadmill` to your `INSTALLED_APPS` in `settings.py`
+and configure the task backend:
 
 ```python
 # settings.py
+import os
+
 INSTALLED_APPS = [
     "threadmill",
     # ...
 ]
+
+TASKS = {
+    "default": {
+        "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
+        "REDIS_URL": os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+    },
+    # ...
+}
 ```
 
 Finally, you launch the worker pool:
@@ -58,9 +69,11 @@ uv run manage.py threadmill
 
 ## Usage
 
+### Workers
+
 The workers are inspired by Gunicorn, and the CLI is very similar.
 
-### Utilization
+#### Utilization
 
 Depending on your workload, you can tweak the number of processes and threads.
 Processes allow for parallel compute (no GIL) while threads are great for low-memory concurrent IO.
@@ -69,7 +82,7 @@ Processes allow for parallel compute (no GIL) while threads are great for low-me
 uv run manage.py threadmill --processes 4 --threads 2
 ```
 
-### Health
+#### Health
 
 If your tasks leak memory, you can recycle (restart) the workers after a certain number of tasks have been processed:
 
@@ -81,61 +94,33 @@ This will restart the workers after 1000 tasks have been processed, with a rando
 
 Should a worker crash or be killed, the pool will automatically restart it.
 
-### Shutdown
+#### Shutdown
 
 A graceful shutdown is possible with the `SIGTERM` or a keyboard interrupt.
-All workers will finish the tasks they acquired and publish them.
+All workers will finish the tasks they acquired and acknowledge them.
 
 You can use `--exit-empty` to exit immediately after all tasks have been processed,
 which might be useful for draining a one-off queue.
 
-### Task Backlog
+### Redis Backend Options
 
-You can prefetch tasks from a queue to avoid IO latency bottlenecks.
-However, this will increase the memory usage of the worker pool.
+The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
+`TASKS` configuration:
 
-```console
-uv run manage.py threadmill --prefetch 100
-```
+| Option            | Default                | Description                                                  |
+| ----------------- | ---------------------- | ------------------------------------------------------------ |
+| `lease_ttl`       | `timedelta(hours=1)`   | Max processing time before a started task is marked FAILED.  |
+| `result_ttl`      | `timedelta(days=1)`    | How long task results are retained before automatic removal. |
+| `broker_interval` | `timedelta(seconds=1)` | Interval between background broker maintenance passes.       |
+| `batch_size`      | `100`                  | Max tasks to move or requeue per broker pass.                |
 
-### Task Timeouts
+A task that is started but never acknowledged (lease expired) is marked FAILED
+with an `AcknowledgementTimeout` error. Set `lease_ttl` comfortably above your
+worst-case task runtime.
 
-> [!WARNING]
-> Work in progress, this feature is not yet stable.
+All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
+every multi-key operation — including the cross-queue acquire — runs on a single
+shard. Scale horizontally by running additional backend aliases, not by relying
+on cross-slot operations.
 
-Task timeouts are important to ensure the long-term health of your pool.
-However, they need to be aligned with your queueing system's timeout settings.
-The message queue needs to requeue a task that hasn't been acknowledged within the timeout.
-
-## Integration
-
-> [!NOTE]
-> This section is for people who want to integrate Threadmill into their queueing system.
-
-Threadmill is designed to be durable and requires a queueing system to support late acknowledgement.
-
-To use Threadmill, your backend will need to inherit from `threadmill.backends.AcknowledgeableTaskBackend` and implement the following methods:
-
-```python
-class AcknowledgeableTaskBackend(BaseTaskBackend, ABC):
-    """Provide an interface for tasks queues to be processed by the executor."""
-
-    def acquire(
-        self, *queue_names: str, timeout: datetime.timedelta | None = None
-    ) -> TaskResult:
-        """
-        Return and lock the next task to be processed without removing it from the queue.
-
-        Args:
-            queue_names: The names of the queues to acquire tasks from.
-            timeout: The maximum time to wait for a task. If None, wait indefinitely.
-
-        Raises:
-            TimeoutError: If no task is available within the specified timeout.
-        """
-        raise NotImplementedError
-
-    def acknowledge(self, task_result: TaskResult) -> None:
-        """Remove the task from the queue and publish the result."""
-        raise NotImplementedError
-```
+[django-tasks]: https://docs.djangoproject.com/en/stable/topics/tasks/

@@ -1,4 +1,3 @@
-import datetime
 import signal
 import sys
 
@@ -67,12 +66,6 @@ class Command(BaseCommand):
             help="Maximum random jitter to add to the max-tasks value by randint(0, max_tasks_jitter).",
         )
         parser.add_argument(
-            "--task-timeout",
-            type=float,
-            default=3600.0,
-            help="Kill hung tasks after timeout seconds. Defaults to one hour.",
-        )
-        parser.add_argument(
             "--task-backlog-size",
             type=int,
             default=1,
@@ -94,7 +87,6 @@ class Command(BaseCommand):
         threads,
         max_tasks,
         max_tasks_jitter,
-        task_timeout,
         exit_empty,
         **options,
     ):
@@ -120,7 +112,6 @@ class Command(BaseCommand):
             threads=threads,
             max_tasks=max_tasks,
             max_tasks_jitter=max_tasks_jitter,
-            task_timeout=datetime.timedelta(seconds=task_timeout),
             exit_empty=exit_empty,
             queues=queues,
         )
