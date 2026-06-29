@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import datetime
 import os
 from pathlib import Path
 
@@ -90,9 +91,13 @@ TASKS = {
         "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory"],
         "REDIS_URL": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        "OPTIONS": {
+            "max_connections": 10,
+            "lease_ttl": datetime.timedelta(seconds=60),
+        },
     },
     "immediate": {
-        "BACKEND": "django.tasks.backends.immediate.ImmediateTaskBackend",
+        "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
     },
 }
 

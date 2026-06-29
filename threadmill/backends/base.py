@@ -68,6 +68,26 @@ class TaskResultEncoder(DjangoJSONEncoder):
         return super().default(o)
 
 
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueStats:
+    """Telemetry for a single queue; ingress and egress are rolling per-minute counts."""
+
+    ingress: int
+    egress: int
+    ready: int
+    running: int
+    deferred: int
+    successful: int
+    failed: int
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueTelemetry:
+    """Snapshot of stats across a backend's queues."""
+
+    queues: dict[str, QueueStats]
+
+
 class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     """Interface for task queues to be processed by the executor."""
 
@@ -76,6 +96,16 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     broker_class: type[Broker] | None = None
 
     result_ttl: datetime.timedelta | None = None
+
+    def queue_telemetry(
+        self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
+    ) -> QueueTelemetry:
+        """Return a snapshot of stats for all configured queues.
+
+        Ingress and egress are rolling counts over ``interval``, so they
+        reflect recent traffic rather than a lifetime total.
+        """
+        raise NotImplementedError
 
     @staticmethod
     def serialize_task_result(task_result: TaskResult) -> str:
@@ -141,5 +171,5 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         status: TaskResultStatus | None = None,
         count: int = 1,
     ) -> collections.abc.Generator[TaskResult, None, None]:
-        """Yield acknowledged results from a queue, optionally filtered by status."""
+        """Yield tasks from a queue, optionally filtered by status."""
         raise NotImplementedError

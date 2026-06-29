@@ -2,6 +2,8 @@
 --
 -- KEYS[1]  -- running set (ZSET)
 -- KEYS[2]  -- results history set (ZSET)
+-- KEYS[3]  -- egress window (ZSET, may be empty)
+-- KEYS[4]  -- failed counter (STRING, may be empty)
 -- ARGV[1]  -- current time in milliseconds (for score comparison)
 -- ARGV[2]  -- task key prefix (e.g. "threadmill:default:task:")
 -- ARGV[3]  -- result key prefix (e.g. "threadmill:default:result:")
@@ -30,6 +32,8 @@ for _, task_id in ipairs(stale) do
       redis.call('SET', ARGV[3] .. task_id, failed_data, 'EX', ARGV[5])
       redis.call('DEL', ARGV[2] .. task_id)
       redis.call('ZADD', KEYS[2], tonumber(ARGV[1]), task_id)
+      redis.call('ZADD', KEYS[3], ARGV[1], task_id)
+      redis.call('INCR', KEYS[4])
     end
   end
 end

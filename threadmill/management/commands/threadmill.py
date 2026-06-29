@@ -2,6 +2,7 @@ import signal
 import sys
 
 from django.core.management import BaseCommand, CommandError
+from django.core.management.base import BaseCommand as DjangoBaseCommand
 from django.tasks import (
     DEFAULT_TASK_BACKEND_ALIAS,
     DEFAULT_TASK_QUEUE_NAME,
@@ -18,7 +19,7 @@ def kill_softly(signum, frame):
     raise KeyboardInterrupt(f"Received {signame} ({signum}), shutting down…")
 
 
-class Command(BaseCommand):
+class WorkerCommand(DjangoBaseCommand):
     """Run task workers to process enqueued tasks from the specified backends and queues."""
 
     help = __doc__
@@ -64,12 +65,6 @@ class Command(BaseCommand):
             type=int,
             default=0,
             help="Maximum random jitter to add to the max-tasks value by randint(0, max_tasks_jitter).",
-        )
-        parser.add_argument(
-            "--task-backlog-size",
-            type=int,
-            default=1,
-            help="The number of tasks to prefetch from the message queue while all workers are busy. Defaults to 1.",
         )
         parser.add_argument(
             "--exit-empty",
@@ -121,3 +116,58 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(str(e)))
             self.stdout.write(self.style.NOTICE("Shutting down workers…"))
             exe.shutdown()
+
+
+class InspectorCommand(DjangoBaseCommand):
+    """Launch the textual TUI inspector for task backends and queues."""
+
+    help = __doc__
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "-b",
+            "--backend",
+            default=DEFAULT_TASK_BACKEND_ALIAS,
+            help="Alias of the tasks backend to inspect.",
+        )
+
+    def handle(self, *, backend, **options):
+        try:
+            from ...backends.base import ThreadmillTaskBackend
+            from ...inspector.app import InspectorApp
+        except ImportError:
+            raise CommandError(
+                "Optional dependency missing. Install: threadmill[inspector]"
+            )
+        try:
+            backend = task_backends[backend]
+        except InvalidTaskBackend as e:
+            raise CommandError(f"Invalid backend: {backend!r}") from e
+
+        if not isinstance(backend, ThreadmillTaskBackend):
+            raise CommandError(
+                f"Backend {backend.alias!r} does not support inspection."
+            )
+
+        InspectorApp(backend=backend).run()
+
+
+class Command(BaseCommand):
+    """Dispatcher for the worker and inspector subcommands."""
+
+    help = "Run threadmill workers or inspect queues."
+
+    subcommands = {
+        "worker": WorkerCommand,
+        "inspector": InspectorCommand,
+    }
+
+    def add_arguments(self, parser):
+        subparsers = parser.add_subparsers(dest="subcommand", required=True)
+        for name, command_class in self.subcommands.items():
+            subparser = subparsers.add_parser(name, help=command_class.help)
+            command_class().add_arguments(subparser)
+
+    def handle(self, *args, **options):
+        subcommand_name = options.pop("subcommand")
+        self.subcommands[subcommand_name]().execute(*args, **options)

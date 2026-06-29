@@ -2,9 +2,9 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/images/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/images/logo-light.svg">
-    <img alt="Threadmill: A queue agnostic worker for Django's task framework." src="https://github.com/codingjoe/threadmill/raw/main/images/logo-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-light.svg">
+    <img alt="Threadmill: A queue agnostic worker for Django's task framework." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-light.svg">
   </picture>
 <br>
   <a href="https://github.com/codingjoe/threadmill/">Documentation</a> |
@@ -61,10 +61,16 @@ TASKS = {
 }
 ```
 
-Finally, you launch the worker pool:
+Optionally, install the inspector dependency if you want the TUI:
 
 ```console
-uv run manage.py threadmill
+uv add threadmill[inspector]
+```
+
+Then launch the worker pool:
+
+```console
+uv run manage.py threadmill worker
 ```
 
 ## Usage
@@ -79,7 +85,7 @@ Depending on your workload, you can tweak the number of processes and threads.
 Processes allow for parallel compute (no GIL) while threads are great for low-memory concurrent IO.
 
 ```console
-uv run manage.py threadmill --processes 4 --threads 2
+uv run manage.py threadmill worker --processes 4 --threads 2
 ```
 
 #### Health
@@ -87,7 +93,7 @@ uv run manage.py threadmill --processes 4 --threads 2
 If your tasks leak memory, you can recycle (restart) the workers after a certain number of tasks have been processed:
 
 ```console
-uv run manage.py threadmill --max-tasks 1000 --max-tasks-jitter 100
+uv run manage.py threadmill worker --max-tasks 1000 --max-tasks-jitter 100
 ```
 
 This will restart the workers after 1000 tasks have been processed, with a random jitter of up to 100 tasks to avoid all workers restarting at the same time.
@@ -101,6 +107,18 @@ All workers will finish the tasks they acquired and acknowledge them.
 
 You can use `--exit-empty` to exit immediately after all tasks have been processed,
 which might be useful for draining a one-off queue.
+
+### Inspector
+
+![Inspector TUI screenshot](https://github.com/codingjoe/threadmill/raw/main/docs/images/TUI-screenshot.svg)
+
+The optional TUI inspector lets you watch queues, tasks, and task details in real-time.
+Install it with the `inspector` extra and launch it from a separate terminal:
+
+```console
+uv add threadmill[inspector]
+uv run manage.py threadmill inspector
+```
 
 ### Redis Backend Options
 
