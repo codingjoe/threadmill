@@ -173,7 +173,7 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         self,
         queue_name: str = DEFAULT_TASK_QUEUE_NAME,
         *,
-        status: TaskResultStatus | None = None,
+        status: TaskResultStatus,
         count: int = 1,
     ) -> collections.abc.Generator[TaskResult, None, None]:
         """

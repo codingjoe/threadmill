@@ -319,7 +319,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self,
         queue_name: str = DEFAULT_TASK_QUEUE_NAME,
         *,
-        status: TaskResultStatus | None = None,
+        status: TaskResultStatus,
         count: int = 1,
     ) -> Generator[TaskResult]:
         match status:
@@ -329,10 +329,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 yield from self._peek_zset(self.RUNNING_KEY, queue_name, count)
             case TaskResultStatus.SUCCESSFUL | TaskResultStatus.FAILED:
                 yield from self._peek_results(queue_name, count, status)
-            case None:
-                yield from self._peek_zset(self.QUEUE_KEY, queue_name, count)
-                yield from self._peek_zset(self.RUNNING_KEY, queue_name, count)
-                yield from self._peek_results(queue_name, count, None)
 
     def _peek_zset(
         self, key_template: str, queue_name: str, count: int

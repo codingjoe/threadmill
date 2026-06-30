@@ -375,6 +375,7 @@ class TestInspectorApp:
             assert [c.label.plain for c in ready.ordered_columns] == [
                 "ID",
                 "Function",
+                "Priority",
                 "Enqueued",
             ]
             assert [c.label.plain for c in running.ordered_columns] == [

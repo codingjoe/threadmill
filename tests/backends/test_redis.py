@@ -578,34 +578,6 @@ class TestRedisTaskBackendPeek:
         assert [r.id for r in successful] == [successful_id]
         assert [r.id for r in failed] == [failed_id]
 
-    def test_peek__status_none_returns_ready_and_history(self):
-        """Peek with status None yields ready and acknowledged tasks."""
-        first = default_task_backend.enqueue(echo, args=[1])
-        second = default_task_backend.enqueue(echo, args=[2])
-        acquired = default_task_backend.acquire(
-            timeout=datetime.timedelta(seconds=1), worker="peek-test"
-        )
-        default_task_backend.acknowledge(
-            dataclasses.replace(
-                acquired, status=TaskResultStatus.FAILED, finished_at=timezone.now()
-            )
-        )
-        results = list(
-            default_task_backend.peek(queue_name="default", status=None, count=10)
-        )
-        ids = {r.id for r in results}
-        assert second.id in ids
-        assert acquired.id in ids
-        assert first.id == acquired.id
-
-    def test_peek__status_none_skips_empty_running_and_history(self):
-        """Peek None yields ready tasks and skips empty running/history zsets."""
-        task_result = default_task_backend.enqueue(echo, args=[1])
-        results = list(
-            default_task_backend.peek(queue_name="default", status=None, count=10)
-        )
-        assert [r.id for r in results] == [task_result.id]
-
     def test_peek__skips_expired_task_data(self):
         """Peek skips queue entries whose task data hash has expired."""
         task_result = default_task_backend.enqueue(echo, args=[1])
