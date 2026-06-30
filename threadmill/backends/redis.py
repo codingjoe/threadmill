@@ -324,66 +324,56 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     ) -> Generator[TaskResult]:
         match status:
             case TaskResultStatus.READY:
-                yield from self._peek_zset(self.QUEUE_KEY, queue_name, count)
+                yield from self._peek(
+                    self.QUEUE_KEY, self.TASK_KEY, queue_name, count, "data"
+                )
             case TaskResultStatus.RUNNING:
-                yield from self._peek_zset(self.RUNNING_KEY, queue_name, count)
-            case TaskResultStatus.SUCCESSFUL | TaskResultStatus.FAILED:
-                yield from self._peek_results(queue_name, count, status)
+                yield from self._peek(
+                    self.RUNNING_KEY, self.TASK_KEY, queue_name, count, "data"
+                )
+            case TaskResultStatus.SUCCESSFUL:
+                yield from self._peek(
+                    self.SUCCESSFUL_RESULTS_KEY, self.RESULT_KEY, queue_name, count
+                )
+            case TaskResultStatus.FAILED:
+                yield from self._peek(
+                    self.FAILED_RESULTS_KEY, self.RESULT_KEY, queue_name, count
+                )
 
-    def _peek_zset(
-        self, key_template: str, queue_name: str, count: int
+    def _peek(
+        self,
+        zset_key_template: str,
+        data_key_template: str,
+        queue_name: str,
+        count: int,
+        field: str | None = None,
     ) -> Generator[TaskResult]:
-        """Yield tasks stored in the task hash for the given sorted-set key."""
-        key = key_template.format(prefix=self.key_prefix, queue_name=queue_name)
-        task_ids = [
-            tid.decode() if isinstance(tid, bytes) else tid
-            for tid in self.client.zrange(key, 0, count - 1)
-        ]
-        if not task_ids:
-            return
-        pipe = self.client.pipeline()
-        for task_id in task_ids:
-            pipe.hget(
-                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id), "data"
-            )
-        for data in pipe.execute():
-            if not data:
-                continue
-            yield self.deserialize_task_result(
-                data.decode() if isinstance(data, bytes) else data
-            )
+        """Yield up to ``count`` payloads listed in a ZSET, fetching each by id.
 
-    def _peek_results(
-        self, queue_name: str, count: int, status: TaskResultStatus
-    ) -> Generator[TaskResult]:
-        """Yield acknowledged results from the per-status history ZSET.
-
-        Results live in per-status history ZSETs, so the ZSET membership is
-        the status filter and no Python-side filtering is needed.
+        The ZSET members are task/result ids; each payload is fetched from its
+        per-id data key. ``field`` selects ``hget`` (task hash) over ``get``
+        (result string), so the same helper serves queue, running, and history.
         """
-        key_template = (
-            self.SUCCESSFUL_RESULTS_KEY
-            if status == TaskResultStatus.SUCCESSFUL
-            else self.FAILED_RESULTS_KEY
+        zset_key = zset_key_template.format(
+            prefix=self.key_prefix, queue_name=queue_name
         )
-        key = key_template.format(prefix=self.key_prefix, queue_name=queue_name)
-        result_ids = [
-            rid.decode() if isinstance(rid, bytes) else rid
-            for rid in self.client.zrange(key, 0, count - 1)
-        ]
-        if not result_ids:
-            return
         pipe = self.client.pipeline()
-        for result_id in result_ids:
-            pipe.get(
-                self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
+        for member in self.client.zrange(zset_key, 0, count - 1):
+            member_id = member.decode() if isinstance(member, bytes) else member
+            data_key = data_key_template.format(
+                prefix=self.key_prefix,
+                task_id=member_id,
+                result_id=member_id,
             )
+            if field is None:
+                pipe.get(data_key)
+            else:
+                pipe.hget(data_key, field)
         for data in pipe.execute():
-            if not data:
-                continue
-            yield self.deserialize_task_result(
-                data.decode() if isinstance(data, bytes) else data
-            )
+            if data:
+                yield self.deserialize_task_result(
+                    data.decode() if isinstance(data, bytes) else data
+                )
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
