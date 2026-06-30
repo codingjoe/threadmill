@@ -16,7 +16,13 @@ from textual.widgets import DataTable, ListView, Select
 from textual.widgets._data_table import RowKey
 
 from tests.testapp.tasks import echo
-from threadmill.backends.base import QueueStats, QueueTelemetry, ThreadmillTaskBackend
+from threadmill.backends.base import (
+    BackendTelemetry,
+    QueueCounts,
+    QueueRates,
+    QueueStats,
+    ThreadmillTaskBackend,
+)
 from threadmill.inspector.app import (
     InspectorApp,
     QueueList,
@@ -35,7 +41,7 @@ class FailingBackend(ThreadmillTaskBackend):
     def peek(self, *args, **kwargs):
         raise RuntimeError("peek failed")
 
-    def queue_telemetry(self, *, interval=datetime.timedelta(seconds=60)):
+    def telemetry(self, *, interval=None):
         raise RuntimeError("telemetry failed")
 
 
@@ -57,20 +63,27 @@ def _failed_result() -> TaskResult:
     )
 
 
-def _stats(**overrides: int) -> QueueStats:
-    """Build QueueStats zeroed everywhere except the given overrides."""
-    return QueueStats(
-        **{
-            "ingress": 0,
-            "egress": 0,
-            "ready": 0,
-            "running": 0,
-            "deferred": 0,
-            "successful": 0,
-            "failed": 0,
-        }
-        | overrides
+def _stats(**overrides: int | datetime.timedelta) -> QueueStats:
+    """Build QueueStats zeroed everywhere except the given overrides.
+
+    Count overrides (ready/running/deferred/successful/failed) populate
+    `counts`; rate overrides (ingress/egress) populate `rates`. An
+    optional `interval` override sets the rates window.
+    """
+    interval = overrides.pop("interval", datetime.timedelta(seconds=60))
+    counts = QueueCounts(
+        ready=overrides.get("ready", 0),
+        running=overrides.get("running", 0),
+        deferred=overrides.get("deferred", 0),
+        successful=overrides.get("successful", 0),
+        failed=overrides.get("failed", 0),
     )
+    rates = QueueRates(
+        interval=interval,
+        ingress=overrides.get("ingress", 0),
+        egress=overrides.get("egress", 0),
+    )
+    return QueueStats(counts=counts, rates=rates)
 
 
 @pytest.mark.parametrize(
@@ -224,7 +237,7 @@ class TestInspectorApp:
             await pilot.pause()
             queue_list = app.query_one("#queue-list", QueueList)
             assert set(queue_list._items) == set(default_task_backend.queues)
-            app.telemetry = QueueTelemetry(queues={"default": _stats()})
+            app.telemetry = BackendTelemetry(queues={"default": _stats()})
             await pilot.pause()
             assert list(queue_list._items) == ["default"]
 
@@ -238,7 +251,7 @@ class TestInspectorApp:
             task_list = app.query_one("#task-list", TaskList)
             task_list.queue_name = "default"
             await pilot.pause()
-            app.telemetry = QueueTelemetry(
+            app.telemetry = BackendTelemetry(
                 queues={"default": stats, "other": _stats(ready=5)}
             )
             await pilot.pause()
@@ -257,7 +270,7 @@ class TestInspectorApp:
             task_list = app.query_one("#task-list", TaskList)
             task_list.queue_name = "default"
             await pilot.pause()
-            app.telemetry = QueueTelemetry(queues={"default": _stats(ready=1500)})
+            app.telemetry = BackendTelemetry(queues={"default": _stats(ready=1500)})
             await pilot.pause()
             assert task_list._tabs.get_tab("tab-ready").label.plain == "Ready (1.5k)"
 
@@ -335,7 +348,7 @@ class TestInspectorApp:
             default_task_backend.enqueue(echo, args=[1])
             app.action_refresh()
             await pilot.pause()
-            assert app.telemetry.queues["default"].ready == 1
+            assert app.telemetry.queues["default"].counts.ready == 1
 
     async def test_auto_selects_default_queue(self):
         """On first telemetry the queue list auto-selects the default queue."""
@@ -464,7 +477,7 @@ class TestInspectorApp:
             default_task_backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="stale-test"
             )
-            app.telemetry = app.backend.queue_telemetry()
+            app.telemetry = app.backend.telemetry()
             await pilot.pause()
             await pilot.pause()
             assert table.row_count == before

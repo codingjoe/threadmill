@@ -49,10 +49,10 @@ class TestAcknowledgeableTaskBackend:
         with pytest.raises(NotImplementedError):
             list(BackendDouble(alias="default", params={}).peek("default"))
 
-    def test_queue_telemetry__raise_not_implemented_error(self) -> None:
+    def test_telemetry__raise_not_implemented_error(self) -> None:
         """Raise NotImplementedError for backend telemetry API."""
         with pytest.raises(NotImplementedError):
-            BackendDouble(alias="default", params={}).queue_telemetry()
+            BackendDouble(alias="default", params={}).telemetry()
 
 
 class TestAcknowledgementTimeout:

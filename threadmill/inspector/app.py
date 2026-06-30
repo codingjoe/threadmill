@@ -30,7 +30,7 @@ from textual.widgets import (
     TabPane,
 )
 
-from ..backends.base import QueueTelemetry, ThreadmillTaskBackend
+from ..backends.base import BackendTelemetry, ThreadmillTaskBackend
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ class TaskList(Vertical):
 
     backend: reactive[ThreadmillTaskBackend | None] = reactive(None)
     queue_name: reactive[str] = reactive("")
-    telemetry: reactive[QueueTelemetry | None] = reactive(None)
+    telemetry: reactive[BackendTelemetry | None] = reactive(None)
     counts: reactive[dict[str, int]] = reactive({})
     selected_task: reactive[TaskResult | None] = reactive(None)
 
@@ -182,9 +182,9 @@ class TaskList(Vertical):
     def compute_counts(self) -> dict[str, int]:
         if self.telemetry is None or not self.queue_name:
             return {label.lower(): 0 for label, _ in TAB_STATUSES}
-        stats = self.telemetry.queues[self.queue_name]
+        counts = self.telemetry.queues[self.queue_name].counts
         return {
-            label.lower(): getattr(stats, label.lower()) for label, _ in TAB_STATUSES
+            label.lower(): getattr(counts, label.lower()) for label, _ in TAB_STATUSES
         }
 
     def watch_counts(self, counts: dict[str, int]) -> None:
@@ -287,7 +287,7 @@ class TaskList(Vertical):
 class QueueList(ListView):
     """List of queues for the selected backend with ingress/egress deltas."""
 
-    telemetry: reactive[QueueTelemetry | None] = reactive(None)
+    telemetry: reactive[BackendTelemetry | None] = reactive(None)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -297,20 +297,21 @@ class QueueList(ListView):
         yield from super().compose()
         self.border_title = "Queues"
 
-    def watch_telemetry(self, telemetry: QueueTelemetry | None) -> None:
+    def watch_telemetry(self, telemetry: BackendTelemetry | None) -> None:
         """Refresh queue labels when a new telemetry snapshot arrives."""
         if telemetry is not None:
             self.update_telemetry(telemetry)
 
-    def update_telemetry(self, telemetry: QueueTelemetry) -> None:
+    def update_telemetry(self, telemetry: BackendTelemetry) -> None:
         """Refresh queue labels from a new telemetry snapshot."""
         queues = telemetry.queues
         for queue_name, stats in sorted(queues.items()):
             theme = BUILTIN_THEMES[self.app.theme]
+            rates = stats.rates
             label = (
                 f"{queue_name:24}  "
-                f"[{theme.success}]+{si_prefix(stats.ingress):3}[/]  "
-                f"[{theme.error}]-{si_prefix(stats.egress):3}[/]"
+                f"[{theme.success}]+{si_prefix(rates.ingress):3}[/]  "
+                f"[{theme.error}]-{si_prefix(rates.egress):3}[/]"
             )
             if queue_name in self._items:
                 self._items[queue_name].children[0].update(label)
@@ -349,7 +350,7 @@ class InspectorApp(App):
     ]
 
     backend: reactive[ThreadmillTaskBackend] = reactive(None)
-    telemetry: reactive[QueueTelemetry] = reactive(None, always_update=True)
+    telemetry: reactive[BackendTelemetry] = reactive(None, always_update=True)
 
     def __init__(
         self,
@@ -453,6 +454,6 @@ class InspectorApp(App):
     def _refresh_telemetry(self) -> None:
         """Poll the backend for fresh telemetry."""
         try:
-            self.telemetry = self.backend.queue_telemetry()
+            self.telemetry = self.backend.telemetry()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to refresh telemetry")

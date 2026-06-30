@@ -12,24 +12,32 @@ from django.tasks.base import TaskResultStatus
 from django.utils import timezone
 
 from tests.testapp.tasks import boom, compute_workload, echo
-from threadmill.backends.base import QueueStats, QueueTelemetry
+from threadmill.backends.base import (
+    BackendTelemetry,
+    QueueCounts,
+    QueueRates,
+    QueueStats,
+)
 from threadmill.backends.redis import RedisBroker, RedisTaskBackend  # noqa: E402
 
+TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
 
-def _stats(**overrides: int) -> QueueStats:
-    """Build QueueStats zeroed everywhere except the given overrides."""
-    return QueueStats(
-        **{
-            "ingress": 0,
-            "egress": 0,
-            "ready": 0,
-            "running": 0,
-            "deferred": 0,
-            "successful": 0,
-            "failed": 0,
-        }
-        | overrides
+
+def _stats(**overrides: int | datetime.timedelta) -> QueueStats:
+    interval = overrides.pop("interval", TELEMETRY_INTERVAL)
+    counts = QueueCounts(
+        ready=overrides.get("ready", 0),
+        running=overrides.get("running", 0),
+        deferred=overrides.get("deferred", 0),
+        successful=overrides.get("successful", 0),
+        failed=overrides.get("failed", 0),
     )
+    rates = QueueRates(
+        interval=interval,
+        ingress=overrides.get("ingress", 0),
+        egress=overrides.get("egress", 0),
+    )
+    return QueueStats(counts=counts, rates=rates)
 
 
 class TestRedisBroker:
@@ -67,7 +75,7 @@ class TestRedisBroker:
         assert "Telemetry trim error for queue" in caplog.text
 
     def test_main__trims_stale_telemetry(self):
-        """main() trims ingress/egress events older than the telemetry TTL."""
+        """main() trims ingress events older than the result_ttl retention horizon."""
         backend = RedisTaskBackend(
             "broker_trim_test",
             {
@@ -204,10 +212,10 @@ class TestRedisTaskBackend:
             assert "AcknowledgementTimeout" in result.errors[0].exception_class_path
 
             # Reaping an expired task must count as egress and failed
-            stats = backend.queue_telemetry().queues["default"]
-            assert stats.egress == 1
-            assert stats.failed == 1
-            assert stats.successful == 0
+            stats = backend.telemetry().queues["default"]
+            assert stats.rates.egress == 1
+            assert stats.counts.failed == 1
+            assert stats.counts.successful == 0
         finally:
             backend.close()
 
@@ -253,7 +261,7 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def test_queue_telemetry__empty_backend(self):
+    def test_telemetry__empty_backend(self):
         """queue_telemetry returns zero counts for an empty backend."""
         backend = RedisTaskBackend(
             "telemetry_empty_test",
@@ -266,12 +274,12 @@ class TestRedisTaskBackend:
             },
         )
         try:
-            telemetry = backend.queue_telemetry()
-            assert telemetry == QueueTelemetry(queues={"default": _stats()})
+            telemetry = backend.telemetry()
+            assert telemetry == BackendTelemetry(queues={"default": _stats()})
         finally:
             backend.close()
 
-    def test_queue_telemetry__counts_tasks(self):
+    def test_telemetry__counts_tasks(self):
         """queue_telemetry reflects per-minute ingress/egress and status counters."""
         backend = RedisTaskBackend(
             "telemetry_counts_test",
@@ -311,21 +319,121 @@ class TestRedisTaskBackend:
                 )
             )
 
-            telemetry = backend.queue_telemetry()
-            assert telemetry.queues["default"] == QueueStats(
+            telemetry = backend.telemetry()
+            assert telemetry.queues["default"] == _stats(
                 ingress=2,
                 egress=2,
-                ready=0,
-                running=0,
-                deferred=0,
                 successful=1,
                 failed=1,
             )
         finally:
             backend.close()
 
-    def test_queue_telemetry__ingress_egress_age_out_of_window(self):
-        """Ingress and egress older than the rate window are excluded and trimmed."""
+    def test_telemetry__egress_equals_successful_plus_failed(self):
+        """Egress is derived as successful + failed over the display window."""
+        backend = RedisTaskBackend(
+            "telemetry_egress_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            backend.enqueue(echo, args=[1])
+            backend.enqueue(echo, args=[2])
+            backend.enqueue(echo, args=[3])
+
+            for _ in range(2):
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="egress-test"
+                )
+                assert acquired is not None
+                backend.acknowledge(
+                    dataclasses.replace(
+                        acquired,
+                        status=TaskResultStatus.SUCCESSFUL,
+                        finished_at=timezone.now(),
+                    )
+                )
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="egress-test"
+            )
+            assert acquired is not None
+            backend.acknowledge(
+                dataclasses.replace(
+                    acquired,
+                    status=TaskResultStatus.FAILED,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            stats = backend.telemetry().queues["default"]
+            assert stats.rates.egress == stats.counts.successful + stats.counts.failed
+            assert stats.rates.egress == 3
+            assert stats.counts.successful == 2
+            assert stats.counts.failed == 1
+        finally:
+            backend.close()
+
+    def test_telemetry__successful_failed_evicted_by_result_ttl(self):
+        """successful/failed are segment counts that drop when results age out."""
+        backend = RedisTaskBackend(
+            "telemetry_eviction_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            first = backend.enqueue(echo, args=[1])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="eviction-test"
+            )
+            assert acquired is not None
+            backend.acknowledge(
+                dataclasses.replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+            successful_key = backend.SUCCESSFUL_RESULTS_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            assert backend.client.zcard(successful_key) == 1
+
+            # Age the first result beyond the retention horizon.
+            old = (timezone.now() - datetime.timedelta(seconds=120)).timestamp() * 1000
+            backend.client.zadd(successful_key, {first.id: old})
+
+            # A subsequent acknowledge evicts results older than result_ttl.
+            backend.enqueue(echo, args=[2])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="eviction-test"
+            )
+            assert acquired is not None
+            backend.acknowledge(
+                dataclasses.replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            assert backend.client.zcard(successful_key) == 1
+            stats = backend.telemetry().queues["default"]
+            assert stats.counts.successful == 1
+        finally:
+            backend.close()
+
+    def test_telemetry__ingress_egress_age_out_of_window(self):
+        """Ingress and egress older than the display window are excluded from the rates."""
         backend = RedisTaskBackend(
             "telemetry_window_test",
             {
@@ -353,23 +461,28 @@ class TestRedisTaskBackend:
             ingress_key = backend.INGRESS_KEY.format(
                 prefix=backend.key_prefix, queue_name="default"
             )
-            egress_key = backend.EGRESS_KEY.format(
+            successful_results_key = backend.SUCCESSFUL_RESULTS_KEY.format(
                 prefix=backend.key_prefix, queue_name="default"
             )
             old = (timezone.now() - datetime.timedelta(seconds=120)).timestamp() * 1000
             backend.client.zadd(ingress_key, {task_result.id: old})
-            backend.client.zadd(egress_key, {task_result.id: old})
+            backend.client.zadd(successful_results_key, {task_result.id: old})
 
-            stats = backend.queue_telemetry().queues["default"]
-            assert stats.ingress == 0
-            assert stats.egress == 0
+            stats = backend.telemetry().queues["default"]
+            # Older than the 60s display window: not counted as recent throughput.
+            assert stats.rates.ingress == 0
+            assert stats.rates.egress == 0
+            # Ingress is evicted by the read path (retention = result_ttl = 60s).
             assert backend.client.zcard(ingress_key) == 0
-            assert backend.client.zcard(egress_key) == 0
+            # The results segment is evicted by acknowledge/reaper, not by reads,
+            # so the aged result is still present in the segment count.
+            assert backend.client.zcard(successful_results_key) == 1
+            assert stats.counts.successful == 1
         finally:
             backend.close()
 
-    def test_queue_telemetry__interval_shrinks_window(self):
-        """A custom interval excludes events that fall outside it but inside the default."""
+    def test_telemetry__interval_shrinks_window(self):
+        """A custom interval excludes events from the rate but never trims below result_ttl."""
         backend = RedisTaskBackend(
             "telemetry_interval_test",
             {
@@ -389,18 +502,21 @@ class TestRedisTaskBackend:
             backend.client.zadd(ingress_key, {task_result.id: recent})
 
             # The 30s-old event is inside the default 60s window but outside a 10s one.
-            stats = backend.queue_telemetry(
-                interval=datetime.timedelta(seconds=10)
-            ).queues["default"]
-            assert stats.ingress == 1
+            stats = backend.telemetry(interval=datetime.timedelta(seconds=10)).queues[
+                "default"
+            ]
+            assert stats.rates.ingress == 1
 
             stale = (timezone.now() - datetime.timedelta(seconds=30)).timestamp() * 1000
             backend.client.zadd(ingress_key, {task_result.id: stale})
-            stats = backend.queue_telemetry(
-                interval=datetime.timedelta(seconds=10)
-            ).queues["default"]
-            assert stats.ingress == 0
-            assert backend.client.zcard(ingress_key) == 0
+            stats = backend.telemetry(interval=datetime.timedelta(seconds=10)).queues[
+                "default"
+            ]
+            # Outside the 10s count window, so not displayed...
+            assert stats.rates.ingress == 0
+            # ...but still retained for result_ttl (60s): a narrower display
+            # window must not clobber the retention policy.
+            assert backend.client.zcard(ingress_key) == 1
         finally:
             backend.close()
 

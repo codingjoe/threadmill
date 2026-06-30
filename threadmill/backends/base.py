@@ -14,6 +14,41 @@ from django.tasks.base import TaskError
 from django.utils.module_loading import import_string
 
 
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueCounts:
+    """Point-in-time cardinality of each queue segment."""
+
+    ready: int
+    running: int
+    deferred: int
+    successful: int
+    failed: int
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueRates:
+    """Rolling ingress/egress throughput over a time window (time-series data)."""
+
+    interval: datetime.timedelta
+    ingress: int
+    egress: int
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueStats:
+    """Telemetry for a single queue: point-in-time counts plus rolling rates."""
+
+    counts: QueueCounts
+    rates: QueueRates
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class BackendTelemetry:
+    """Snapshot of counts and rates across a backend's queues."""
+
+    queues: dict[str, QueueStats]
+
+
 class Broker(threading.Thread):
     """Backend maintenance thread launched by the task executor."""
 
@@ -68,26 +103,6 @@ class TaskResultEncoder(DjangoJSONEncoder):
         return super().default(o)
 
 
-@dataclasses.dataclass(kw_only=True, slots=True)
-class QueueStats:
-    """Telemetry for a single queue; ingress and egress are rolling per-minute counts."""
-
-    ingress: int
-    egress: int
-    ready: int
-    running: int
-    deferred: int
-    successful: int
-    failed: int
-
-
-@dataclasses.dataclass(kw_only=True, slots=True)
-class QueueTelemetry:
-    """Snapshot of stats across a backend's queues."""
-
-    queues: dict[str, QueueStats]
-
-
 class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     """Interface for task queues to be processed by the executor."""
 
@@ -96,16 +111,6 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     broker_class: type[Broker] | None = None
 
     result_ttl: datetime.timedelta | None = None
-
-    def queue_telemetry(
-        self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
-    ) -> QueueTelemetry:
-        """Return a snapshot of stats for all configured queues.
-
-        Ingress and egress are rolling counts over ``interval``, so they
-        reflect recent traffic rather than a lifetime total.
-        """
-        raise NotImplementedError
 
     @staticmethod
     def serialize_task_result(task_result: TaskResult) -> str:
@@ -171,5 +176,22 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         status: TaskResultStatus | None = None,
         count: int = 1,
     ) -> collections.abc.Generator[TaskResult, None, None]:
-        """Yield tasks from a queue, optionally filtered by status."""
+        """
+        Yield tasks from a queue, optionally filtered by status.
+
+        Args:
+            queue_name: The name of the queue to peek into.
+            status: If provided, only yield tasks with this status.
+            count: The maximum number of tasks to yield. If 0, yield all available tasks.
+        """
+        raise NotImplementedError
+
+    def telemetry(
+        self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
+    ) -> BackendTelemetry:
+        """Return a snapshot of stats for all configured queues.
+
+        Args:
+            interval: The time window for rolling rates.
+        """
         raise NotImplementedError
