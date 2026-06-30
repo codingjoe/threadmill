@@ -76,6 +76,7 @@ def si_prefix(n: int) -> str:
 
 COLUMN_LABELS: dict[str, str] = {
     "id": "ID",
+    "priority": "Priority",
     "function": "Function",
     "enqueued": "Enqueued",
     "started": "Started",
@@ -85,7 +86,7 @@ COLUMN_LABELS: dict[str, str] = {
 
 TAB_COLUMNS: dict[str, tuple[str, ...]] = {
     "running": ("id", "function", "enqueued", "started", "workers"),
-    "ready": ("id", "function", "enqueued"),
+    "ready": ("id", "function", "priority", "enqueued"),
     "successful": ("id", "function", "enqueued", "started", "finished", "workers"),
     "failed": ("id", "function", "enqueued", "started", "finished", "workers"),
 }
@@ -101,6 +102,8 @@ def _cell(result: TaskResult, column: str) -> str:
             return result.id[:8]
         case "function":
             return result.task.module_path
+        case "priority":
+            return str(result.task.priority)
         case "enqueued":
             return _format_dt(result.enqueued_at)
         case "started":
