@@ -348,12 +348,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         count: int,
         field: str | None = None,
     ) -> Generator[TaskResult]:
-        """Yield up to ``count`` payloads listed in a ZSET, fetching each by id.
-
-        The ZSET members are task/result ids; each payload is fetched from its
-        per-id data key. ``field`` selects ``hget`` (task hash) over ``get``
-        (result string), so the same helper serves queue, running, and history.
-        """
         zset_key = zset_key_template.format(
             prefix=self.key_prefix, queue_name=queue_name
         )
@@ -383,15 +377,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
 
     def _trim_telemetry(self, queue_name: str, *, now_ms: float) -> None:
-        """Drop telemetry time-series older than the retention horizon for one queue.
-
-        Ingress events and the per-status result history ZSETs all share
-        ``result_ttl`` as the retention horizon, so the broker evicts each on
-        every pass. Trimming the result segments here (not only on
-        acknowledge/reaper) bounds the segment counts even when a queue stops
-        acknowledging, so ``counts.successful``/``counts.failed`` cannot hold
-        stale members whose result strings already expired.
-        """
         cutoff = now_ms - self.result_ttl.total_seconds() * 1000
         pipe = self.client.pipeline()
         pipe.zremrangebyscore(
