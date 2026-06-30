@@ -7,11 +7,33 @@ import json
 import threading
 from abc import ABC
 
+import django
 from django.core.serializers.json import DjangoJSONEncoder
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, Task, TaskResult, TaskResultStatus
 from django.tasks.backends.base import BaseTaskBackend
 from django.tasks.base import TaskError
 from django.utils.module_loading import import_string
+
+if django.VERSION == (6, 0):
+    # https://github.com/django/django/commit/8c8b833d32c02d3ae6f43b04bb1e45968796b402
+    @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+    class Task(Task):
+        @classmethod
+        def _reconstruct(cls, kwargs):
+            func_path = kwargs["func"]
+            try:
+                func = import_string(func_path)
+                kwargs["func"] = func.func
+            except (ImportError, AttributeError) as e:
+                msg = f"Expected {func_path!r} to point to a Task instance."
+                raise ValueError(msg) from e
+            return cls(**kwargs)
+
+        def __reduce__(self):
+            kwargs = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+            kwargs["func"] = self.module_path
+
+            return (self.__class__._reconstruct, (kwargs,))
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -106,6 +128,7 @@ class TaskResultEncoder(DjangoJSONEncoder):
 class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     """Interface for task queues to be processed by the executor."""
 
+    task_class = Task  # can be removed in the future when Django 6.0 support is dropped
     supports_async_task = True
     supports_get_result = True
     broker_class: type[Broker] | None = None

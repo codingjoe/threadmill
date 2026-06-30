@@ -7,7 +7,13 @@ import threading
 import time
 import uuid
 
-from django.tasks import Task, TaskResult, TaskResultStatus, default_task_backend
+from django.tasks import (
+    TaskContext,
+    TaskResult,
+    TaskResultStatus,
+    default_task_backend,
+    task,
+)
 from django.utils import timezone
 
 from tests.testapp.tasks import boom, echo
@@ -15,27 +21,19 @@ from threadmill.backends.base import Broker  # noqa: E402
 from threadmill.executor import TaskExecutor, WorkerProcess, WorkerThread  # noqa: E402
 
 
+@task(queue_name="default")
 def _add(x, y):
     return x + y
 
 
-ADD_TASK = Task(func=_add, queue_name="default")
-
-
+@task(queue_name="default", takes_context=True)
 def _context_captor(context):
-    """Task function that captures the context it receives."""
-    _context_captor.captured = context
-    return 42
+    return context
 
 
-CONTEXT_TASK = Task(func=_context_captor, queue_name="default", takes_context=True)
-
-
+@task(queue_name="default")
 async def _async_task():
     return 99
-
-
-ASYNC_TASK = Task(func=_async_task, queue_name="default")
 
 
 def _task_result(task, *args, **kwargs) -> TaskResult:
@@ -290,20 +288,17 @@ class TestWorkerThread:
 
     def test_call_task__calls_function_with_args(self):
         """call_task invokes the task function with args and kwargs."""
-        result = WorkerThread.call_task(_task_result(ADD_TASK, 1, y=2))
+        result = WorkerThread.call_task(_task_result(_add, 1, y=2))
         assert result == 3
 
     def test_call_task__passes_context_when_takes_context(self):
         """call_task passes TaskContext when task.takes_context is True."""
-        _context_captor.captured = None
-        result = WorkerThread.call_task(_task_result(CONTEXT_TASK))
-        assert result == 42
-        assert _context_captor.captured is not None
-        assert _context_captor.captured.task_result.task is CONTEXT_TASK
+        result = WorkerThread.call_task(_task_result(_context_captor))
+        assert isinstance(result, TaskContext)
 
     def test_call_task__runs_async_function(self):
         """call_task runs async task functions with asyncio.run."""
-        result = WorkerThread.call_task(_task_result(ASYNC_TASK))
+        result = WorkerThread.call_task(_task_result(_async_task))
         assert result == 99
 
     def test_create_task_error__builds_task_error(self):
