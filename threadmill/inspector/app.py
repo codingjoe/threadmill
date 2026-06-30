@@ -8,6 +8,7 @@ import math
 import typing
 from typing import Any
 
+from django.contrib.humanize.templatetags.humanize import naturaltime
 from django.tasks import (
     DEFAULT_TASK_QUEUE_NAME,
     TaskResult,
@@ -105,11 +106,11 @@ def _cell(result: TaskResult, column: str) -> str:
         case "priority":
             return str(result.task.priority)
         case "enqueued":
-            return _format_dt(result.enqueued_at)
+            return naturaltime(result.enqueued_at)
         case "started":
-            return _format_dt(result.started_at)
+            return naturaltime(result.started_at)
         case "finished":
-            return _format_dt(result.finished_at)
+            return naturaltime(result.finished_at)
         case "workers":
             return ", ".join(result.worker_ids) or "-"
 
