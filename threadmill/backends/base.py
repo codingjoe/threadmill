@@ -14,6 +14,41 @@ from django.tasks.base import TaskError
 from django.utils.module_loading import import_string
 
 
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueCounts:
+    """Point-in-time cardinality of each queue segment."""
+
+    ready: int
+    running: int
+    deferred: int
+    successful: int
+    failed: int
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueRates:
+    """Rolling ingress/egress throughput over a time window (time-series data)."""
+
+    interval: datetime.timedelta
+    ingress: int
+    egress: int
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class QueueStats:
+    """Telemetry for a single queue: point-in-time counts plus rolling rates."""
+
+    counts: QueueCounts
+    rates: QueueRates
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class BackendTelemetry:
+    """Snapshot of counts and rates across a backend's queues."""
+
+    queues: dict[str, QueueStats]
+
+
 class Broker(threading.Thread):
     """Backend maintenance thread launched by the task executor."""
 
@@ -138,8 +173,25 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         self,
         queue_name: str = DEFAULT_TASK_QUEUE_NAME,
         *,
-        status: TaskResultStatus | None = None,
+        status: TaskResultStatus,
         count: int = 1,
     ) -> collections.abc.Generator[TaskResult, None, None]:
-        """Yield acknowledged results from a queue, optionally filtered by status."""
+        """
+        Yield up to ``count`` tasks from a queue in the given status segment.
+
+        Args:
+            queue_name: The name of the queue to peek into.
+            status: The status of the tasks to yield.
+            count: The maximum number of tasks to yield. If 0, yield all available tasks.
+        """
+        raise NotImplementedError
+
+    def telemetry(
+        self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
+    ) -> BackendTelemetry:
+        """Return a snapshot of stats for all configured queues.
+
+        Args:
+            interval: The time window for rolling rates.
+        """
         raise NotImplementedError

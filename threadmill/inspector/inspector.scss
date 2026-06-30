@@ -1,0 +1,106 @@
+Screen {
+    background: $background;
+}
+
+* {
+    scrollbar-color: $primary 10%;
+    scrollbar-color-hover: $primary 80%;
+    scrollbar-color-active: $primary;
+    scrollbar-background: $surface-darken-1;
+    scrollbar-size-vertical: 1;
+
+    &:focus {
+        scrollbar-color: $primary 50%;
+    }
+}
+
+Select {
+    background: $background;
+
+    &:focus {
+        SelectCurrent {
+            background: $block-cursor-background;
+        }
+    }
+
+    SelectCurrent {
+        border: blank;
+        background: $block-cursor-background 40%;
+    }
+
+    & > SelectOverlay {
+        border: blank;
+    }
+}
+
+#left-pane {
+    width: 42;
+}
+
+#backend-row {
+    height: 3;
+}
+
+#backend-select {
+    width: 42;
+}
+
+#backend-options {
+    width: 1fr;
+    height: 3;
+    padding: 0 3;
+    background: $secondary 50%;
+    color: $foreground 80%;
+    content-align-vertical: middle;
+}
+
+QueueList {
+    height: 1fr;
+    width: 100%;
+    padding: 0 1;
+}
+
+QueueList ListItem {
+    height: auto;
+    padding: 0 1;
+    color: $foreground 80%;
+
+    &:focus {
+        color: $foreground;
+    }
+}
+
+TaskList {
+    height: 60%;
+
+    TabbedContent,
+    ContentSwitcher,
+    TabPane {
+        height: 1fr;
+    }
+}
+
+QueueList, TaskList, TaskDetail {
+    border: round $accent 40%;
+    border-title-color: $primary;
+    border-title-align: right;
+    background: $background;
+
+    &:focus-within {
+        border: round $accent 100%;
+    }
+}
+
+DataTable {
+    height: 100%;
+    width: 100%;
+    padding: 0 1;
+    background: $background;
+}
+
+TaskDetail {
+    height: 40%;
+    width: 100%;
+    overflow: scroll;
+    padding: 0 1;
+}

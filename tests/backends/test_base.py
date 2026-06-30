@@ -47,7 +47,16 @@ class TestAcknowledgeableTaskBackend:
     def test_peek__raise_not_implemented_error(self) -> None:
         """Raise NotImplementedError for backend peek_results API."""
         with pytest.raises(NotImplementedError):
-            list(BackendDouble(alias="default", params={}).peek("default"))
+            list(
+                BackendDouble(alias="default", params={}).peek(
+                    "default", status=TaskResultStatus.READY
+                )
+            )
+
+    def test_telemetry__raise_not_implemented_error(self) -> None:
+        """Raise NotImplementedError for backend telemetry API."""
+        with pytest.raises(NotImplementedError):
+            BackendDouble(alias="default", params={}).telemetry()
 
 
 class TestAcknowledgementTimeout:

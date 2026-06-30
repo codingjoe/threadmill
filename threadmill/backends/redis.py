@@ -16,7 +16,14 @@ from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
 from django.utils import timezone
 
-from threadmill.backends.base import Broker, ThreadmillTaskBackend
+from threadmill.backends.base import (
+    BackendTelemetry,
+    Broker,
+    QueueCounts,
+    QueueRates,
+    QueueStats,
+    ThreadmillTaskBackend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +76,11 @@ class RedisBroker(Broker):
         running_key = self.backend.RUNNING_KEY.format(
             prefix=self.backend.key_prefix, queue_name=queue_name
         )
-        results_key = self.backend.RESULTS_KEY.format(
+        failed_results_key = self.backend.FAILED_RESULTS_KEY.format(
             prefix=self.backend.key_prefix, queue_name=queue_name
         )
         self._reaper_script(
-            keys=[running_key, results_key],
+            keys=[running_key, failed_results_key],
             args=[
                 str(now_ms),
                 self.backend.key_prefix + ":task:",
@@ -86,6 +93,7 @@ class RedisBroker(Broker):
 
     def main(self) -> None:
         """Run mover and running reaper passes for all queues."""
+        now_ms = time.time() * 1000
         for queue_name in self.backend.queues:
             try:
                 self._move_queue(queue_name)
@@ -96,6 +104,11 @@ class RedisBroker(Broker):
                 self._reap_running_queue(queue_name)
             except Exception:  # noqa: BLE001
                 logger.exception("Running reaper error for queue %r", queue_name)
+
+            try:
+                self.backend._trim_telemetry(queue_name, now_ms=now_ms)
+            except Exception:  # noqa: BLE001
+                logger.exception("Telemetry trim error for queue %r", queue_name)
 
 
 class RedisTaskBackend(ThreadmillTaskBackend):
@@ -118,7 +131,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     DEFERRED_KEY = "{prefix}:deferred:{queue_name}"
     TASK_KEY = "{prefix}:task:{task_id}"
     RESULT_KEY = "{prefix}:result:{result_id}"
-    RESULTS_KEY = "{prefix}:results:{queue_name}"
+    SUCCESSFUL_RESULTS_KEY = "{prefix}:results:{queue_name}:successful"
+    FAILED_RESULTS_KEY = "{prefix}:results:{queue_name}:failed"
+    INGRESS_KEY = "{prefix}:ingress:{queue_name}:events"
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
     """Pop the next task from a priority queue and move it directly to the running set."""
@@ -181,10 +196,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         )
 
         score = self._compute_score(task.priority, enqueued_at)
+        enqueued_at_ms = enqueued_at.timestamp() * 1000
         serialized = self.serialize_task_result(task_result)
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_result.id)
         task_data_ttl = int(
             self.lease_ttl.total_seconds() * 3 + self.result_ttl.total_seconds()
+        )
+        ingress_key = self.INGRESS_KEY.format(
+            prefix=self.key_prefix, queue_name=task.queue_name
         )
 
         pipe = self.client.pipeline()
@@ -197,6 +216,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             },
         )
         pipe.expire(task_key, task_data_ttl)
+        pipe.zadd(ingress_key, {task_result.id: enqueued_at_ms})
 
         if task.run_after is not None:
             deferred_key = self.DEFERRED_KEY.format(
@@ -269,19 +289,29 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             prefix=self.key_prefix, result_id=task_result.id
         )
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_result.id)
-        results_key = self.RESULTS_KEY.format(
+        successful_results_key = self.SUCCESSFUL_RESULTS_KEY.format(
+            prefix=self.key_prefix, queue_name=task_result.task.queue_name
+        )
+        failed_results_key = self.FAILED_RESULTS_KEY.format(
             prefix=self.key_prefix, queue_name=task_result.task.queue_name
         )
         finished_at = task_result.finished_at or timezone.now()
         finish_score = finished_at.timestamp() * 1000
 
         self._acknowledge_script(
-            keys=[running_key, result_key, task_key, results_key],
+            keys=[
+                running_key,
+                result_key,
+                task_key,
+                successful_results_key,
+                failed_results_key,
+            ],
             args=[
                 task_result.id,
                 serialized,
                 str(int(self.result_ttl.total_seconds())),
                 str(finish_score),
+                task_result.status.name,
             ],
         )
 
@@ -289,28 +319,55 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self,
         queue_name: str = DEFAULT_TASK_QUEUE_NAME,
         *,
-        status: TaskResultStatus | None = None,
+        status: TaskResultStatus,
         count: int = 1,
     ) -> Generator[TaskResult]:
-        result_ids = [
-            rid.decode() if isinstance(rid, bytes) else rid
-            for rid in self.client.zrange(
-                self.RESULTS_KEY.format(prefix=self.key_prefix, queue_name=queue_name),
-                0,
-                count - 1,
-            )
-        ]
+        match status:
+            case TaskResultStatus.READY:
+                yield from self._peek(
+                    self.QUEUE_KEY, self.TASK_KEY, queue_name, count, "data"
+                )
+            case TaskResultStatus.RUNNING:
+                yield from self._peek(
+                    self.RUNNING_KEY, self.TASK_KEY, queue_name, count, "data"
+                )
+            case TaskResultStatus.SUCCESSFUL:
+                yield from self._peek(
+                    self.SUCCESSFUL_RESULTS_KEY, self.RESULT_KEY, queue_name, count
+                )
+            case TaskResultStatus.FAILED:
+                yield from self._peek(
+                    self.FAILED_RESULTS_KEY, self.RESULT_KEY, queue_name, count
+                )
+
+    def _peek(
+        self,
+        zset_key_template: str,
+        data_key_template: str,
+        queue_name: str,
+        count: int,
+        field: str | None = None,
+    ) -> Generator[TaskResult]:
+        zset_key = zset_key_template.format(
+            prefix=self.key_prefix, queue_name=queue_name
+        )
         pipe = self.client.pipeline()
-        for result_id in result_ids:
-            pipe.get(
-                self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
+        for member in self.client.zrange(zset_key, 0, count - 1):
+            member_id = member.decode() if isinstance(member, bytes) else member
+            data_key = data_key_template.format(
+                prefix=self.key_prefix,
+                task_id=member_id,
+                result_id=member_id,
             )
-        for _result_id, data in zip(result_ids, pipe.execute(), strict=False):
+            if field is None:
+                pipe.get(data_key)
+            else:
+                pipe.hget(data_key, field)
+        for data in pipe.execute():
             if data:
-                data_str = data.decode() if isinstance(data, bytes) else data
-                task_result = self.deserialize_task_result(data_str)
-                if status is None or task_result.status == status:
-                    yield task_result
+                yield self.deserialize_task_result(
+                    data.decode() if isinstance(data, bytes) else data
+                )
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
@@ -318,6 +375,94 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         ):
             return self.deserialize_task_result(data)
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
+
+    def _trim_telemetry(self, queue_name: str, *, now_ms: float) -> None:
+        cutoff = now_ms - self.result_ttl.total_seconds() * 1000
+        pipe = self.client.pipeline()
+        pipe.zremrangebyscore(
+            self.INGRESS_KEY.format(prefix=self.key_prefix, queue_name=queue_name),
+            0,
+            cutoff,
+        )
+        pipe.zremrangebyscore(
+            self.SUCCESSFUL_RESULTS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            ),
+            0,
+            cutoff,
+        )
+        pipe.zremrangebyscore(
+            self.FAILED_RESULTS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            ),
+            0,
+            cutoff,
+        )
+        pipe.execute()
+
+    def telemetry(
+        self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
+    ) -> BackendTelemetry:
+        now_ms = time.time() * 1000
+        window_start_ms = now_ms - interval.total_seconds() * 1000
+        exclusive_start = f"({window_start_ms}"
+        retention_start_ms = now_ms - self.result_ttl.total_seconds() * 1000
+        pipe = self.client.pipeline()
+        for queue_name in self.queues:
+            pipe.zcard(
+                self.QUEUE_KEY.format(prefix=self.key_prefix, queue_name=queue_name)
+            )
+            pipe.zcard(
+                self.RUNNING_KEY.format(prefix=self.key_prefix, queue_name=queue_name)
+            )
+            pipe.zcard(
+                self.DEFERRED_KEY.format(prefix=self.key_prefix, queue_name=queue_name)
+            )
+            successful_results_key = self.SUCCESSFUL_RESULTS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            )
+            failed_results_key = self.FAILED_RESULTS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            )
+            pipe.zcard(successful_results_key)
+            pipe.zcard(failed_results_key)
+            ingress_key = self.INGRESS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            )
+            pipe.zcount(ingress_key, exclusive_start, now_ms)
+            pipe.zcount(successful_results_key, exclusive_start, now_ms)
+            pipe.zcount(failed_results_key, exclusive_start, now_ms)
+            pipe.zremrangebyscore(ingress_key, 0, retention_start_ms)
+        results = pipe.execute()
+        queues: dict[str, QueueStats] = {}
+        for index, queue_name in enumerate(self.queues):
+            base = index * 9
+            (
+                ready,
+                running,
+                deferred,
+                successful,
+                failed,
+                ingress,
+                successful_rate,
+                failed_rate,
+                _,
+            ) = (int(c or 0) for c in results[base : base + 9])
+            queues[queue_name] = QueueStats(
+                counts=QueueCounts(
+                    ready=ready,
+                    running=running,
+                    deferred=deferred,
+                    successful=successful,
+                    failed=failed,
+                ),
+                rates=QueueRates(
+                    interval=interval,
+                    ingress=ingress,
+                    egress=successful_rate + failed_rate,
+                ),
+            )
+        return BackendTelemetry(queues=queues)
 
     def close(self) -> None:
         """Close the Redis connection."""

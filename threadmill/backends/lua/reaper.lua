@@ -1,7 +1,9 @@
--- Fail tasks whose processing lease has expired.
+-- Fail tasks whose processing lease has expired. Reaped tasks are recorded
+-- in the failed results history (the time series the inspector counts over),
+-- then evicted once older than result_ttl.
 --
 -- KEYS[1]  -- running set (ZSET)
--- KEYS[2]  -- results history set (ZSET)
+-- KEYS[2]  -- failed results history (ZSET, scored by finish time)
 -- ARGV[1]  -- current time in milliseconds (for score comparison)
 -- ARGV[2]  -- task key prefix (e.g. "threadmill:default:task:")
 -- ARGV[3]  -- result key prefix (e.g. "threadmill:default:result:")
@@ -33,4 +35,6 @@ for _, task_id in ipairs(stale) do
     end
   end
 end
+-- Evict failed results older than result_ttl to bound the history.
+redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, tonumber(ARGV[1]) - tonumber(ARGV[5]) * 1000)
 return #stale
