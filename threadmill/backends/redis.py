@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import queue
 import time
@@ -11,6 +12,7 @@ from collections.abc import Generator, Sequence
 from pathlib import Path
 
 import redis
+from django.core.serializers.json import DjangoJSONEncoder
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
@@ -19,10 +21,13 @@ from django.utils import timezone
 from threadmill.backends.base import (
     BackendTelemetry,
     Broker,
+    NodeTelemetry,
     QueueCounts,
     QueueRates,
     QueueStats,
     ThreadmillTaskBackend,
+    WorkerProcessTelemetry,
+    WorkerTelemetry,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +139,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     SUCCESSFUL_RESULTS_KEY = "{prefix}:results:{queue_name}:successful"
     FAILED_RESULTS_KEY = "{prefix}:results:{queue_name}:failed"
     INGRESS_KEY = "{prefix}:ingress:{queue_name}:events"
+    WORKER_TELEMETRY_CHANNEL = "{prefix}:worker-telemetry"
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
     """Pop the next task from a priority queue and move it directly to the running set."""
@@ -464,6 +470,145 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             )
         return BackendTelemetry(queues=queues)
 
+    def publish_worker_telemetry(self, telemetry: WorkerTelemetry) -> None:
+        """Publish a worker telemetry snapshot to the pub/sub channel."""
+        channel = self.WORKER_TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
+        self.client.publish(channel, _serialize_worker_telemetry(telemetry))
+
+    def worker_telemetry(self) -> WorkerTelemetry:
+        """Drain pending worker telemetry messages and merge them by node.
+
+        Returns an empty snapshot when no messages are waiting so the inspector
+        can render the worker view before any workers have reported.
+        """
+        channel = self.WORKER_TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
+        pubsub = self.client.pubsub(ignore_subscribe_messages=True)
+        pubsub.subscribe(channel)
+        nodes: dict[str, NodeTelemetry] = {}
+        queues: dict[str, set[str]] = {}
+        sampled_at = datetime.datetime.now(tz=datetime.UTC)
+        try:
+            while True:
+                message = pubsub.get_message(timeout=0.01)
+                if message is None:
+                    break
+                if message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if not data:
+                    continue
+                payload = data.decode() if isinstance(data, bytes) else data
+                snapshot = _deserialize_worker_telemetry(payload)
+                nodes.update(snapshot.nodes)
+                for queue_name, hostnames in snapshot.queues.items():
+                    queues.setdefault(queue_name, set()).update(hostnames)
+                if snapshot.sampled_at > sampled_at:
+                    sampled_at = snapshot.sampled_at
+        finally:
+            pubsub.close()
+        return WorkerTelemetry(
+            nodes=nodes,
+            queues={name: tuple(sorted(hosts)) for name, hosts in queues.items()},
+            sampled_at=sampled_at,
+        )
+
     def close(self) -> None:
         """Close the Redis connection."""
         self.client.close()
+
+
+def _serialize_worker_telemetry(telemetry: WorkerTelemetry) -> str:
+    """Serialize a WorkerTelemetry snapshot to a JSON string."""
+    return json.dumps(
+        {
+            "nodes": {
+                hostname: _serialize_node(node)
+                for hostname, node in telemetry.nodes.items()
+            },
+            "queues": {
+                queue_name: list(hostnames)
+                for queue_name, hostnames in telemetry.queues.items()
+            },
+            "sampled_at": telemetry.sampled_at.isoformat(),
+        },
+        cls=DjangoJSONEncoder,
+    )
+
+
+def _serialize_node(node: NodeTelemetry) -> dict:
+    """Serialize a NodeTelemetry to a JSON-ready dict."""
+    return {
+        "hostname": node.hostname,
+        "queues": list(node.queues),
+        "cpu_percent": node.cpu_percent,
+        "memory_percent": node.memory_percent,
+        "memory_bytes": node.memory_bytes,
+        "tasks_per_minute": node.tasks_per_minute,
+        "workers": {
+            name: _serialize_worker(worker) for name, worker in node.workers.items()
+        },
+        "sampled_at": node.sampled_at.isoformat(),
+    }
+
+
+def _serialize_worker(worker: WorkerProcessTelemetry) -> dict:
+    """Serialize a WorkerProcessTelemetry to a JSON-ready dict."""
+    return {
+        "name": worker.name,
+        "pid": worker.pid,
+        "queues": list(worker.queues),
+        "thread_count": worker.thread_count,
+        "task_count": worker.task_count,
+        "tasks_per_minute": worker.tasks_per_minute,
+        "cpu_percent": worker.cpu_percent,
+        "memory_bytes": worker.memory_bytes,
+        "sampled_at": worker.sampled_at.isoformat(),
+    }
+
+
+def _deserialize_worker_telemetry(payload: str) -> WorkerTelemetry:
+    """Deserialize a JSON string into a WorkerTelemetry snapshot."""
+    data = json.loads(payload)
+    nodes = {
+        hostname: _deserialize_node(node_data)
+        for hostname, node_data in data.get("nodes", {}).items()
+    }
+    queues = {
+        queue_name: tuple(hostnames)
+        for queue_name, hostnames in data.get("queues", {}).items()
+    }
+    sampled_at = datetime.datetime.fromisoformat(data["sampled_at"])
+    return WorkerTelemetry(nodes=nodes, queues=queues, sampled_at=sampled_at)
+
+
+def _deserialize_node(data: dict) -> NodeTelemetry:
+    """Deserialize a JSON dict into a NodeTelemetry."""
+    workers = {
+        name: _deserialize_worker(worker_data)
+        for name, worker_data in data.get("workers", {}).items()
+    }
+    return NodeTelemetry(
+        hostname=data["hostname"],
+        queues=tuple(data.get("queues", [])),
+        cpu_percent=data["cpu_percent"],
+        memory_percent=data["memory_percent"],
+        memory_bytes=data["memory_bytes"],
+        tasks_per_minute=data["tasks_per_minute"],
+        workers=workers,
+        sampled_at=datetime.datetime.fromisoformat(data["sampled_at"]),
+    )
+
+
+def _deserialize_worker(data: dict) -> WorkerProcessTelemetry:
+    """Deserialize a JSON dict into a WorkerProcessTelemetry."""
+    return WorkerProcessTelemetry(
+        name=data["name"],
+        pid=data["pid"],
+        queues=tuple(data.get("queues", [])),
+        thread_count=data["thread_count"],
+        task_count=data["task_count"],
+        tasks_per_minute=data["tasks_per_minute"],
+        cpu_percent=data["cpu_percent"],
+        memory_bytes=data["memory_bytes"],
+        sampled_at=datetime.datetime.fromisoformat(data["sampled_at"]),
+    )

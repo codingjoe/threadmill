@@ -104,3 +104,32 @@ TaskDetail {
     overflow: scroll;
     padding: 0 1;
 }
+
+#selection-tree {
+    height: 1fr;
+    width: 100%;
+    border: round $accent 40%;
+    border-title-color: $primary;
+    border-title-align: right;
+    background: $background;
+    padding: 0 1;
+
+    &:focus-within {
+        border: round $accent 100%;
+    }
+}
+
+#worker-graphs {
+    height: 40%;
+    width: 100%;
+    border: round $accent 40%;
+    border-title-color: $primary;
+    border-title-align: right;
+    background: $background;
+    padding: 0 1;
+}
+
+#worker-graphs Sparkline {
+    height: 1fr;
+    width: 100%;
+}

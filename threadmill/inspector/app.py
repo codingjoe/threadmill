@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import logging
 import math
@@ -26,12 +27,19 @@ from textual.widgets import (
     ListItem,
     ListView,
     Select,
+    Sparkline,
     Static,
     TabbedContent,
     TabPane,
+    Tree,
 )
+from textual.widgets.tree import TreeNode
 
-from ..backends.base import BackendTelemetry, ThreadmillTaskBackend
+from ..backends.base import (
+    BackendTelemetry,
+    ThreadmillTaskBackend,
+    WorkerTelemetry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +348,175 @@ class QueueList(ListView):
         self.app._task_list.queue_name = queue_name
 
 
+@dataclasses.dataclass
+class WorkerTreeNode:
+    """A node in the Queue -> Node -> Worker selection tree."""
+
+    kind: str
+    label: str
+    queue_name: str = ""
+    hostname: str = ""
+    worker_name: str = ""
+
+
+class SelectionTree(Tree[WorkerTreeNode]):
+    """Queue -> Node -> Worker hierarchy built from worker telemetry."""
+
+    telemetry: reactive[WorkerTelemetry | None] = reactive(None)
+
+    def compose(self) -> ComposeResult:
+        yield from super().compose()
+        self.border_title = "Selection"
+        self.show_root = False
+
+    def watch_telemetry(self, telemetry: WorkerTelemetry | None) -> None:
+        """Rebuild the tree when a new telemetry snapshot arrives."""
+        if telemetry is not None:
+            self.update_telemetry(telemetry)
+
+    def update_telemetry(self, telemetry: WorkerTelemetry) -> None:
+        """Rebuild the tree from a telemetry snapshot, preserving the cursor."""
+        previous_data = self.cursor_node.data if self.cursor_node else None
+        self.clear()
+        for queue_name in sorted(telemetry.queues):
+            queue_node = self.root.add(
+                queue_name,
+                WorkerTreeNode(
+                    kind="queue",
+                    label=queue_name,
+                    queue_name=queue_name,
+                ),
+                expand=True,
+            )
+            for hostname in telemetry.queues[queue_name]:
+                node_telemetry = telemetry.nodes.get(hostname)
+                if node_telemetry is None:
+                    continue
+                host_label = f"{hostname}  cpu {node_telemetry.cpu_percent:.0f}%  mem {si_prefix(node_telemetry.memory_bytes)}B"
+                host_node = queue_node.add(
+                    host_label,
+                    WorkerTreeNode(
+                        kind="node",
+                        label=host_label,
+                        queue_name=queue_name,
+                        hostname=hostname,
+                    ),
+                    expand=True,
+                )
+                for worker_name, worker in sorted(node_telemetry.workers.items()):
+                    worker_label = (
+                        f"{worker_name}  "
+                        f"cpu {worker.cpu_percent:.0f}%  "
+                        f"mem {si_prefix(worker.memory_bytes)}B  "
+                        f"{worker.tasks_per_minute:.0f}/min"
+                    )
+                    host_node.add_leaf(
+                        worker_label,
+                        WorkerTreeNode(
+                            kind="worker",
+                            label=worker_label,
+                            queue_name=queue_name,
+                            hostname=hostname,
+                            worker_name=worker_name,
+                        ),
+                    )
+        self._restore_cursor(previous_data)
+
+    def _restore_cursor(self, previous_data: WorkerTreeNode | None) -> None:
+        """Move the cursor to the previously selected node, if still present."""
+        if previous_data is None or not self.root.children:
+            return
+        node = self._find_node_by_data(self.root, previous_data)
+        if node is not None:
+            self.call_after_refresh(self.select_node, node)
+
+    @staticmethod
+    def _find_node_by_data(
+        root: TreeNode[WorkerTreeNode], target: WorkerTreeNode
+    ) -> TreeNode[WorkerTreeNode] | None:
+        """Depth-first search for a tree node whose data matches *target*."""
+        for child in root.children:
+            if child.data == target:
+                return child
+            result = SelectionTree._find_node_by_data(child, target)
+            if result is not None:
+                return result
+        return None
+
+
+class WorkerGraphs(Static):
+    """Fixed-position throughput/CPU/memory graphs for the worker view."""
+
+    telemetry: reactive[WorkerTelemetry | None] = reactive(None)
+    selection: reactive[WorkerTreeNode | None] = reactive(None)
+
+    GRAPH_HISTORY_SIZE = 60
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._throughput_history: list[float] = []
+        self._cpu_history: list[float] = []
+        self._memory_history: list[float] = []
+
+    def compose(self) -> ComposeResult:
+        yield from super().compose()
+        self.border_title = "Worker Graphs"
+        yield Sparkline(id="worker-throughput-graph", data=[])
+        yield Sparkline(id="worker-cpu-graph", data=[])
+        yield Sparkline(id="worker-memory-graph", data=[])
+
+    def watch_selection(self) -> None:
+        """Reset histories when the selection changes."""
+        self._throughput_history = []
+        self._cpu_history = []
+        self._memory_history = []
+        self._refresh_graphs()
+
+    def watch_telemetry(self) -> None:
+        self._refresh_graphs()
+
+    def _refresh_graphs(self) -> None:
+        """Append the current sample to each graph and redraw."""
+        telemetry = self.telemetry
+        selection = self.selection
+        if telemetry is None or selection is None:
+            return
+        node = telemetry.nodes.get(selection.hostname)
+        if node is None:
+            return
+        if selection.kind == "node":
+            throughput = node.tasks_per_minute
+            cpu = node.cpu_percent
+            memory = node.memory_percent
+        elif selection.kind == "worker":
+            worker = node.workers.get(selection.worker_name)
+            if worker is None:
+                return
+            throughput = worker.tasks_per_minute
+            cpu = worker.cpu_percent
+            memory = worker.memory_bytes
+        else:
+            return
+        self._throughput_history.append(throughput)
+        self._cpu_history.append(cpu)
+        self._memory_history.append(memory)
+        self._throughput_history = self._throughput_history[-self.GRAPH_HISTORY_SIZE :]
+        self._cpu_history = self._cpu_history[-self.GRAPH_HISTORY_SIZE :]
+        self._memory_history = self._memory_history[-self.GRAPH_HISTORY_SIZE :]
+        try:
+            self.query_one("#worker-throughput-graph", Sparkline).data = list(
+                self._throughput_history
+            )
+            self.query_one("#worker-cpu-graph", Sparkline).data = list(
+                self._cpu_history
+            )
+            self.query_one("#worker-memory-graph", Sparkline).data = list(
+                self._memory_history
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Worker graph widgets not yet mounted")
+
+
 class InspectorApp(App):
     """Threadmill TUI inspector with backend/queue/task panes."""
 
@@ -347,6 +524,7 @@ class InspectorApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("f5", "refresh", "Refresh"),
+        Binding("v", "toggle_view", "Toggle View"),
         *(
             Binding(key, f"switch_tab('tab-{tab_id}')", tab_id.capitalize())
             for tab_id, key in TAB_KEYS.items()
@@ -355,6 +533,10 @@ class InspectorApp(App):
 
     backend: reactive[ThreadmillTaskBackend] = reactive(None)
     telemetry: reactive[BackendTelemetry] = reactive(None, always_update=True)
+    worker_telemetry: reactive[WorkerTelemetry | None] = reactive(
+        None, always_update=True
+    )
+    worker_view_enabled: reactive[bool] = reactive(False)
 
     def __init__(
         self,
@@ -367,6 +549,8 @@ class InspectorApp(App):
         self._task_list: TaskList | None = None
         self._task_detail: TaskDetail | None = None
         self._options_static: Static | None = None
+        self._selection_tree: SelectionTree | None = None
+        self._worker_graphs: WorkerGraphs | None = None
         self._telemetry_timer = None
         self._auto_refresh = auto_refresh
         self.set_reactive(InspectorApp.backend, backend)
@@ -388,12 +572,18 @@ class InspectorApp(App):
                     yield QueueList(id="queue-list").data_bind(
                         telemetry=InspectorApp.telemetry
                     )
+                    yield SelectionTree(
+                        "Worker Telemetry", id="selection-tree"
+                    ).data_bind(telemetry=InspectorApp.worker_telemetry)
                 with Vertical(id="right-pane"):
                     yield TaskList(id="task-list").data_bind(
                         backend=InspectorApp.backend,
                         telemetry=InspectorApp.telemetry,
                     )
                     yield TaskDetail(id="task-detail", name="Task Detail")
+                    yield WorkerGraphs(id="worker-graphs").data_bind(
+                        telemetry=InspectorApp.worker_telemetry,
+                    )
         yield Footer(show_command_palette=True)
 
     def on_mount(self) -> None:
@@ -403,6 +593,8 @@ class InspectorApp(App):
         self._task_list = self.query_one("#task-list", TaskList)
         self._task_detail = self.query_one("#task-detail", TaskDetail)
         self._options_static = self.query_one("#backend-options", Static)
+        self._selection_tree = self.query_one("#selection-tree", SelectionTree)
+        self._worker_graphs = self.query_one("#worker-graphs", WorkerGraphs)
         self._refresh_options()
         self._refresh_telemetry()
         if self._auto_refresh:
@@ -411,6 +603,7 @@ class InspectorApp(App):
                 self._refresh_telemetry,
                 name="telemetry-refresh",
             )
+        self._apply_worker_view_visibility()
         self._queue_list.focus()
 
     def action_quit(self) -> None:
@@ -425,6 +618,36 @@ class InspectorApp(App):
     def action_switch_tab(self, tab_id: str) -> None:
         """Activate the task status tab matching the given id."""
         self._task_list.switch_tab(tab_id)
+
+    def action_toggle_view(self) -> None:
+        """Switch between queue view and worker view."""
+        self.worker_view_enabled = not self.worker_view_enabled
+
+    def watch_worker_view_enabled(self, enabled: bool) -> None:
+        """Show/hide widgets when the view mode changes."""
+        self._apply_worker_view_visibility()
+
+    def _apply_worker_view_visibility(self) -> None:
+        """Toggle display of queue vs worker widgets."""
+        if self.worker_view_enabled:
+            self._queue_list.display = False
+            self._task_list.display = False
+            self._task_detail.display = False
+            self._selection_tree.display = True
+            self._worker_graphs.display = True
+            self._selection_tree.focus()
+        else:
+            self._queue_list.display = True
+            self._task_list.display = True
+            self._task_detail.display = True
+            self._selection_tree.display = False
+            self._worker_graphs.display = False
+            self._queue_list.focus()
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        """Update worker graphs when a tree node is selected."""
+        if event.node.data is not None and isinstance(event.node.data, WorkerTreeNode):
+            self._worker_graphs.selection = event.node.data
 
     def watch_backend(self) -> None:
         self._refresh_options()
@@ -456,8 +679,12 @@ class InspectorApp(App):
         self._options_static.update(" ".join(parts) or "No options")
 
     def _refresh_telemetry(self) -> None:
-        """Poll the backend for fresh telemetry."""
+        """Poll the backend for fresh queue and worker telemetry."""
         try:
             self.telemetry = self.backend.telemetry()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to refresh telemetry")
+        try:
+            self.worker_telemetry = self.backend.worker_telemetry()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to refresh worker telemetry")

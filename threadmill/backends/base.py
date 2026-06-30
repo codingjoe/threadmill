@@ -71,6 +71,50 @@ class BackendTelemetry:
     queues: dict[str, QueueStats]
 
 
+@dataclasses.dataclass(kw_only=True, slots=True)
+class WorkerProcessTelemetry:
+    """Telemetry for a single worker process (one OS process)."""
+
+    name: str
+    pid: int
+    queues: tuple[str, ...]
+    thread_count: int
+    task_count: int
+    tasks_per_minute: float
+    cpu_percent: float
+    memory_bytes: int
+    sampled_at: datetime.datetime
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class NodeTelemetry:
+    """Telemetry for a single node (host) running worker processes."""
+
+    hostname: str
+    queues: tuple[str, ...]
+    cpu_percent: float
+    memory_percent: float
+    memory_bytes: int
+    tasks_per_minute: float
+    workers: dict[str, WorkerProcessTelemetry]
+    sampled_at: datetime.datetime
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class WorkerTelemetry:
+    """Snapshot of worker pool health across a backend's queues and nodes.
+
+    ``nodes`` is keyed by hostname; each node carries its own CPU/mem sample
+    plus a dict of worker-process samples keyed by worker name. ``queues``
+    maps each queue name to the hostnames listening on it, so the inspector
+    can render a Queue -> Node -> Worker selection tree.
+    """
+
+    nodes: dict[str, NodeTelemetry]
+    queues: dict[str, tuple[str, ...]]
+    sampled_at: datetime.datetime
+
+
 class Broker(threading.Thread):
     """Backend maintenance thread launched by the task executor."""
 
@@ -218,3 +262,22 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
             interval: The time window for rolling rates.
         """
         raise NotImplementedError
+
+    def publish_worker_telemetry(self, telemetry: WorkerTelemetry) -> None:
+        """Publish a worker-pool telemetry snapshot to subscribers.
+
+        Backends without a pub/sub transport implement this as a no-op so the
+        worker command still runs without worker telemetry.
+        """
+
+    def worker_telemetry(self) -> WorkerTelemetry:
+        """Return the latest worker-pool telemetry snapshot, or an empty one.
+
+        Backends without a pub/sub transport return an empty snapshot so the
+        inspector can render the worker view without raising.
+        """
+        return WorkerTelemetry(
+            nodes={},
+            queues={},
+            sampled_at=datetime.datetime.now(tz=datetime.UTC),
+        )

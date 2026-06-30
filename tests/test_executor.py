@@ -253,6 +253,29 @@ class TestWorkerProcess:
         worker.shutdown_requested.set()
         assert worker.shutdown_requested.is_set()
 
+    def test_run__starts_and_stops_telemetry_sampler(self):
+        """run() creates, starts, and stops a TelemetrySampler."""
+        from unittest.mock import MagicMock, patch
+
+        sampler = MagicMock()
+        worker = _make_worker()
+        # Patch TelemetrySampler so run() uses our mock instead of the real one.
+        # Patch WorkerThread so consumer threads exit immediately.
+        with (
+            patch("threadmill.executor.TelemetrySampler", return_value=sampler),
+            patch(
+                "threadmill.executor.WorkerThread",
+                side_effect=lambda **kwargs: MagicMock(
+                    start=lambda: None,
+                    join=lambda timeout=None: None,
+                ),
+            ),
+        ):
+            worker.run()
+        sampler.start.assert_called_once()
+        sampler.stop.assert_called_once()
+        assert worker.telemetry_sampler is sampler
+
 
 class TestWorkerThread:
     """Tests for the WorkerThread class."""

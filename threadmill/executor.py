@@ -23,6 +23,8 @@ from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
 
+from .telemetry import TelemetrySampler
+
 if typing.TYPE_CHECKING:
     from .backends.base import Broker, ThreadmillTaskBackend
 
@@ -145,6 +147,7 @@ class WorkerProcess(multiprocessing.Process):
         self.task_count = 0
         self.lock: threading.Lock | None = None
         self.expired: threading.Event | None = None
+        self.telemetry_sampler: TelemetrySampler | None = None
 
     def run(self) -> None:
         """Start consumer execution inside this process."""
@@ -152,6 +155,8 @@ class WorkerProcess(multiprocessing.Process):
         self.lock = threading.Lock()
         self.expired = threading.Event()
         backend = task_backends[self.backend_alias]
+        self.telemetry_sampler = TelemetrySampler(backend, worker_process=self)
+        self.telemetry_sampler.start()
         consumer_threads = [
             WorkerThread(worker=self, index=index, backend=backend)
             for index in range(self.thread_count)
@@ -162,6 +167,7 @@ class WorkerProcess(multiprocessing.Process):
             consumer_thread.join(
                 backend.result_ttl.total_seconds() if backend.result_ttl else None
             )
+        self.telemetry_sampler.stop()
 
     def record_task(self) -> None:
         """Record one processed task and stop when max_tasks is reached."""

@@ -41,6 +41,9 @@ redis = ["redis>=5.0"]
 inspector = [
     "textual>=8.2.7",
 ]
+worker = [
+    "psutil>=7.2.2",
+]
 
 [project.urls]
 # https://packaging.python.org/en/latest/specifications/well-known-project-urls/#well-known-labels

@@ -7,6 +7,7 @@ import time
 from dataclasses import replace
 from unittest.mock import patch
 
+import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
 from django.utils import timezone
@@ -687,3 +688,148 @@ class TestRedisTaskBackendPeek:
         )
         assert successful == []
         assert failed == []
+
+
+class TestWorkerTelemetrySerialization:
+    """Tests for worker telemetry JSON serialization/deserialization."""
+
+    def test_serialize_deserialize_roundtrip(self):
+        """A WorkerTelemetry snapshot survives a serialize→deserialize roundtrip."""
+        from threadmill.backends.base import (
+            NodeTelemetry,
+            WorkerProcessTelemetry,
+            WorkerTelemetry,
+        )
+        from threadmill.backends.redis import (
+            _deserialize_worker_telemetry,
+            _serialize_worker_telemetry,
+        )
+
+        sampled_at = datetime.datetime.now(tz=datetime.UTC)
+        worker = WorkerProcessTelemetry(
+            name="host:100-0",
+            pid=100,
+            queues=("default", "high"),
+            thread_count=4,
+            task_count=50,
+            tasks_per_minute=12.5,
+            cpu_percent=33.0,
+            memory_bytes=200_000_000,
+            sampled_at=sampled_at,
+        )
+        node = NodeTelemetry(
+            hostname="host",
+            queues=("default", "high"),
+            cpu_percent=45.0,
+            memory_percent=60.0,
+            memory_bytes=8_000_000_000,
+            tasks_per_minute=12.5,
+            workers={"host:100-0": worker},
+            sampled_at=sampled_at,
+        )
+        original = WorkerTelemetry(
+            nodes={"host": node},
+            queues={"default": ("host",), "high": ("host",)},
+            sampled_at=sampled_at,
+        )
+        payload = _serialize_worker_telemetry(original)
+        restored = _deserialize_worker_telemetry(payload)
+        assert restored.sampled_at == original.sampled_at
+        assert set(restored.nodes) == {"host"}
+        assert set(restored.queues) == {"default", "high"}
+        r_node = restored.nodes["host"]
+        assert r_node.hostname == "host"
+        assert r_node.cpu_percent == 45.0
+        assert r_node.memory_bytes == 8_000_000_000
+        assert "host:100-0" in r_node.workers
+        r_worker = r_node.workers["host:100-0"]
+        assert r_worker.pid == 100
+        assert r_worker.queues == ("default", "high")
+        assert r_worker.cpu_percent == 33.0
+
+
+@pytest.mark.integration
+class TestWorkerTelemetryPubSub:
+    """Integration tests for worker telemetry PUB/SUB over real Redis."""
+
+    def test_publish_and_subscribe_roundtrip(self):
+        """publish_worker_telemetry sends, worker_telemetry receives."""
+        backend = RedisTaskBackend(
+            "worker_telemetry_pubsub_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            from threadmill.backends.base import (
+                NodeTelemetry,
+                WorkerProcessTelemetry,
+                WorkerTelemetry,
+            )
+
+            sampled_at = datetime.datetime.now(tz=datetime.UTC)
+            worker = WorkerProcessTelemetry(
+                name="testhost:200-0",
+                pid=200,
+                queues=("default",),
+                thread_count=2,
+                task_count=5,
+                tasks_per_minute=10.0,
+                cpu_percent=20.0,
+                memory_bytes=50_000_000,
+                sampled_at=sampled_at,
+            )
+            node = NodeTelemetry(
+                hostname="testhost",
+                queues=("default",),
+                cpu_percent=30.0,
+                memory_percent=40.0,
+                memory_bytes=4_000_000_000,
+                tasks_per_minute=10.0,
+                workers={"testhost:200-0": worker},
+                sampled_at=sampled_at,
+            )
+            snapshot = WorkerTelemetry(
+                nodes={"testhost": node},
+                queues={"default": ("testhost",)},
+                sampled_at=sampled_at,
+            )
+            backend.publish_worker_telemetry(snapshot)
+
+            # Small delay for pub/sub propagation
+            time.sleep(0.1)
+            received = backend.worker_telemetry()
+            assert "testhost" in received.nodes
+            r_node = received.nodes["testhost"]
+            assert r_node.hostname == "testhost"
+            assert r_node.cpu_percent == 30.0
+            assert "testhost:200-0" in r_node.workers
+            r_worker = r_node.workers["testhost:200-0"]
+            assert r_worker.pid == 200
+            assert r_worker.cpu_percent == 20.0
+            assert "default" in received.queues
+        finally:
+            backend.close()
+
+    def test_worker_telemetry_empty_when_no_messages(self):
+        """worker_telemetry returns an empty snapshot when no messages are waiting."""
+        backend = RedisTaskBackend(
+            "worker_telemetry_empty_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            snapshot = backend.worker_telemetry()
+            assert snapshot.nodes == {}
+            assert snapshot.queues == {}
+        finally:
+            backend.close()
