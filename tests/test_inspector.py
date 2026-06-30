@@ -4,6 +4,9 @@ import dataclasses
 import datetime
 
 import pytest
+
+pytest.importorskip("textual.widgets")
+
 from django.tasks import (
     DEFAULT_TASK_QUEUE_NAME,
     TaskResult,

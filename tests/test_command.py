@@ -9,7 +9,6 @@ from django.core.management import CommandError, call_command
 from django.tasks import Task, default_task_backend
 
 from tests.testapp.tasks import compute_workload, io_workload, memory_workload
-from threadmill.inspector.app import InspectorApp
 from threadmill.management.commands import threadmill
 
 
@@ -154,6 +153,7 @@ class TestCommand:
 class TestInspectorCommand:
     def test_add_arguments__registers_defaults(self):
         """InspectorCommand registers the backend option."""
+        pytest.importorskip("textual.widgets")
         parser = argparse.ArgumentParser()
         threadmill.InspectorCommand().add_arguments(parser)
         args = parser.parse_args([])
@@ -161,16 +161,21 @@ class TestInspectorCommand:
 
     def test_handle__raises_command_error_for_invalid_backend(self):
         """An unknown backend alias raises CommandError."""
+        pytest.importorskip("textual.widgets")
         with pytest.raises(CommandError, match="Invalid backend"):
             threadmill.InspectorCommand().handle(backend="nonexistent")
 
     def test_handle__raises_command_error_for_unsupported_backend(self):
         """A backend without ThreadmillTaskBackend support raises CommandError."""
+        pytest.importorskip("textual.widgets")
         with pytest.raises(CommandError, match="does not support inspection"):
             threadmill.InspectorCommand().handle(backend="immediate")
 
     def test_handle__launches_inspector_app(self):
         """A supported backend launches the inspector app."""
+        pytest.importorskip("textual.widgets")
+        from threadmill.inspector.app import InspectorApp
+
         with patch.object(InspectorApp, "run"):
             threadmill.InspectorCommand().handle(backend="default")
 
