@@ -33,7 +33,7 @@ from threadmill.inspector.app import (
 
 
 class FailingBackend(ThreadmillTaskBackend):
-    """Backend double whose peek and queue_telemetry raise for error-path tests."""
+    """Backend double whose peek and telemetry raise for error-path tests."""
 
     def enqueue(self, task, args, kwargs):
         raise NotImplementedError

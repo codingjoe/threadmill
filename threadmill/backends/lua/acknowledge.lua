@@ -25,11 +25,10 @@ redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 redis.call('DEL', KEYS[3])
 local finish = tonumber(ARGV[4])
 local cutoff = finish - tonumber(ARGV[3]) * 1000
-if ARGV[5] == 'SUCCESSFUL' then
-  redis.call('ZADD', KEYS[4], finish, ARGV[1])
-  redis.call('ZREMRANGEBYSCORE', KEYS[4], 0, cutoff)
-else
-  redis.call('ZADD', KEYS[5], finish, ARGV[1])
-  redis.call('ZREMRANGEBYSCORE', KEYS[5], 0, cutoff)
+local results_key = KEYS[4]
+if ARGV[5] ~= 'SUCCESSFUL' then
+  results_key = KEYS[5]
 end
+redis.call('ZADD', results_key, finish, ARGV[1])
+redis.call('ZREMRANGEBYSCORE', results_key, 0, cutoff)
 return 1

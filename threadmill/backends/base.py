@@ -177,11 +177,11 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         count: int = 1,
     ) -> collections.abc.Generator[TaskResult, None, None]:
         """
-        Yield tasks from a queue, optionally filtered by status.
+        Yield up to ``count`` tasks from a queue in the given status segment.
 
         Args:
             queue_name: The name of the queue to peek into.
-            status: If provided, only yield tasks with this status.
+            status: The status of the tasks to yield.
             count: The maximum number of tasks to yield. If 0, yield all available tasks.
         """
         raise NotImplementedError

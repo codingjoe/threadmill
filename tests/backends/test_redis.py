@@ -75,7 +75,7 @@ class TestRedisBroker:
         assert "Telemetry trim error for queue" in caplog.text
 
     def test_main__trims_stale_telemetry(self):
-        """main() trims ingress events older than the result_ttl retention horizon."""
+        """main() trims every telemetry series older than result_ttl."""
         backend = RedisTaskBackend(
             "broker_trim_test",
             {
@@ -91,14 +91,26 @@ class TestRedisBroker:
             ingress_key = backend.INGRESS_KEY.format(
                 prefix=backend.key_prefix, queue_name="default"
             )
+            successful_key = backend.SUCCESSFUL_RESULTS_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            failed_key = backend.FAILED_RESULTS_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
             old = (timezone.now() - datetime.timedelta(seconds=120)).timestamp() * 1000
             backend.client.zadd(ingress_key, {task_result.id: old})
+            backend.client.zadd(successful_key, {task_result.id: old})
+            backend.client.zadd(failed_key, {task_result.id: old})
             assert backend.client.zcard(ingress_key) == 1
+            assert backend.client.zcard(successful_key) == 1
+            assert backend.client.zcard(failed_key) == 1
 
             broker = RedisBroker(backend)
             broker.main()
 
             assert backend.client.zcard(ingress_key) == 0
+            assert backend.client.zcard(successful_key) == 0
+            assert backend.client.zcard(failed_key) == 0
         finally:
             backend.close()
 
@@ -262,7 +274,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     def test_telemetry__empty_backend(self):
-        """queue_telemetry returns zero counts for an empty backend."""
+        """Telemetry returns zero counts for an empty backend."""
         backend = RedisTaskBackend(
             "telemetry_empty_test",
             {
@@ -280,7 +292,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     def test_telemetry__counts_tasks(self):
-        """queue_telemetry reflects per-minute ingress/egress and status counters."""
+        """Telemetry reflects windowed ingress/egress rates and per-status counts."""
         backend = RedisTaskBackend(
             "telemetry_counts_test",
             {
@@ -379,7 +391,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     def test_telemetry__successful_failed_evicted_by_result_ttl(self):
-        """successful/failed are segment counts that drop when results age out."""
+        """successful/failed segment counts drop when results age out of result_ttl."""
         backend = RedisTaskBackend(
             "telemetry_eviction_test",
             {
@@ -391,44 +403,45 @@ class TestRedisTaskBackend:
             },
         )
         try:
-            first = backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="eviction-test"
-            )
-            assert acquired is not None
-            backend.acknowledge(
-                dataclasses.replace(
-                    acquired,
-                    status=TaskResultStatus.SUCCESSFUL,
-                    finished_at=timezone.now(),
-                )
-            )
             successful_key = backend.SUCCESSFUL_RESULTS_KEY.format(
                 prefix=backend.key_prefix, queue_name="default"
             )
-            assert backend.client.zcard(successful_key) == 1
-
-            # Age the first result beyond the retention horizon.
-            old = (timezone.now() - datetime.timedelta(seconds=120)).timestamp() * 1000
-            backend.client.zadd(successful_key, {first.id: old})
-
-            # A subsequent acknowledge evicts results older than result_ttl.
-            backend.enqueue(echo, args=[2])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="eviction-test"
+            failed_key = backend.FAILED_RESULTS_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
             )
-            assert acquired is not None
-            backend.acknowledge(
-                dataclasses.replace(
-                    acquired,
-                    status=TaskResultStatus.SUCCESSFUL,
-                    finished_at=timezone.now(),
+
+            def _ack(status: TaskResultStatus) -> str:
+                enqueued = backend.enqueue(echo, args=[1])
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="eviction-test"
                 )
-            )
+                assert acquired is not None
+                backend.acknowledge(
+                    dataclasses.replace(
+                        acquired, status=status, finished_at=timezone.now()
+                    )
+                )
+                return enqueued.id
+
+            first_successful = _ack(TaskResultStatus.SUCCESSFUL)
+            first_failed = _ack(TaskResultStatus.FAILED)
+            assert backend.client.zcard(successful_key) == 1
+            assert backend.client.zcard(failed_key) == 1
+
+            # Age the first results beyond the retention horizon.
+            old = (timezone.now() - datetime.timedelta(seconds=120)).timestamp() * 1000
+            backend.client.zadd(successful_key, {first_successful: old})
+            backend.client.zadd(failed_key, {first_failed: old})
+
+            # A subsequent acknowledge of each status evicts results older than result_ttl.
+            _ack(TaskResultStatus.SUCCESSFUL)
+            _ack(TaskResultStatus.FAILED)
 
             assert backend.client.zcard(successful_key) == 1
+            assert backend.client.zcard(failed_key) == 1
             stats = backend.telemetry().queues["default"]
             assert stats.counts.successful == 1
+            assert stats.counts.failed == 1
         finally:
             backend.close()
 
@@ -520,6 +533,58 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    def test_telemetry__egress_window_follows_display_interval(self):
+        """Egress rates are windowed by the display interval, not by result_ttl."""
+        backend = RedisTaskBackend(
+            "telemetry_egress_window_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            backend.enqueue(echo, args=[1])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="egress-window-test"
+            )
+            assert acquired is not None
+            backend.acknowledge(
+                dataclasses.replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+            successful_key = backend.SUCCESSFUL_RESULTS_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+
+            # Inside result_ttl (60s) but outside a 10s display window.
+            recent = (
+                timezone.now() - datetime.timedelta(seconds=30)
+            ).timestamp() * 1000
+            backend.client.zadd(successful_key, {acquired.id: recent})
+
+            # A narrow window excludes the 30s-old result from the egress rate...
+            narrow = backend.telemetry(interval=datetime.timedelta(seconds=10)).queues[
+                "default"
+            ]
+            assert narrow.rates.egress == 0
+            # ...but it is still a present segment member (ZCARD is time-independent).
+            assert narrow.counts.successful == 1
+
+            # A wide window (60s) includes the 30s-old result in the egress rate.
+            wide = backend.telemetry(interval=datetime.timedelta(seconds=60)).queues[
+                "default"
+            ]
+            assert wide.rates.egress == 1
+            assert wide.counts.successful == 1
+        finally:
+            backend.close()
+
 
 class TestRedisTaskBackendPeek:
     """Tests for the RedisTaskBackend peek API."""
@@ -607,3 +672,18 @@ class TestRedisTaskBackendPeek:
             )
         )
         assert results == []
+
+    def test_peek__empty_history_returns_nothing(self):
+        """Peek SUCCESSFUL/FAILED yields nothing when the history is empty."""
+        successful = list(
+            default_task_backend.peek(
+                queue_name="default", status=TaskResultStatus.SUCCESSFUL, count=10
+            )
+        )
+        failed = list(
+            default_task_backend.peek(
+                queue_name="default", status=TaskResultStatus.FAILED, count=10
+            )
+        )
+        assert successful == []
+        assert failed == []

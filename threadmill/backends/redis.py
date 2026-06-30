@@ -354,38 +354,36 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             )
 
     def _peek_results(
-        self, queue_name: str, count: int, status: TaskResultStatus | None
+        self, queue_name: str, count: int, status: TaskResultStatus
     ) -> Generator[TaskResult]:
-        """Yield acknowledged results, optionally filtered by status.
+        """Yield acknowledged results from the per-status history ZSET.
 
         Results live in per-status history ZSETs, so the ZSET membership is
         the status filter and no Python-side filtering is needed.
         """
-        if status is None:
-            key_templates = [self.SUCCESSFUL_RESULTS_KEY, self.FAILED_RESULTS_KEY]
-        elif status == TaskResultStatus.SUCCESSFUL:
-            key_templates = [self.SUCCESSFUL_RESULTS_KEY]
-        else:
-            key_templates = [self.FAILED_RESULTS_KEY]
-        for key_template in key_templates:
-            key = key_template.format(prefix=self.key_prefix, queue_name=queue_name)
-            result_ids = [
-                rid.decode() if isinstance(rid, bytes) else rid
-                for rid in self.client.zrange(key, 0, count - 1)
-            ]
-            if not result_ids:
+        key_template = (
+            self.SUCCESSFUL_RESULTS_KEY
+            if status == TaskResultStatus.SUCCESSFUL
+            else self.FAILED_RESULTS_KEY
+        )
+        key = key_template.format(prefix=self.key_prefix, queue_name=queue_name)
+        result_ids = [
+            rid.decode() if isinstance(rid, bytes) else rid
+            for rid in self.client.zrange(key, 0, count - 1)
+        ]
+        if not result_ids:
+            return
+        pipe = self.client.pipeline()
+        for result_id in result_ids:
+            pipe.get(
+                self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
+            )
+        for data in pipe.execute():
+            if not data:
                 continue
-            pipe = self.client.pipeline()
-            for result_id in result_ids:
-                pipe.get(
-                    self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
-                )
-            for data in pipe.execute():
-                if not data:
-                    continue
-                yield self.deserialize_task_result(
-                    data.decode() if isinstance(data, bytes) else data
-                )
+            yield self.deserialize_task_result(
+                data.decode() if isinstance(data, bytes) else data
+            )
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
@@ -395,13 +393,37 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
 
     def _trim_telemetry(self, queue_name: str, *, now_ms: float) -> None:
-        """Drop ingress events older than the retention horizon for one queue."""
+        """Drop telemetry time-series older than the retention horizon for one queue.
+
+        Ingress events and the per-status result history ZSETs all share
+        ``result_ttl`` as the retention horizon, so the broker evicts each on
+        every pass. Trimming the result segments here (not only on
+        acknowledge/reaper) bounds the segment counts even when a queue stops
+        acknowledging, so ``counts.successful``/``counts.failed`` cannot hold
+        stale members whose result strings already expired.
+        """
         cutoff = now_ms - self.result_ttl.total_seconds() * 1000
-        self.client.zremrangebyscore(
+        pipe = self.client.pipeline()
+        pipe.zremrangebyscore(
             self.INGRESS_KEY.format(prefix=self.key_prefix, queue_name=queue_name),
             0,
             cutoff,
         )
+        pipe.zremrangebyscore(
+            self.SUCCESSFUL_RESULTS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            ),
+            0,
+            cutoff,
+        )
+        pipe.zremrangebyscore(
+            self.FAILED_RESULTS_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            ),
+            0,
+            cutoff,
+        )
+        pipe.execute()
 
     def telemetry(
         self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
