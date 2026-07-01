@@ -608,6 +608,23 @@ class TestWorkerView:
             assert app.worker_view_enabled is False
             assert app.query_one("#queue-list", QueueList).display
 
+    async def test_toggle_binding_label_updates(self):
+        """The 'v' binding description changes with the current view."""
+        from textual.binding import Binding
+
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.worker_view_enabled is False
+            binding = app._bindings.key_to_bindings["v"][0]
+            assert isinstance(binding, Binding)
+            assert binding.description == "Toggle Worker View"
+            await pilot.press("v")
+            await pilot.pause()
+            assert app.worker_view_enabled is True
+            binding = app._bindings.key_to_bindings["v"][0]
+            assert binding.description == "Toggle Queue View"
+
     async def test_worker_graphs_update_on_selection(self):
         """Selecting a node feeds the worker graphs."""
         app = InspectorApp(backend=default_task_backend, auto_refresh=False)
@@ -644,10 +661,13 @@ class TestWorkerView:
             )
             graphs.selection = node_data
             await pilot.pause()
+            # History is pre-filled with zeros at the fixed window size.
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
             graphs.telemetry = snapshot
             await pilot.pause()
-            assert len(graphs._cpu_history) == 1
-            assert graphs._cpu_history[0] == 45.0
+            # The last entry is the new sample; length stays fixed.
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
+            assert graphs._cpu_history[-1] == 45.0
 
     async def test_refresh_telemetry_fetches_worker_telemetry(self):
         """_refresh_telemetry populates the worker_telemetry reactive."""
@@ -698,8 +718,8 @@ class TestWorkerView:
             graphs.selection = host_node.data
             graphs.telemetry = snapshot
             await pilot.pause()
-            assert len(graphs._cpu_history) == 1
-            assert graphs._cpu_history[0] == 45.0
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
+            assert graphs._cpu_history[-1] == 45.0
 
     async def test_selection_tree_resets_cursor_when_node_gone(self):
         """_find_node_by_data returns None when the previous node is gone."""
@@ -732,7 +752,7 @@ class TestWorkerView:
             await pilot.pause()
             graphs.telemetry = _make_worker_telemetry()
             await pilot.pause()
-            assert len(graphs._cpu_history) == 1
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
             # Change selection to a different node — watch_selection resets
             # histories, then _refresh_graphs appends from the current telemetry.
             graphs.selection = WorkerTreeNode(
@@ -741,8 +761,10 @@ class TestWorkerView:
                 hostname="node-2",
             )
             await pilot.pause()
-            # After reset, histories are empty because node-2 is not in telemetry.
-            assert len(graphs._cpu_history) == 0
+            # After reset, histories are pre-filled with zeros; node-2 is not
+            # in telemetry, so no new sample is appended.
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
+            assert graphs._cpu_history[-1] == 0.0
 
     async def test_worker_graphs_ignore_missing_node(self):
         """Graphs do nothing when the selected node is not in the telemetry."""
@@ -756,7 +778,8 @@ class TestWorkerView:
             await pilot.pause()
             graphs.telemetry = _make_worker_telemetry()
             await pilot.pause()
-            assert len(graphs._cpu_history) == 0
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
+            assert graphs._cpu_history[-1] == 0.0
 
     async def test_refresh_telemetry_logs_on_worker_telemetry_error(self):
         """_refresh_telemetry logs when worker_telemetry raises."""
@@ -802,7 +825,8 @@ class TestWorkerView:
             await pilot.pause()
             graphs.telemetry = _make_worker_telemetry()
             await pilot.pause()
-            assert len(graphs._cpu_history) == 0
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
+            assert graphs._cpu_history[-1] == 0.0
 
     async def test_worker_graphs_handles_unmounted_widgets(self):
         """_refresh_graphs logs when Sparkline widgets are not yet mounted."""
@@ -821,4 +845,4 @@ class TestWorkerView:
                 graphs.telemetry = _make_worker_telemetry()
                 await pilot.pause()
             # Histories are populated even though the graph redraw failed.
-            assert len(graphs._cpu_history) == 1
+            assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE

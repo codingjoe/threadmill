@@ -120,8 +120,6 @@ TaskDetail {
 }
 
 #worker-graphs {
-    height: 40%;
-    width: 100%;
     border: round $accent 40%;
     border-title-color: $primary;
     border-title-align: right;
@@ -131,7 +129,9 @@ TaskDetail {
 
 #worker-graphs Sparkline {
     height: 1fr;
-    width: 100%;
+    border: round $accent 40%;
+    border-title-color: $primary;
+    border-title-align: right;
 }
 
 #worker-throughput-graph {
@@ -144,12 +144,4 @@ TaskDetail {
 
 #worker-memory-graph {
     color: $success;
-}
-
-#worker-throughput-label,
-#worker-cpu-label,
-#worker-memory-label {
-    color: $foreground 70%;
-    padding: 0 1;
-    height: 1;
 }

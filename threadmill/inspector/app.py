@@ -37,6 +37,7 @@ from textual.widgets.tree import TreeNode
 
 from ..backends.base import (
     BackendTelemetry,
+    NodeTelemetry,
     ThreadmillTaskBackend,
     WorkerTelemetry,
 )
@@ -391,18 +392,11 @@ class SelectionTree(Tree[WorkerTreeNode]):
                 node_telemetry = telemetry.nodes.get(hostname)
                 if node_telemetry is None:
                     continue
-                host_label = (
-                    f"{hostname}  "
-                    f"cpu {node_telemetry.cpu_percent:.0f}%  "
-                    f"mem {node_telemetry.memory_percent:.0f}%  "
-                    f"procs {node_telemetry.process_count}  "
-                    f"threads {node_telemetry.thread_count}"
-                )
                 queue_node.add_leaf(
-                    host_label,
+                    hostname,
                     WorkerTreeNode(
                         kind="node",
-                        label=host_label,
+                        label=hostname,
                         queue_name=queue_name,
                         hostname=hostname,
                     ),
@@ -432,34 +426,32 @@ class SelectionTree(Tree[WorkerTreeNode]):
 
 
 class WorkerGraphs(Static):
-    """Fixed-position throughput/CPU/memory graphs for the worker view."""
+    """Throughput/CPU/memory graphs for the worker view."""
 
     telemetry: reactive[WorkerTelemetry | None] = reactive(None)
     selection: reactive[WorkerTreeNode | None] = reactive(None)
 
-    GRAPH_HISTORY_SIZE = 60
+    # 60 s of data at a 2 s sample interval = 30 data points.
+    GRAPH_HISTORY_SIZE = int(60 / TELEMETRY_INTERVAL_SECONDS)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._throughput_history: list[float] = []
-        self._cpu_history: list[float] = []
-        self._memory_history: list[float] = []
+        self._throughput_history: list[float] = [0.0] * self.GRAPH_HISTORY_SIZE
+        self._cpu_history: list[float] = [0.0] * self.GRAPH_HISTORY_SIZE
+        self._memory_history: list[float] = [0.0] * self.GRAPH_HISTORY_SIZE
 
     def compose(self) -> ComposeResult:
         yield from super().compose()
         self.border_title = "Worker Graphs"
-        yield Static("Throughput (tasks/min)", id="worker-throughput-label")
         yield Sparkline(id="worker-throughput-graph", data=[])
-        yield Static("CPU (%)", id="worker-cpu-label")
         yield Sparkline(id="worker-cpu-graph", data=[])
-        yield Static("Memory (%)", id="worker-memory-label")
         yield Sparkline(id="worker-memory-graph", data=[])
 
     def watch_selection(self) -> None:
         """Reset histories when the selection changes."""
-        self._throughput_history = []
-        self._cpu_history = []
-        self._memory_history = []
+        self._throughput_history = [0.0] * self.GRAPH_HISTORY_SIZE
+        self._cpu_history = [0.0] * self.GRAPH_HISTORY_SIZE
+        self._memory_history = [0.0] * self.GRAPH_HISTORY_SIZE
         self._refresh_graphs()
 
     def watch_telemetry(self) -> None:
@@ -472,28 +464,55 @@ class WorkerGraphs(Static):
         if telemetry is None or selection is None:
             return
         node = telemetry.nodes.get(selection.hostname)
-        if node is None:
-            return
-        if selection.kind != "node":
+        if node is None or selection.kind != "node":
             return
         self._throughput_history.append(node.tasks_per_minute)
         self._cpu_history.append(node.cpu_percent)
         self._memory_history.append(node.memory_percent)
-        self._throughput_history = self._throughput_history[-self.GRAPH_HISTORY_SIZE :]
-        self._cpu_history = self._cpu_history[-self.GRAPH_HISTORY_SIZE :]
-        self._memory_history = self._memory_history[-self.GRAPH_HISTORY_SIZE :]
+        self._trim_histories()
+        self._update_border_titles(node)
         try:
-            self.query_one("#worker-throughput-graph", Sparkline).data = list(
-                self._throughput_history
-            )
-            self.query_one("#worker-cpu-graph", Sparkline).data = list(
-                self._cpu_history
-            )
-            self.query_one("#worker-memory-graph", Sparkline).data = list(
-                self._memory_history
-            )
+            self.query_one(
+                "#worker-throughput-graph", Sparkline
+            ).data = self._throughput_history
+            self.query_one("#worker-cpu-graph", Sparkline).data = [
+                0.0,
+                *self._cpu_history,
+                100.0,
+            ]
+            self.query_one("#worker-memory-graph", Sparkline).data = [
+                0.0,
+                *self._memory_history,
+                100.0,
+            ]
         except Exception:  # noqa: BLE001
             logger.debug("Worker graph widgets not yet mounted")
+
+    def _trim_histories(self) -> None:
+        """Keep each history list at GRAPH_HISTORY_SIZE by dropping the oldest entry."""
+        for attr in (
+            "_throughput_history",
+            "_cpu_history",
+            "_memory_history",
+        ):
+            history = getattr(self, attr)
+            del history[: -self.GRAPH_HISTORY_SIZE]
+
+    def _update_border_titles(self, node: NodeTelemetry) -> None:
+        """Show current values in the sparkline border titles."""
+        try:
+            throughput = self.query_one("#worker-throughput-graph", Sparkline)
+            cpu = self.query_one("#worker-cpu-graph", Sparkline)
+            mem = self.query_one("#worker-memory-graph", Sparkline)
+        except Exception:  # noqa: BLE001
+            return
+        throughput.border_title = f"Throughput  {node.tasks_per_minute:.0f} tasks/min"
+        cpu.border_title = f"CPU  {node.cpu_percent:.0f}%"
+        mem.border_title = (
+            f"Memory  {node.memory_percent:.0f}%  "
+            f"{si_prefix(node.memory_bytes)}B  "
+            f"procs {node.process_count}  threads {node.thread_count}"
+        )
 
 
 class InspectorApp(App):
@@ -503,7 +522,7 @@ class InspectorApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("f5", "refresh", "Refresh"),
-        Binding("v", "toggle_view", "Toggle View"),
+        Binding("v", "toggle_view", "Toggle Worker View"),
         *(
             Binding(key, f"switch_tab('tab-{tab_id}')", tab_id.capitalize())
             for tab_id, key in TAB_KEYS.items()
@@ -603,8 +622,18 @@ class InspectorApp(App):
         self.worker_view_enabled = not self.worker_view_enabled
 
     def watch_worker_view_enabled(self, enabled: bool) -> None:
-        """Show/hide widgets when the view mode changes."""
+        """Show/hide widgets and update the toggle binding label."""
         self._apply_worker_view_visibility()
+        # Update the binding description: "Toggle Worker View" when in
+        # queue view, "Toggle Queue View" when in worker view.
+        self._bindings.key_to_bindings["v"] = [
+            Binding(
+                "v",
+                "toggle_view",
+                "Toggle Queue View" if enabled else "Toggle Worker View",
+            )
+        ]
+        self.refresh_bindings()
 
     def _apply_worker_view_visibility(self) -> None:
         """Toggle display of queue vs worker widgets."""
