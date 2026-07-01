@@ -17,13 +17,9 @@
 
 ## Design Principles
 
-- **Durability** – We recover from any failures, even poorly written tasks.
-- **Consistency** – We never lose data, even if someone unplugs the power or network.
-- **Utilization** – We keep the CPU saturated with tasks, not with idle time or waiting for locks.
-
-## Sponsors
-
-[![Sponsors](https://django.the-box.sh/sponsors/codingjoe/threadmill.svg)](https://github.com/sponsors/codingjoe)
+- **Durability** – Recover from any failures, even poorly written tasks.
+- **Consistency** – Never lose data, even if someone unplugs the power or network.
+- **Utilization** – Keep the CPU saturated with tasks, not with idle time or waiting for locks.
 
 ## Setup
 
@@ -133,5 +129,9 @@ All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
 shard. Scale horizontally by running additional backend aliases, not by relying
 on cross-slot operations.
+
+## Sponsors
+
+[![Sponsors](https://django.the-box.sh/sponsors/codingjoe/threadmill.svg)](https://github.com/sponsors/codingjoe)
 
 [django-tasks]: https://docs.djangoproject.com/en/stable/topics/tasks/
