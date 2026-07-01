@@ -73,7 +73,11 @@ class BackendTelemetry:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class WorkerProcessTelemetry:
-    """Telemetry for a single worker process (one OS process)."""
+    """Telemetry for a single worker process (one OS process).
+
+    CPU and memory are tracked at the node level only, since per-process
+    memory accounting is noisy and per-process CPU adds too much clutter.
+    """
 
     name: str
     pid: int
@@ -81,17 +85,22 @@ class WorkerProcessTelemetry:
     thread_count: int
     task_count: int
     tasks_per_minute: float
-    cpu_percent: float
-    memory_bytes: int
     sampled_at: datetime.datetime
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class NodeTelemetry:
-    """Telemetry for a single node (host) running worker processes."""
+    """Telemetry for a single node (host) running worker processes.
+
+    ``process_count`` and ``thread_count`` aggregate across all worker
+    processes on this node.  CPU and memory are sampled at the system level
+    via ``psutil``.
+    """
 
     hostname: str
     queues: tuple[str, ...]
+    process_count: int
+    thread_count: int
     cpu_percent: float
     memory_percent: float
     memory_bytes: int
@@ -104,10 +113,10 @@ class NodeTelemetry:
 class WorkerTelemetry:
     """Snapshot of worker pool health across a backend's queues and nodes.
 
-    ``nodes`` is keyed by hostname; each node carries its own CPU/mem sample
-    plus a dict of worker-process samples keyed by worker name. ``queues``
-    maps each queue name to the hostnames listening on it, so the inspector
-    can render a Queue -> Node -> Worker selection tree.
+    ``nodes`` is keyed by hostname; each node carries system-level CPU/mem
+    plus a dict of worker-process entries (name, pid, threads, throughput).
+    ``queues`` maps each queue name to the hostnames listening on it, so the
+    inspector can render a Queue -> Node selection tree.
     """
 
     nodes: dict[str, NodeTelemetry]

@@ -34,13 +34,13 @@ def _make_worker_telemetry(
         thread_count=2,
         task_count=10,
         tasks_per_minute=30.0,
-        cpu_percent=12.5,
-        memory_bytes=100_000_000,
         sampled_at=sampled_at,
     )
     node = NodeTelemetry(
         hostname=hostname,
         queues=("default",),
+        process_count=1,
+        thread_count=2,
         cpu_percent=45.0,
         memory_percent=60.0,
         memory_bytes=8_000_000_000,
@@ -68,8 +68,6 @@ class TestWorkerTelemetryDataTypes:
             thread_count=4,
             task_count=50,
             tasks_per_minute=12.0,
-            cpu_percent=33.0,
-            memory_bytes=200_000_000,
             sampled_at=now,
         )
         assert worker.name == "host:100-0"
@@ -78,8 +76,6 @@ class TestWorkerTelemetryDataTypes:
         assert worker.thread_count == 4
         assert worker.task_count == 50
         assert worker.tasks_per_minute == 12.0
-        assert worker.cpu_percent == 33.0
-        assert worker.memory_bytes == 200_000_000
         assert worker.sampled_at == now
 
     def test_node_telemetry_fields(self):
@@ -92,13 +88,13 @@ class TestWorkerTelemetryDataTypes:
             thread_count=1,
             task_count=0,
             tasks_per_minute=0.0,
-            cpu_percent=5.0,
-            memory_bytes=50_000_000,
             sampled_at=now,
         )
         node = NodeTelemetry(
             hostname="host",
             queues=("default",),
+            process_count=1,
+            thread_count=1,
             cpu_percent=20.0,
             memory_percent=50.0,
             memory_bytes=4_000_000_000,
@@ -107,6 +103,8 @@ class TestWorkerTelemetryDataTypes:
             sampled_at=now,
         )
         assert node.hostname == "host"
+        assert node.process_count == 1
+        assert node.thread_count == 1
         assert node.cpu_percent == 20.0
         assert node.memory_percent == 50.0
         assert node.memory_bytes == 4_000_000_000
@@ -122,13 +120,13 @@ class TestWorkerTelemetryDataTypes:
             thread_count=1,
             task_count=0,
             tasks_per_minute=0.0,
-            cpu_percent=0.0,
-            memory_bytes=0,
             sampled_at=now,
         )
         node = NodeTelemetry(
             hostname="h",
             queues=("default",),
+            process_count=1,
+            thread_count=1,
             cpu_percent=0.0,
             memory_percent=0.0,
             memory_bytes=0,
@@ -193,11 +191,6 @@ class TestTelemetrySampler:
 
     def test_sample_returns_worker_telemetry(self):
         """sample() builds a WorkerTelemetry with node and worker data."""
-        fake_process = MagicMock()
-        fake_process.cpu_percent.return_value = 15.0
-        fake_process.memory_info.return_value = MagicMock(rss=123_456_789)
-        fake_process.pid = 100
-
         fake_vmem = MagicMock()
         fake_vmem.percent = 55.0
         fake_vmem.total = 8_000_000_000
@@ -212,7 +205,7 @@ class TestTelemetrySampler:
             patch("threadmill.telemetry.psutil") as fake_psutil,
             patch("threadmill.telemetry.socket.gethostname", return_value="testhost"),
         ):
-            fake_psutil.Process.return_value = fake_process
+            fake_psutil.Process.return_value = MagicMock(pid=100)
             fake_psutil.cpu_percent.return_value = 42.0
             fake_psutil.virtual_memory.return_value = fake_vmem
 
@@ -224,11 +217,11 @@ class TestTelemetrySampler:
         assert node.cpu_percent == 42.0
         assert node.memory_percent == 55.0
         assert node.memory_bytes == 8_000_000_000
+        assert node.process_count == 1
+        assert node.thread_count == 2
         assert "testhost:100-0" in node.workers
         worker = node.workers["testhost:100-0"]
         assert worker.pid == 100
-        assert worker.cpu_percent == 15.0
-        assert worker.memory_bytes == 123_456_789
         assert worker.task_count == 5
         assert "default" in snapshot.queues
         assert "testhost" in snapshot.queues["default"]
@@ -291,11 +284,6 @@ class TestTelemetrySampler:
             worker_process=worker_process,
         )
 
-        fake_process = MagicMock()
-        fake_process.cpu_percent.return_value = 5.0
-        fake_process.memory_info.return_value = MagicMock(rss=1000)
-        fake_process.pid = 100
-
         fake_vmem = MagicMock()
         fake_vmem.percent = 40.0
         fake_vmem.total = 4_000_000_000
@@ -304,7 +292,7 @@ class TestTelemetrySampler:
             patch("threadmill.telemetry.psutil") as fake_psutil,
             patch("threadmill.telemetry.socket.gethostname", return_value="h"),
         ):
-            fake_psutil.Process.return_value = fake_process
+            fake_psutil.Process.return_value = MagicMock(pid=100)
             fake_psutil.cpu_percent.return_value = 10.0
             fake_psutil.virtual_memory.return_value = fake_vmem
             sampler._publish_one_sample()
@@ -325,11 +313,6 @@ class TestTelemetrySampler:
             interval_seconds=0.01,
         )
 
-        fake_process = MagicMock()
-        fake_process.cpu_percent.return_value = 5.0
-        fake_process.memory_info.return_value = MagicMock(rss=1000)
-        fake_process.pid = 100
-
         fake_vmem = MagicMock()
         fake_vmem.percent = 40.0
         fake_vmem.total = 4_000_000_000
@@ -338,7 +321,7 @@ class TestTelemetrySampler:
             patch("threadmill.telemetry.psutil") as fake_psutil,
             patch("threadmill.telemetry.socket.gethostname", return_value="h"),
         ):
-            fake_psutil.Process.return_value = fake_process
+            fake_psutil.Process.return_value = MagicMock(pid=100)
             fake_psutil.cpu_percent.return_value = 10.0
             fake_psutil.virtual_memory.return_value = fake_vmem
             with caplog.at_level(logging.ERROR):

@@ -492,6 +492,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                             hostname: NodeTelemetry(
                                 hostname=node.hostname,
                                 queues=node.queues,
+                                process_count=node.process_count,
+                                thread_count=node.thread_count,
                                 cpu_percent=node.cpu_percent,
                                 memory_percent=node.memory_percent,
                                 memory_bytes=node.memory_bytes,
@@ -536,6 +538,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     nodes[hostname].queues = tuple(
                         sorted(set(nodes[hostname].queues) | set(node.queues))
                     )
+                    nodes[hostname].process_count += node.process_count
+                    nodes[hostname].thread_count += node.thread_count
                 else:
                     nodes[hostname] = node
                 for queue_name in node.queues:
@@ -576,6 +580,8 @@ def _serialize_node(node: NodeTelemetry) -> dict:
     return {
         "hostname": node.hostname,
         "queues": list(node.queues),
+        "process_count": node.process_count,
+        "thread_count": node.thread_count,
         "cpu_percent": node.cpu_percent,
         "memory_percent": node.memory_percent,
         "memory_bytes": node.memory_bytes,
@@ -596,8 +602,6 @@ def _serialize_worker(worker: WorkerProcessTelemetry) -> dict:
         "thread_count": worker.thread_count,
         "task_count": worker.task_count,
         "tasks_per_minute": worker.tasks_per_minute,
-        "cpu_percent": worker.cpu_percent,
-        "memory_bytes": worker.memory_bytes,
         "sampled_at": worker.sampled_at.isoformat(),
     }
 
@@ -626,6 +630,8 @@ def _deserialize_node(data: dict) -> NodeTelemetry:
     return NodeTelemetry(
         hostname=data["hostname"],
         queues=tuple(data.get("queues", [])),
+        process_count=data["process_count"],
+        thread_count=data["thread_count"],
         cpu_percent=data["cpu_percent"],
         memory_percent=data["memory_percent"],
         memory_bytes=data["memory_bytes"],
@@ -644,7 +650,5 @@ def _deserialize_worker(data: dict) -> WorkerProcessTelemetry:
         thread_count=data["thread_count"],
         task_count=data["task_count"],
         tasks_per_minute=data["tasks_per_minute"],
-        cpu_percent=data["cpu_percent"],
-        memory_bytes=data["memory_bytes"],
         sampled_at=datetime.datetime.fromisoformat(data["sampled_at"]),
     )

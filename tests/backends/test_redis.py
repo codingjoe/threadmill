@@ -713,13 +713,13 @@ class TestWorkerTelemetrySerialization:
             thread_count=4,
             task_count=50,
             tasks_per_minute=12.5,
-            cpu_percent=33.0,
-            memory_bytes=200_000_000,
             sampled_at=sampled_at,
         )
         node = NodeTelemetry(
             hostname="host",
             queues=("default", "high"),
+            process_count=1,
+            thread_count=4,
             cpu_percent=45.0,
             memory_percent=60.0,
             memory_bytes=8_000_000_000,
@@ -739,13 +739,14 @@ class TestWorkerTelemetrySerialization:
         assert set(restored.queues) == {"default", "high"}
         r_node = restored.nodes["host"]
         assert r_node.hostname == "host"
+        assert r_node.process_count == 1
+        assert r_node.thread_count == 4
         assert r_node.cpu_percent == 45.0
         assert r_node.memory_bytes == 8_000_000_000
         assert "host:100-0" in r_node.workers
         r_worker = r_node.workers["host:100-0"]
         assert r_worker.pid == 100
         assert r_worker.queues == ("default", "high")
-        assert r_worker.cpu_percent == 33.0
 
 
 @pytest.mark.integration
@@ -779,13 +780,13 @@ class TestWorkerTelemetryRedis:
                 thread_count=2,
                 task_count=5,
                 tasks_per_minute=10.0,
-                cpu_percent=20.0,
-                memory_bytes=50_000_000,
                 sampled_at=sampled_at,
             )
             node = NodeTelemetry(
                 hostname="testhost",
                 queues=("default",),
+                process_count=1,
+                thread_count=2,
                 cpu_percent=30.0,
                 memory_percent=40.0,
                 memory_bytes=4_000_000_000,
@@ -805,10 +806,11 @@ class TestWorkerTelemetryRedis:
             r_node = received.nodes["testhost"]
             assert r_node.hostname == "testhost"
             assert r_node.cpu_percent == 30.0
+            assert r_node.process_count == 1
+            assert r_node.thread_count == 2
             assert "testhost:200-0" in r_node.workers
             r_worker = r_node.workers["testhost:200-0"]
             assert r_worker.pid == 200
-            assert r_worker.cpu_percent == 20.0
             assert "default" in received.queues
         finally:
             backend.close()

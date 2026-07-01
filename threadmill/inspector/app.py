@@ -350,17 +350,16 @@ class QueueList(ListView):
 
 @dataclasses.dataclass
 class WorkerTreeNode:
-    """A node in the Queue -> Node -> Worker selection tree."""
+    """A node in the Queue -> Node selection tree."""
 
     kind: str
     label: str
     queue_name: str = ""
     hostname: str = ""
-    worker_name: str = ""
 
 
 class SelectionTree(Tree[WorkerTreeNode]):
-    """Queue -> Node -> Worker hierarchy built from worker telemetry."""
+    """Queue -> Node hierarchy built from worker telemetry."""
 
     telemetry: reactive[WorkerTelemetry | None] = reactive(None)
 
@@ -392,8 +391,14 @@ class SelectionTree(Tree[WorkerTreeNode]):
                 node_telemetry = telemetry.nodes.get(hostname)
                 if node_telemetry is None:
                     continue
-                host_label = f"{hostname}  cpu {node_telemetry.cpu_percent:.0f}%  mem {si_prefix(node_telemetry.memory_bytes)}B"
-                host_node = queue_node.add(
+                host_label = (
+                    f"{hostname}  "
+                    f"cpu {node_telemetry.cpu_percent:.0f}%  "
+                    f"mem {node_telemetry.memory_percent:.0f}%  "
+                    f"procs {node_telemetry.process_count}  "
+                    f"threads {node_telemetry.thread_count}"
+                )
+                queue_node.add_leaf(
                     host_label,
                     WorkerTreeNode(
                         kind="node",
@@ -401,25 +406,7 @@ class SelectionTree(Tree[WorkerTreeNode]):
                         queue_name=queue_name,
                         hostname=hostname,
                     ),
-                    expand=True,
                 )
-                for worker_name, worker in sorted(node_telemetry.workers.items()):
-                    worker_label = (
-                        f"{worker_name}  "
-                        f"cpu {worker.cpu_percent:.0f}%  "
-                        f"mem {si_prefix(worker.memory_bytes)}B  "
-                        f"{worker.tasks_per_minute:.0f}/min"
-                    )
-                    host_node.add_leaf(
-                        worker_label,
-                        WorkerTreeNode(
-                            kind="worker",
-                            label=worker_label,
-                            queue_name=queue_name,
-                            hostname=hostname,
-                            worker_name=worker_name,
-                        ),
-                    )
         self._restore_cursor(previous_data)
 
     def _restore_cursor(self, previous_data: WorkerTreeNode | None) -> None:
@@ -461,8 +448,11 @@ class WorkerGraphs(Static):
     def compose(self) -> ComposeResult:
         yield from super().compose()
         self.border_title = "Worker Graphs"
+        yield Static("Throughput (tasks/min)", id="worker-throughput-label")
         yield Sparkline(id="worker-throughput-graph", data=[])
+        yield Static("CPU (%)", id="worker-cpu-label")
         yield Sparkline(id="worker-cpu-graph", data=[])
+        yield Static("Memory (%)", id="worker-memory-label")
         yield Sparkline(id="worker-memory-graph", data=[])
 
     def watch_selection(self) -> None:
@@ -484,22 +474,11 @@ class WorkerGraphs(Static):
         node = telemetry.nodes.get(selection.hostname)
         if node is None:
             return
-        if selection.kind == "node":
-            throughput = node.tasks_per_minute
-            cpu = node.cpu_percent
-            memory = node.memory_percent
-        elif selection.kind == "worker":
-            worker = node.workers.get(selection.worker_name)
-            if worker is None:
-                return
-            throughput = worker.tasks_per_minute
-            cpu = worker.cpu_percent
-            memory = worker.memory_bytes
-        else:
+        if selection.kind != "node":
             return
-        self._throughput_history.append(throughput)
-        self._cpu_history.append(cpu)
-        self._memory_history.append(memory)
+        self._throughput_history.append(node.tasks_per_minute)
+        self._cpu_history.append(node.cpu_percent)
+        self._memory_history.append(node.memory_percent)
         self._throughput_history = self._throughput_history[-self.GRAPH_HISTORY_SIZE :]
         self._cpu_history = self._cpu_history[-self.GRAPH_HISTORY_SIZE :]
         self._memory_history = self._memory_history[-self.GRAPH_HISTORY_SIZE :]

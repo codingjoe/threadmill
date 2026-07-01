@@ -1,9 +1,9 @@
-"""Worker-pool telemetry sampling via psutil and Redis pub/sub.
+"""Worker-pool telemetry sampling via psutil and a Redis key store.
 
 The :class:`TelemetrySampler` runs inside each worker process. It periodically
-samples the process and node CPU/memory plus the rolling task throughput, then
-publishes a :class:`~threadmill.backends.base.WorkerTelemetry` snapshot through
-the backend's :meth:`publish_worker_telemetry` hook. ``psutil`` is an optional
+samples the node CPU/memory plus the rolling task throughput, then publishes a
+:class:`~threadmill.backends.base.WorkerTelemetry` snapshot through the
+backend's :meth:`publish_worker_telemetry` hook. ``psutil`` is an optional
 dependency; when it is missing the sampler is a silent no-op so the worker
 command still functions.
 """
@@ -84,9 +84,8 @@ class TelemetrySampler:
             self._thread = None
 
     def _run(self) -> None:
-        # Prime the CPU percent counters so the first sample is meaningful.
+        # Prime the CPU percent counter so the first sample is meaningful.
         psutil.cpu_percent(interval=None)
-        psutil.Process().cpu_percent(interval=None)
         while not self._stop_requested.wait(self.interval_seconds):
             try:
                 self._publish_one_sample()
@@ -102,7 +101,6 @@ class TelemetrySampler:
         now = datetime.datetime.now(tz=datetime.UTC)
         now_monotonic = self._clock()
 
-        process = psutil.Process()
         worker_name = self.worker_process.name
         queues = tuple(self.worker_process.queues)
         thread_count = self.worker_process.thread_count
@@ -111,13 +109,11 @@ class TelemetrySampler:
         tasks_per_minute = self._tasks_per_minute(task_count, now_monotonic)
         worker = WorkerProcessTelemetry(
             name=worker_name,
-            pid=self.worker_process.pid or process.pid,
+            pid=self.worker_process.pid or psutil.Process().pid,
             queues=queues,
             thread_count=thread_count,
             task_count=task_count,
             tasks_per_minute=tasks_per_minute,
-            cpu_percent=process.cpu_percent(interval=None),
-            memory_bytes=process.memory_info().rss,
             sampled_at=now,
         )
 
@@ -125,6 +121,8 @@ class TelemetrySampler:
         node = NodeTelemetry(
             hostname=socket.gethostname(),
             queues=queues,
+            process_count=1,
+            thread_count=thread_count,
             cpu_percent=psutil.cpu_percent(interval=None),
             memory_percent=virtual_memory.percent,
             memory_bytes=virtual_memory.total,

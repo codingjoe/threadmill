@@ -133,3 +133,23 @@ TaskDetail {
     height: 1fr;
     width: 100%;
 }
+
+#worker-throughput-graph {
+    color: $primary;
+}
+
+#worker-cpu-graph {
+    color: $warning;
+}
+
+#worker-memory-graph {
+    color: $success;
+}
+
+#worker-throughput-label,
+#worker-cpu-label,
+#worker-memory-label {
+    color: $foreground 70%;
+    padding: 0 1;
+    height: 1;
+}
