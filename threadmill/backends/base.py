@@ -264,16 +264,16 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         raise NotImplementedError
 
     def publish_worker_telemetry(self, telemetry: WorkerTelemetry) -> None:
-        """Publish a worker-pool telemetry snapshot to subscribers.
+        """Publish a worker-pool telemetry snapshot to a shared store.
 
-        Backends without a pub/sub transport implement this as a no-op so the
+        Backends without a shared store implement this as a no-op so the
         worker command still runs without worker telemetry.
         """
 
     def worker_telemetry(self) -> WorkerTelemetry:
         """Return the latest worker-pool telemetry snapshot, or an empty one.
 
-        Backends without a pub/sub transport return an empty snapshot so the
+        Backends without a shared store return an empty snapshot so the
         inspector can render the worker view without raising.
         """
         return WorkerTelemetry(

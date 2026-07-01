@@ -749,13 +749,13 @@ class TestWorkerTelemetrySerialization:
 
 
 @pytest.mark.integration
-class TestWorkerTelemetryPubSub:
-    """Integration tests for worker telemetry PUB/SUB over real Redis."""
+class TestWorkerTelemetryRedis:
+    """Integration tests for worker telemetry storage over real Redis."""
 
-    def test_publish_and_subscribe_roundtrip(self):
-        """publish_worker_telemetry sends, worker_telemetry receives."""
+    def test_publish_and_read_roundtrip(self):
+        """publish_worker_telemetry stores, worker_telemetry reads it back."""
         backend = RedisTaskBackend(
-            "worker_telemetry_pubsub_test",
+            "worker_telemetry_store_test",
             {
                 "QUEUES": ["default"],
                 "REDIS_URL": "redis://localhost:6379/0",
@@ -800,8 +800,6 @@ class TestWorkerTelemetryPubSub:
             )
             backend.publish_worker_telemetry(snapshot)
 
-            # Small delay for pub/sub propagation
-            time.sleep(0.1)
             received = backend.worker_telemetry()
             assert "testhost" in received.nodes
             r_node = received.nodes["testhost"]
@@ -815,8 +813,8 @@ class TestWorkerTelemetryPubSub:
         finally:
             backend.close()
 
-    def test_worker_telemetry_empty_when_no_messages(self):
-        """worker_telemetry returns an empty snapshot when no messages are waiting."""
+    def test_worker_telemetry_empty_when_no_workers(self):
+        """worker_telemetry returns an empty snapshot when no workers reported."""
         backend = RedisTaskBackend(
             "worker_telemetry_empty_test",
             {

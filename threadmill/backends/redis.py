@@ -139,7 +139,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     SUCCESSFUL_RESULTS_KEY = "{prefix}:results:{queue_name}:successful"
     FAILED_RESULTS_KEY = "{prefix}:results:{queue_name}:failed"
     INGRESS_KEY = "{prefix}:ingress:{queue_name}:events"
-    WORKER_TELEMETRY_CHANNEL = "{prefix}:worker-telemetry"
+    WORKER_TELEMETRY_KEY = "{prefix}:worker-telemetry:{hostname}:{pid}"
+    WORKER_TELEMETRY_PATTERN = "{prefix}:worker-telemetry:*"
+    WORKER_TELEMETRY_TTL = 10  # seconds before stale keys expire
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
     """Pop the next task from a priority queue and move it directly to the running set."""
@@ -471,41 +473,75 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         return BackendTelemetry(queues=queues)
 
     def publish_worker_telemetry(self, telemetry: WorkerTelemetry) -> None:
-        """Publish a worker telemetry snapshot to the pub/sub channel."""
-        channel = self.WORKER_TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
-        self.client.publish(channel, _serialize_worker_telemetry(telemetry))
+        """Store a worker telemetry snapshot in Redis with a short TTL.
+
+        Each worker process writes its own key so the inspector can scan
+        and merge all active snapshots.  Keys expire automatically when a
+        worker stops reporting.
+        """
+        for hostname, node in telemetry.nodes.items():
+            for worker_name, worker in node.workers.items():
+                key = self.WORKER_TELEMETRY_KEY.format(
+                    prefix=self.key_prefix,
+                    hostname=hostname,
+                    pid=worker.pid,
+                )
+                payload = _serialize_worker_telemetry(
+                    WorkerTelemetry(
+                        nodes={
+                            hostname: NodeTelemetry(
+                                hostname=node.hostname,
+                                queues=node.queues,
+                                cpu_percent=node.cpu_percent,
+                                memory_percent=node.memory_percent,
+                                memory_bytes=node.memory_bytes,
+                                tasks_per_minute=node.tasks_per_minute,
+                                workers={worker_name: worker},
+                                sampled_at=node.sampled_at,
+                            )
+                        },
+                        queues=dict.fromkeys(node.queues, (hostname,)),
+                        sampled_at=telemetry.sampled_at,
+                    )
+                )
+                self.client.set(key, payload, ex=self.WORKER_TELEMETRY_TTL)
 
     def worker_telemetry(self) -> WorkerTelemetry:
-        """Drain pending worker telemetry messages and merge them by node.
+        """Read and merge all worker telemetry snapshots from Redis.
 
-        Returns an empty snapshot when no messages are waiting so the inspector
-        can render the worker view before any workers have reported.
+        Returns an empty snapshot when no workers have reported so the
+        inspector can render the worker view before any workers are running.
         """
-        channel = self.WORKER_TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
-        pubsub = self.client.pubsub(ignore_subscribe_messages=True)
-        pubsub.subscribe(channel)
+        pattern = self.WORKER_TELEMETRY_PATTERN.format(prefix=self.key_prefix)
+        keys = list(self.client.scan_iter(match=pattern))
+        if not keys:
+            return WorkerTelemetry(
+                nodes={},
+                queues={},
+                sampled_at=datetime.datetime.now(tz=datetime.UTC),
+            )
         nodes: dict[str, NodeTelemetry] = {}
         queues: dict[str, set[str]] = {}
         sampled_at = datetime.datetime.now(tz=datetime.UTC)
-        try:
-            while True:
-                message = pubsub.get_message(timeout=0.01)
-                if message is None:
-                    break
-                if message.get("type") != "message":
-                    continue
-                data = message.get("data")
-                if not data:
-                    continue
-                payload = data.decode() if isinstance(data, bytes) else data
-                snapshot = _deserialize_worker_telemetry(payload)
-                nodes.update(snapshot.nodes)
-                for queue_name, hostnames in snapshot.queues.items():
-                    queues.setdefault(queue_name, set()).update(hostnames)
-                if snapshot.sampled_at > sampled_at:
-                    sampled_at = snapshot.sampled_at
-        finally:
-            pubsub.close()
+        for key in keys:
+            payload = self.client.get(key)
+            if not payload:
+                continue
+            if isinstance(payload, bytes):
+                payload = payload.decode()
+            snapshot = _deserialize_worker_telemetry(payload)
+            for hostname, node in snapshot.nodes.items():
+                if hostname in nodes:
+                    nodes[hostname].workers.update(node.workers)
+                    nodes[hostname].queues = tuple(
+                        sorted(set(nodes[hostname].queues) | set(node.queues))
+                    )
+                else:
+                    nodes[hostname] = node
+                for queue_name in node.queues:
+                    queues.setdefault(queue_name, set()).add(hostname)
+            if snapshot.sampled_at > sampled_at:
+                sampled_at = snapshot.sampled_at
         return WorkerTelemetry(
             nodes=nodes,
             queues={name: tuple(sorted(hosts)) for name, hosts in queues.items()},
