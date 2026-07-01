@@ -15,6 +15,6 @@
     Threadmill
   </text>
   <text x="241" y="224" fill="#1c1c1c" font-size="18" font-style="italic" transform="matrix(1.6 0 0 1.6 120 120)">
-    A queue agnostic worker for Django&apos;s task framework.
+    Durable high-performance task backend for Django.
   </text>
 </svg>

@@ -1,10 +1,8 @@
-# Threadmill
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-light.svg">
-    <img alt="Threadmill: A queue agnostic worker for Django's task framework." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-light.svg">
+    <img alt="Threadmill: Durable high-performance backend for Django's task framework." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/logo-light.svg">
   </picture>
 <br>
   <a href="https://github.com/codingjoe/threadmill/">Documentation</a> |
@@ -13,17 +11,15 @@
   <a href="https://github.com/sponsors/codingjoe">Funding</a> 💚
 </p>
 
-**A queue agnostic worker for Django's task framework.**
+# Threadmill [![PyPi Version](https://img.shields.io/pypi/v/threadmill.svg)](https://pypi.python.org/pypi/threadmill/) [![Test Coverage](https://codecov.io/gh/codingjoe/threadmill/branch/main/graph/badge.svg)](https://codecov.io/gh/codingjoe/threadmill) [![GitHub License](https://img.shields.io/github/license/codingjoe/threadmill)](https://raw.githubusercontent.com/codingjoe/threadmill/master/LICENSE)
+
+**Durable high-performance backend for Django's task framework.**
 
 ## Design Principles
 
 - **Durability** – We recover from any failures, even poorly written tasks.
 - **Consistency** – We never lose data, even if someone unplugs the power or network.
 - **Utilization** – We keep the CPU saturated with tasks, not with idle time or waiting for locks.
-
-[![PyPi Version](https://img.shields.io/pypi/v/threadmill.svg)](https://pypi.python.org/pypi/threadmill/)
-[![Test Coverage](https://codecov.io/gh/codingjoe/threadmill/branch/main/graph/badge.svg)](https://codecov.io/gh/codingjoe/threadmill)
-[![GitHub License](https://img.shields.io/github/license/codingjoe/threadmill)](https://raw.githubusercontent.com/codingjoe/threadmill/master/LICENSE)
 
 ## Sponsors
 
