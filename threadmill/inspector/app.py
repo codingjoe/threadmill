@@ -7,6 +7,7 @@ import datetime
 import logging
 import math
 import typing
+from collections import deque
 from typing import Any
 
 from django.contrib.humanize.templatetags.humanize import naturaltime
@@ -436,26 +437,42 @@ class WorkerGraphs(Static):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._throughput_history: list[float] = [0.0] * self.GRAPH_HISTORY_SIZE
-        self._cpu_history: list[float] = [0.0] * self.GRAPH_HISTORY_SIZE
-        self._memory_history: list[float] = [0.0] * self.GRAPH_HISTORY_SIZE
+        self._throughput_history: deque[float] = deque(
+            [0.0] * self.GRAPH_HISTORY_SIZE, maxlen=self.GRAPH_HISTORY_SIZE
+        )
+        self._cpu_history: deque[float] = deque(
+            [0.0] * self.GRAPH_HISTORY_SIZE, maxlen=self.GRAPH_HISTORY_SIZE
+        )
+        self._memory_history: deque[float] = deque(
+            [0.0] * self.GRAPH_HISTORY_SIZE, maxlen=self.GRAPH_HISTORY_SIZE
+        )
 
     def compose(self) -> ComposeResult:
         yield from super().compose()
         self.border_title = "Worker Graphs"
-        yield Sparkline(id="worker-throughput-graph", data=[])
-        yield Sparkline(id="worker-cpu-graph", data=[])
-        yield Sparkline(id="worker-memory-graph", data=[])
+        yield Sparkline(
+            id="worker-throughput-graph", data=list(self._throughput_history)
+        )
+        yield Sparkline(id="worker-cpu-graph", data=list(self._cpu_history))
+        yield Sparkline(id="worker-memory-graph", data=list(self._memory_history))
 
     def watch_selection(self) -> None:
         """Reset histories when the selection changes."""
-        self._throughput_history = [0.0] * self.GRAPH_HISTORY_SIZE
-        self._cpu_history = [0.0] * self.GRAPH_HISTORY_SIZE
-        self._memory_history = [0.0] * self.GRAPH_HISTORY_SIZE
+        self._reset_histories()
         self._refresh_graphs()
 
     def watch_telemetry(self) -> None:
         self._refresh_graphs()
+
+    def _reset_histories(self) -> None:
+        """Clear all histories back to pre-filled zeros."""
+        for history in (
+            self._throughput_history,
+            self._cpu_history,
+            self._memory_history,
+        ):
+            history.clear()
+            history.extend([0.0] * self.GRAPH_HISTORY_SIZE)
 
     def _refresh_graphs(self) -> None:
         """Append the current sample to each graph and redraw."""
@@ -469,34 +486,17 @@ class WorkerGraphs(Static):
         self._throughput_history.append(node.tasks_per_minute)
         self._cpu_history.append(node.cpu_percent)
         self._memory_history.append(node.memory_percent)
-        self._trim_histories()
         self._update_border_titles(node)
         try:
-            self.query_one(
-                "#worker-throughput-graph", Sparkline
-            ).data = self._throughput_history
-            self.query_one("#worker-cpu-graph", Sparkline).data = [
-                0.0,
-                *self._cpu_history,
-                100.0,
-            ]
-            self.query_one("#worker-memory-graph", Sparkline).data = [
-                0.0,
-                *self._memory_history,
-                100.0,
-            ]
+            throughput = self.query_one("#worker-throughput-graph", Sparkline)
+            cpu = self.query_one("#worker-cpu-graph", Sparkline)
+            mem = self.query_one("#worker-memory-graph", Sparkline)
         except Exception:  # noqa: BLE001
             logger.debug("Worker graph widgets not yet mounted")
-
-    def _trim_histories(self) -> None:
-        """Keep each history list at GRAPH_HISTORY_SIZE by dropping the oldest entry."""
-        for attr in (
-            "_throughput_history",
-            "_cpu_history",
-            "_memory_history",
-        ):
-            history = getattr(self, attr)
-            del history[: -self.GRAPH_HISTORY_SIZE]
+            return
+        throughput.data = list(self._throughput_history)
+        cpu.data = list(self._cpu_history)
+        mem.data = list(self._memory_history)
 
     def _update_border_titles(self, node: NodeTelemetry) -> None:
         """Show current values in the sparkline border titles."""
