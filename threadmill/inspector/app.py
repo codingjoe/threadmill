@@ -702,18 +702,20 @@ class InspectorApp(App):
         self._options_static.update(" ".join(parts) or "No options")
 
     def _refresh_telemetry(self) -> None:
-        """Poll the backend for fresh queue telemetry and sample worker graphs."""
+        """Poll backend for queue telemetry, publish merged worker telemetry, sample graphs."""
         try:
             self.telemetry = self.backend.telemetry()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to refresh telemetry")
+        self._publish_merged_telemetry()
         self._worker_graphs._refresh_graphs()
 
     async def _subscribe_worker_telemetry(self) -> None:
         """Maintain a persistent pub/sub subscription for worker telemetry.
 
-        Each message carries a per-worker snapshot; we merge them into
-        an in-memory cache keyed by (hostname, pid) and prune stale entries.
+        Each message is merged into the in-memory cache silently; the
+        reactive ``worker_telemetry`` is only updated on the 2-second timer
+        tick (``_refresh_telemetry``) to avoid flooding the UI with redraws.
         """
         from ..backends.redis import WORKER_TELEMETRY_TTL as _TTL
 
@@ -721,9 +723,13 @@ class InspectorApp(App):
             async for snapshot in self.backend.subscribe_worker_telemetry():
                 self._merge_worker_telemetry(snapshot)
                 self._prune_stale_telemetry(_TTL)
-                self.worker_telemetry = self._build_merged_telemetry()
         except Exception:  # noqa: BLE001
             logger.exception("Worker telemetry subscription failed")
+
+    def _publish_merged_telemetry(self) -> None:
+        """Push the merged cache into the reactive from the timer tick."""
+        if self._telemetry_cache:
+            self.worker_telemetry = self._build_merged_telemetry()
 
     def _merge_worker_telemetry(self, snapshot: WorkerTelemetry) -> None:
         """Merge a per-worker snapshot into the in-memory cache."""
