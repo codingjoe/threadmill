@@ -647,7 +647,7 @@ class TestWorkerView:
             assert graphs.selection.hostname == "node-1"
 
     async def test_worker_graphs_append_history_on_telemetry(self):
-        """Worker graphs accumulate data points as telemetry arrives."""
+        """Worker graphs accumulate data points when a sample tick fires."""
         app = InspectorApp(backend=default_task_backend, auto_refresh=False)
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -664,6 +664,10 @@ class TestWorkerView:
             # History is pre-filled with zeros at the fixed window size.
             assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
             graphs.telemetry = snapshot
+            await pilot.pause()
+            # A telemetry update alone does not append a sample — only the
+            # fixed-interval timer does.  Simulate a timer tick.
+            graphs._refresh_graphs()
             await pilot.pause()
             # The last entry is the new sample; length stays fixed.
             assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
@@ -717,6 +721,8 @@ class TestWorkerView:
             await pilot.pause()
             graphs.selection = host_node.data
             graphs.telemetry = snapshot
+            await pilot.pause()
+            graphs._refresh_graphs()
             await pilot.pause()
             assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
             assert graphs._cpu_history[-1] == 45.0
@@ -846,3 +852,175 @@ class TestWorkerView:
                 await pilot.pause()
             # Histories are populated even though the graph redraw failed.
             assert len(graphs._cpu_history) == graphs.GRAPH_HISTORY_SIZE
+
+
+class _StubBackend(ThreadmillTaskBackend):
+    """Backend double that yields a fixed worker telemetry snapshot."""
+
+    def enqueue(self, task, args, kwargs):
+        raise NotImplementedError
+
+    def peek(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def telemetry(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def worker_telemetry(self):
+        raise NotImplementedError
+
+    async def subscribe_worker_telemetry(self):
+        yield _make_worker_telemetry()
+
+
+class _ExplodingBackend(_StubBackend):
+    """Backend whose pub/sub subscription raises immediately."""
+
+    async def subscribe_worker_telemetry(self):
+        raise RuntimeError("subscribe failed")
+        yield  # pragma: no cover
+
+
+def _make_node(
+    *,
+    hostname: str = "node-1",
+    pid: int = 100,
+    worker_name: str | None = None,
+    queue_name: str = "default",
+    thread_count: int = 2,
+    sampled_at: datetime.datetime | None = None,
+) -> NodeTelemetry:
+    """Build a single-worker NodeTelemetry for cache-population tests."""
+    now = sampled_at or datetime.datetime.now(tz=datetime.UTC)
+    name = worker_name or f"{hostname}:{pid}-0"
+    worker = WorkerProcessTelemetry(
+        name=name,
+        pid=pid,
+        queues=(queue_name,),
+        thread_count=thread_count,
+        task_count=10,
+        tasks_per_minute=30.0,
+        sampled_at=now,
+    )
+    return NodeTelemetry(
+        hostname=hostname,
+        queues=(queue_name,),
+        process_count=1,
+        thread_count=thread_count,
+        cpu_percent=45.0,
+        memory_percent=60.0,
+        memory_bytes=8_000_000_000,
+        tasks_per_minute=30.0,
+        workers={name: worker},
+        sampled_at=now,
+    )
+
+
+def _snapshot_from_node(node: NodeTelemetry) -> WorkerTelemetry:
+    """Wrap a single node into a WorkerTelemetry snapshot for merge tests."""
+    return WorkerTelemetry(
+        nodes={node.hostname: node},
+        queues=dict.fromkeys(node.queues, (node.hostname,)),
+        sampled_at=node.sampled_at,
+    )
+
+
+class TestWorkerTelemetrySubscription:
+    """Tests for the pub/sub merge/prune/build helper methods."""
+
+    def test_merge_worker_telemetry_caches_by_hostname_pid(self):
+        """_merge_worker_telemetry caches nodes keyed by (hostname, pid)."""
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        snapshot = _make_worker_telemetry()
+        app._merge_worker_telemetry(snapshot)
+        assert ("node-1", 1234) in app._telemetry_cache
+        node = app._telemetry_cache[("node-1", 1234)]
+        assert node.hostname == "node-1"
+
+    def test_merge_worker_telemetry_multiple_workers_same_host(self):
+        """Two workers on the same host produce two cache entries keyed by pid."""
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        app._merge_worker_telemetry(
+            _snapshot_from_node(_make_node(pid=100, queue_name="default"))
+        )
+        app._merge_worker_telemetry(
+            _snapshot_from_node(_make_node(pid=200, queue_name="celery"))
+        )
+        assert len(app._telemetry_cache) == 2
+        assert ("node-1", 100) in app._telemetry_cache
+        assert ("node-1", 200) in app._telemetry_cache
+
+    def test_prune_stale_telemetry_removes_old_entries(self):
+        """_prune_stale_telemetry drops entries older than the TTL."""
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        snapshot = _make_worker_telemetry()
+        # Force the sampled_at into the past, beyond the TTL window.
+        old = datetime.datetime.now(tz=datetime.UTC) - datetime.timedelta(seconds=20)
+        stale_node = dataclasses.replace(
+            next(iter(snapshot.nodes.values())), sampled_at=old
+        )
+        app._telemetry_cache[("node-1", 1234)] = stale_node
+        app._prune_stale_telemetry(10)
+        assert ("node-1", 1234) not in app._telemetry_cache
+
+    def test_prune_stale_telemetry_keeps_fresh_entries(self):
+        """_prune_stale_telemetry retains entries within the TTL window."""
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        snapshot = _make_worker_telemetry()
+        app._merge_worker_telemetry(snapshot)
+        app._prune_stale_telemetry(10)
+        assert ("node-1", 1234) in app._telemetry_cache
+
+    def test_build_merged_telemetry_merges_same_host(self):
+        """_build_merged_telemetry merges workers on the same hostname."""
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        # Two per-worker snapshots on the same host but different queues/pids.
+        app._merge_worker_telemetry(
+            _snapshot_from_node(
+                _make_node(pid=100, queue_name="default", thread_count=2)
+            )
+        )
+        app._merge_worker_telemetry(
+            _snapshot_from_node(
+                _make_node(pid=200, queue_name="celery", thread_count=3)
+            )
+        )
+        merged = app._build_merged_telemetry()
+        assert len(merged.nodes) == 1
+        node = merged.nodes["node-1"]
+        assert len(node.workers) == 2
+        # process_count and thread_count are summed across the two entries.
+        assert node.process_count == 2
+        assert node.thread_count == 5
+        # Queues from both snapshots are collected.
+        assert set(node.queues) == {"default", "celery"}
+        assert set(merged.queues) == {"default", "celery"}
+
+    def test_build_merged_telemetry_empty_cache(self):
+        """_build_merged_telemetry returns an empty snapshot from an empty cache."""
+        app = InspectorApp(backend=default_task_backend, auto_refresh=False)
+        merged = app._build_merged_telemetry()
+        assert merged.nodes == {}
+        assert merged.queues == {}
+
+    async def test_subscribe_worker_telemetry_updates_reactive(self):
+        """_subscribe_worker_telemetry merges snapshots into worker_telemetry."""
+        backend = _StubBackend(alias="default", params={})
+        app = InspectorApp(backend=backend, auto_refresh=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._subscribe_worker_telemetry()
+            await pilot.pause()
+            assert app.worker_telemetry is not None
+            assert "node-1" in app.worker_telemetry.nodes
+
+    async def test_subscribe_worker_telemetry_logs_on_error(self):
+        """A failing subscription is caught and logged without crashing."""
+        backend = _ExplodingBackend(alias="default", params={})
+        app = InspectorApp(backend=backend, auto_refresh=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app._subscribe_worker_telemetry()
+            await pilot.pause()
+            # worker_telemetry is initialized in on_mount and never cleared.
+            assert app.worker_telemetry is not None

@@ -5,6 +5,7 @@ import dataclasses
 import datetime
 import json
 import threading
+import typing
 from abc import ABC
 
 import django
@@ -286,6 +287,20 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         inspector can render the worker view without raising.
         """
         return WorkerTelemetry(
+            nodes={},
+            queues={},
+            sampled_at=datetime.datetime.now(tz=datetime.UTC),
+        )
+
+    async def subscribe_worker_telemetry(self) -> typing.AsyncIterator[WorkerTelemetry]:
+        """Yield worker telemetry snapshots as they arrive.
+
+        Backends with pub/sub capability override this to maintain a
+        persistent subscription.  The default implementation yields a
+        single empty snapshot and stops, so non-Redis backends still
+        compile and the inspector can fall back to polling.
+        """
+        yield WorkerTelemetry(
             nodes={},
             queues={},
             sampled_at=datetime.datetime.now(tz=datetime.UTC),

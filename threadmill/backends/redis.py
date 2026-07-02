@@ -7,6 +7,7 @@ import json
 import logging
 import queue
 import time
+import typing
 import uuid
 from collections.abc import Generator, Sequence
 from pathlib import Path
@@ -116,6 +117,10 @@ class RedisBroker(Broker):
                 logger.exception("Telemetry trim error for queue %r", queue_name)
 
 
+WORKER_TELEMETRY_CHANNEL = "{prefix}:worker-telemetry"
+WORKER_TELEMETRY_TTL = 10  # seconds before stale entries are pruned
+
+
 class RedisTaskBackend(ThreadmillTaskBackend):
     """Redis-backed durable priority queue backend.
 
@@ -139,9 +144,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     SUCCESSFUL_RESULTS_KEY = "{prefix}:results:{queue_name}:successful"
     FAILED_RESULTS_KEY = "{prefix}:results:{queue_name}:failed"
     INGRESS_KEY = "{prefix}:ingress:{queue_name}:events"
-    WORKER_TELEMETRY_KEY = "{prefix}:worker-telemetry:{hostname}:{pid}"
-    WORKER_TELEMETRY_PATTERN = "{prefix}:worker-telemetry:*"
-    WORKER_TELEMETRY_TTL = 10  # seconds before stale keys expire
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
     """Pop the next task from a priority queue and move it directly to the running set."""
@@ -157,6 +159,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             raise ValueError(
                 f"REDIS_URL must be specified in your settings for the {type(self).__name__}."
             ) from e
+        self.redis_url = redis_url
         self.client = redis.from_url(redis_url)
         self.key_prefix = f"threadmill:{{{alias}}}"
         self.lease_ttl = self.options.get("lease_ttl", datetime.timedelta(hours=1))
@@ -473,19 +476,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         return BackendTelemetry(queues=queues)
 
     def publish_worker_telemetry(self, telemetry: WorkerTelemetry) -> None:
-        """Store a worker telemetry snapshot in Redis with a short TTL.
+        """Publish a worker telemetry snapshot via Redis pub/sub.
 
-        Each worker process writes its own key so the inspector can scan
-        and merge all active snapshots.  Keys expire automatically when a
-        worker stops reporting.
+        Each worker process publishes its own snapshot on the shared
+        channel.  The inspector subscribes and merges snapshots in-memory.
         """
+        channel = WORKER_TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
         for hostname, node in telemetry.nodes.items():
             for worker_name, worker in node.workers.items():
-                key = self.WORKER_TELEMETRY_KEY.format(
-                    prefix=self.key_prefix,
-                    hostname=hostname,
-                    pid=worker.pid,
-                )
                 payload = _serialize_worker_telemetry(
                     WorkerTelemetry(
                         nodes={
@@ -506,51 +504,38 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                         sampled_at=telemetry.sampled_at,
                     )
                 )
-                self.client.set(key, payload, ex=self.WORKER_TELEMETRY_TTL)
+                self.client.publish(channel, payload)
 
-    def worker_telemetry(self) -> WorkerTelemetry:
-        """Read and merge all worker telemetry snapshots from Redis.
+    async def subscribe_worker_telemetry(self) -> typing.AsyncIterator[WorkerTelemetry]:
+        """Yield worker telemetry snapshots from a persistent Redis pub/sub subscription.
 
-        Returns an empty snapshot when no workers have reported so the
-        inspector can render the worker view before any workers are running.
+        Each message is a per-worker snapshot; the caller merges them
+        in-memory and prunes stale entries.
+
+        Uses ``get_message`` with a short timeout instead of ``listen()`` so
+        the loop remains cancellable (e.g. when the inspector shuts down).
         """
-        pattern = self.WORKER_TELEMETRY_PATTERN.format(prefix=self.key_prefix)
-        keys = list(self.client.scan_iter(match=pattern))
-        if not keys:
-            return WorkerTelemetry(
-                nodes={},
-                queues={},
-                sampled_at=datetime.datetime.now(tz=datetime.UTC),
-            )
-        nodes: dict[str, NodeTelemetry] = {}
-        queues: dict[str, set[str]] = {}
-        sampled_at = datetime.datetime.now(tz=datetime.UTC)
-        for key in keys:
-            payload = self.client.get(key)
-            if not payload:
-                continue
-            if isinstance(payload, bytes):
-                payload = payload.decode()
-            snapshot = _deserialize_worker_telemetry(payload)
-            for hostname, node in snapshot.nodes.items():
-                if hostname in nodes:
-                    nodes[hostname].workers.update(node.workers)
-                    nodes[hostname].queues = tuple(
-                        sorted(set(nodes[hostname].queues) | set(node.queues))
+        import redis.asyncio as aioredis
+
+        redis_url = self.redis_url
+        channel = WORKER_TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
+        async with aioredis.from_url(redis_url) as client:
+            pubsub = client.pubsub()
+            await pubsub.subscribe(channel)
+            try:
+                while True:
+                    message = await pubsub.get_message(
+                        timeout=1.0, ignore_subscribe_messages=True
                     )
-                    nodes[hostname].process_count += node.process_count
-                    nodes[hostname].thread_count += node.thread_count
-                else:
-                    nodes[hostname] = node
-                for queue_name in node.queues:
-                    queues.setdefault(queue_name, set()).add(hostname)
-            if snapshot.sampled_at > sampled_at:
-                sampled_at = snapshot.sampled_at
-        return WorkerTelemetry(
-            nodes=nodes,
-            queues={name: tuple(sorted(hosts)) for name, hosts in queues.items()},
-            sampled_at=sampled_at,
-        )
+                    if message is None:
+                        continue
+                    payload = message["data"]
+                    if isinstance(payload, bytes):
+                        payload = payload.decode()
+                    yield _deserialize_worker_telemetry(payload)
+            finally:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
 
     def close(self) -> None:
         """Close the Redis connection."""

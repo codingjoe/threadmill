@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 import logging
@@ -15,9 +16,13 @@ from django.utils import timezone
 from tests.testapp.tasks import boom, compute_workload, echo
 from threadmill.backends.base import (
     BackendTelemetry,
+    NodeTelemetry,
     QueueCounts,
     QueueRates,
     QueueStats,
+    ThreadmillTaskBackend,
+    WorkerProcessTelemetry,
+    WorkerTelemetry,
 )
 from threadmill.backends.redis import RedisBroker, RedisTaskBackend  # noqa: E402
 
@@ -753,8 +758,8 @@ class TestWorkerTelemetrySerialization:
 class TestWorkerTelemetryRedis:
     """Integration tests for worker telemetry storage over real Redis."""
 
-    def test_publish_and_read_roundtrip(self):
-        """publish_worker_telemetry stores, worker_telemetry reads it back."""
+    async def test_publish_and_read_roundtrip(self):
+        """publish_worker_telemetry publishes, subscribe_worker_telemetry reads it back."""
         backend = RedisTaskBackend(
             "worker_telemetry_store_test",
             {
@@ -766,12 +771,6 @@ class TestWorkerTelemetryRedis:
             },
         )
         try:
-            from threadmill.backends.base import (
-                NodeTelemetry,
-                WorkerProcessTelemetry,
-                WorkerTelemetry,
-            )
-
             sampled_at = datetime.datetime.now(tz=datetime.UTC)
             worker = WorkerProcessTelemetry(
                 name="testhost:200-0",
@@ -799,9 +798,17 @@ class TestWorkerTelemetryRedis:
                 queues={"default": ("testhost",)},
                 sampled_at=sampled_at,
             )
+
+            async def _collect():
+                async for received in backend.subscribe_worker_telemetry():
+                    return received
+
+            task = asyncio.ensure_future(_collect())
+            # Give the pub/sub subscription a moment to establish.
+            await asyncio.sleep(0.1)
             backend.publish_worker_telemetry(snapshot)
 
-            received = backend.worker_telemetry()
+            received = await asyncio.wait_for(task, timeout=5.0)
             assert "testhost" in received.nodes
             r_node = received.nodes["testhost"]
             assert r_node.hostname == "testhost"
@@ -815,21 +822,14 @@ class TestWorkerTelemetryRedis:
         finally:
             backend.close()
 
-    def test_worker_telemetry_empty_when_no_workers(self):
-        """worker_telemetry returns an empty snapshot when no workers reported."""
-        backend = RedisTaskBackend(
-            "worker_telemetry_empty_test",
-            {
-                "QUEUES": ["default"],
-                "REDIS_URL": "redis://localhost:6379/0",
-                "OPTIONS": {
-                    "result_ttl": datetime.timedelta(seconds=60),
-                },
-            },
-        )
-        try:
-            snapshot = backend.worker_telemetry()
-            assert snapshot.nodes == {}
-            assert snapshot.queues == {}
-        finally:
-            backend.close()
+    async def test_worker_telemetry_empty_when_no_workers(self):
+        """The default subscribe_worker_telemetry yields an empty snapshot."""
+
+        class _StubBackend(ThreadmillTaskBackend):
+            def enqueue(self, *args, **kwargs):  # pragma: no cover
+                raise NotImplementedError
+
+        backend = _StubBackend(alias="test", params={})
+        received = await backend.subscribe_worker_telemetry().__anext__()
+        assert received.nodes == {}
+        assert received.queues == {}

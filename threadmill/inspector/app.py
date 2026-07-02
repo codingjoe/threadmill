@@ -462,7 +462,8 @@ class WorkerGraphs(Static):
         self._refresh_graphs()
 
     def watch_telemetry(self) -> None:
-        self._refresh_graphs()
+        """Redraw graphs from the latest telemetry without appending a sample."""
+        self._refresh_graphs(redraw_only=True)
 
     def _reset_histories(self) -> None:
         """Clear all histories back to pre-filled zeros."""
@@ -474,8 +475,14 @@ class WorkerGraphs(Static):
             history.clear()
             history.extend([0.0] * self.GRAPH_HISTORY_SIZE)
 
-    def _refresh_graphs(self) -> None:
-        """Append the current sample to each graph and redraw."""
+    def _refresh_graphs(self, *, redraw_only: bool = False) -> None:
+        """Append the current sample to each graph and redraw.
+
+        When *redraw_only* is True (e.g. when a pub/sub message updates
+        the telemetry reactive mid-cycle), the deques are not modified;
+        only the sparkline widgets are re-rendered so the user sees the
+        latest node values without consuming a history slot.
+        """
         telemetry = self.telemetry
         selection = self.selection
         if telemetry is None or selection is None:
@@ -483,9 +490,10 @@ class WorkerGraphs(Static):
         node = telemetry.nodes.get(selection.hostname)
         if node is None or selection.kind != "node":
             return
-        self._throughput_history.append(node.tasks_per_minute)
-        self._cpu_history.append(node.cpu_percent)
-        self._memory_history.append(node.memory_percent)
+        if not redraw_only:
+            self._throughput_history.append(node.tasks_per_minute)
+            self._cpu_history.append(node.cpu_percent)
+            self._memory_history.append(node.memory_percent)
         self._update_border_titles(node)
         try:
             throughput = self.query_one("#worker-throughput-graph", Sparkline)
@@ -551,6 +559,7 @@ class InspectorApp(App):
         self._worker_graphs: WorkerGraphs | None = None
         self._telemetry_timer = None
         self._auto_refresh = auto_refresh
+        self._telemetry_cache: dict[tuple[str, int], NodeTelemetry] = {}
         self.set_reactive(InspectorApp.backend, backend)
 
     def compose(self) -> ComposeResult:
@@ -595,12 +604,18 @@ class InspectorApp(App):
         self._worker_graphs = self.query_one("#worker-graphs", WorkerGraphs)
         self._refresh_options()
         self._refresh_telemetry()
+        self.worker_telemetry = WorkerTelemetry(
+            nodes={},
+            queues={},
+            sampled_at=datetime.datetime.now(tz=datetime.UTC),
+        )
         if self._auto_refresh:
             self._telemetry_timer = self.set_interval(
                 TELEMETRY_INTERVAL_SECONDS,
                 self._refresh_telemetry,
                 name="telemetry-refresh",
             )
+            self.run_worker(self._subscribe_worker_telemetry, group="telemetry")
         self._apply_worker_view_visibility()
         self._queue_list.focus()
 
@@ -687,12 +702,66 @@ class InspectorApp(App):
         self._options_static.update(" ".join(parts) or "No options")
 
     def _refresh_telemetry(self) -> None:
-        """Poll the backend for fresh queue and worker telemetry."""
+        """Poll the backend for fresh queue telemetry and sample worker graphs."""
         try:
             self.telemetry = self.backend.telemetry()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to refresh telemetry")
+        self._worker_graphs._refresh_graphs()
+
+    async def _subscribe_worker_telemetry(self) -> None:
+        """Maintain a persistent pub/sub subscription for worker telemetry.
+
+        Each message carries a per-worker snapshot; we merge them into
+        an in-memory cache keyed by (hostname, pid) and prune stale entries.
+        """
+        from ..backends.redis import WORKER_TELEMETRY_TTL as _TTL
+
         try:
-            self.worker_telemetry = self.backend.worker_telemetry()
+            async for snapshot in self.backend.subscribe_worker_telemetry():
+                self._merge_worker_telemetry(snapshot)
+                self._prune_stale_telemetry(_TTL)
+                self.worker_telemetry = self._build_merged_telemetry()
         except Exception:  # noqa: BLE001
-            logger.exception("Failed to refresh worker telemetry")
+            logger.exception("Worker telemetry subscription failed")
+
+    def _merge_worker_telemetry(self, snapshot: WorkerTelemetry) -> None:
+        """Merge a per-worker snapshot into the in-memory cache."""
+        for hostname, node in snapshot.nodes.items():
+            for _worker_name, worker in node.workers.items():
+                self._telemetry_cache[(hostname, worker.pid)] = node
+
+    def _prune_stale_telemetry(self, ttl_seconds: int) -> None:
+        """Remove cache entries older than the TTL."""
+        cutoff = datetime.datetime.now(tz=datetime.UTC) - datetime.timedelta(
+            seconds=ttl_seconds
+        )
+        self._telemetry_cache = {
+            key: node
+            for key, node in self._telemetry_cache.items()
+            if node.sampled_at > cutoff
+        }
+
+    def _build_merged_telemetry(self) -> WorkerTelemetry:
+        """Build a unified WorkerTelemetry from the in-memory cache."""
+        nodes: dict[str, NodeTelemetry] = {}
+        queues: dict[str, set[str]] = {}
+        for (hostname, _pid), node in self._telemetry_cache.items():
+            if hostname in nodes:
+                existing = nodes[hostname]
+                nodes[hostname] = dataclasses.replace(
+                    existing,
+                    workers={**existing.workers, **node.workers},
+                    queues=tuple(sorted(set(existing.queues) | set(node.queues))),
+                    process_count=existing.process_count + node.process_count,
+                    thread_count=existing.thread_count + node.thread_count,
+                )
+            else:
+                nodes[hostname] = node
+            for queue_name in node.queues:
+                queues.setdefault(queue_name, set()).add(hostname)
+        return WorkerTelemetry(
+            nodes=nodes,
+            queues={name: tuple(sorted(hosts)) for name, hosts in queues.items()},
+            sampled_at=datetime.datetime.now(tz=datetime.UTC),
+        )
