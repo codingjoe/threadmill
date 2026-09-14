@@ -5,6 +5,7 @@ import dataclasses
 import datetime
 import logging
 import queue
+import random
 import time
 import uuid
 from collections.abc import Generator, Sequence
@@ -162,6 +163,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             "poll_max_interval", datetime.timedelta(seconds=1)
         )
         self._miss_count = 0
+        self._rotation_offset = random.randrange(len(self.queues))  # noqa: S311
         self._acquire_script = self.client.register_script(self.ACQUIRE_SCRIPT)
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
 
@@ -275,9 +277,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     str(len(queue_names)),
                     worker,
                     str(int(self.lease_ttl.total_seconds() * 1000)),
+                    str(self._rotation_offset),
                 ],
             ):
                 self._miss_count = 0
+                self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
                 return self.deserialize_task_result(data)
 
             try:
