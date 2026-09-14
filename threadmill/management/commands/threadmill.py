@@ -38,7 +38,7 @@ class WorkerCommand(DjangoBaseCommand):
             "--queues",
             nargs="+",
             default=[DEFAULT_TASK_QUEUE_NAME],
-            help="Queue names to listen to and process tasks from.",
+            help="Queue names to listen to and process tasks from (round-robin).",
         )
         parser.add_argument(
             "-w",

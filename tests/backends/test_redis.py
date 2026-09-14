@@ -54,12 +54,28 @@ class CountingAcquireScript:
         return self.script(**kwargs)
 
 
-def _make_backend(alias: str, **options: datetime.timedelta) -> RedisTaskBackend:
-    """Build a single-queue backend with per-test options."""
+class RecordingAcquireScript:
+    """Delegate to the real acquire script while recording each argument list."""
+
+    def __init__(self, script: collections.abc.Callable[..., typing.Any]) -> None:
+        self.script: collections.abc.Callable[..., typing.Any] = script
+        self.sent_args: list[list[str]] = []
+
+    def __call__(self, **kwargs: typing.Any) -> typing.Any:
+        self.sent_args.append(kwargs["args"])
+        return self.script(**kwargs)
+
+
+def _make_backend(
+    alias: str,
+    queues: list[str] | None = None,
+    **options: datetime.timedelta,
+) -> RedisTaskBackend:
+    """Build a backend with per-test options and queue names."""
     return RedisTaskBackend(
         alias,
         {
-            "QUEUES": ["default"],
+            "QUEUES": queues or ["default"],
             "REDIS_URL": "redis://localhost:6379/0",
             "OPTIONS": {
                 "lease_ttl": datetime.timedelta(hours=1),
@@ -1104,3 +1120,141 @@ class TestRedisTaskBackend:
             assert len(backend._acquire_script.calls) == 1
         finally:
             backend.close()
+
+    def test_acquire__serves_backlogged_queue_round_robin(self):
+        """acquire() rotates across queues so a backlog cannot starve neighbours."""
+        neighbour_tasks = 5
+        backend = _make_backend(
+            "acquire_fairness_test",
+            queues=["compute", "io"],
+        )
+        try:
+            backlogged = replace(echo, queue_name="compute")
+            neighbour = replace(echo, queue_name="io")
+            for _ in range(2 * neighbour_tasks):
+                backend.enqueue(backlogged, args=[0])
+            neighbour_ids = {
+                backend.enqueue(neighbour, args=[value]).id
+                for value in range(neighbour_tasks)
+            }
+
+            acquired_ids = {
+                backend.acquire(
+                    "compute",
+                    "io",
+                    timeout=datetime.timedelta(seconds=1),
+                ).id
+                for _ in range(2 * neighbour_tasks)
+            }
+            assert neighbour_ids <= acquired_ids
+        finally:
+            backend.close()
+
+    def test_acquire__rebase_rotation_index_beyond_queue_count(self):
+        """acquire() rebases an out-of-range rotation index and keeps the counter bounded."""
+        backend = _make_backend(
+            "acquire_rotation_index_test",
+            queues=["default", "compute", "io"],
+        )
+        backend._rotation_offset = 4
+        try:
+            backend.enqueue(replace(echo, queue_name="compute"), args=[1])
+            backend.enqueue(replace(echo, queue_name="io"), args=[2])
+            acquired = [
+                backend.acquire(
+                    "default",
+                    "compute",
+                    "io",
+                    timeout=datetime.timedelta(seconds=1),
+                    worker="worker-1",
+                )
+                for _ in range(2)
+            ]
+            assert [result.task.queue_name for result in acquired] == ["compute", "io"]
+            running_by_queue = {
+                queue_name: {
+                    result.id
+                    for result in backend.peek(
+                        queue_name=queue_name,
+                        status=TaskResultStatus.RUNNING,
+                        count=10,
+                    )
+                }
+                for queue_name in ("default", "compute", "io")
+            }
+            assert running_by_queue["compute"] == {acquired[0].id}
+            assert running_by_queue["io"] == {acquired[1].id}
+            assert running_by_queue["default"] == set()
+            assert backend._rotation_offset == (4 + 2) % 3
+        finally:
+            backend.close()
+
+    def test_acquire__wraps_rotation_offset_through_every_queue(self):
+        """Successful acquires wrap the bounded offset through every queue."""
+        queue_names = ("default", "compute", "io")
+        backend = _make_backend(
+            "acquire_rotation_wrap_test",
+            queues=list(queue_names),
+        )
+        recorder = RecordingAcquireScript(backend._acquire_script)
+        backend._acquire_script = recorder
+        backend._rotation_offset = 2
+        try:
+            for repeat in range(2):
+                for queue_name in queue_names:
+                    backend.enqueue(replace(echo, queue_name=queue_name), args=[repeat])
+
+            acquired = []
+            for _ in range(2 * len(queue_names)):
+                acquired.append(
+                    backend.acquire(*queue_names, timeout=datetime.timedelta(seconds=1))
+                )
+                assert 0 <= backend._rotation_offset < len(queue_names)
+
+            assert [result.task.queue_name for result in acquired] == [
+                "io",
+                "default",
+                "compute",
+            ] * 2
+            assert [sent_args[-1] for sent_args in recorder.sent_args] == [
+                "2",
+                "0",
+                "1",
+            ] * 2
+        finally:
+            backend.close()
+
+    def test_acquire__keep_rotation_on_idle_polls(self):
+        """Idle polls resend the same start queue and leave the rotation untouched."""
+        backend = _make_backend(
+            "acquire_idle_rotation_test",
+            queues=["default", "compute"],
+        )
+        recorder = RecordingAcquireScript(backend._acquire_script)
+        backend._acquire_script = recorder
+        backend._rotation_offset = 5
+        try:
+            with pytest.raises(TimeoutError):
+                backend.acquire(
+                    "default",
+                    "compute",
+                    timeout=datetime.timedelta(seconds=0.3),
+                )
+            assert len(recorder.sent_args) > 1
+            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"5"}
+            assert backend._rotation_offset == 5
+        finally:
+            backend.close()
+
+    def test_init__randomize_rotation_offset(self):
+        """Seed each backend differently so recycled workers spread across queues."""
+        queues = ["default", "compute", "io"]
+        backends = [
+            _make_backend(f"acquire_seed_test_{index}", queues=queues)
+            for index in range(32)
+        ]
+        try:
+            assert len({backend._rotation_offset for backend in backends}) > 1
+        finally:
+            for backend in backends:
+                backend.close()
