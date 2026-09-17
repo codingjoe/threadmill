@@ -290,14 +290,21 @@ class TestTaskExecutor:
     def test_run__routes_task_logs_to_stdout(self, capfd):
         """Emit task log records as JSON on standard output."""
         enqueued = default_task_backend.enqueue(log_message, args=["hello from task"])
-
-        TaskExecutor(
-            backend=default_task_backend,
-            workers=1,
-            threads=1,
-            queues=("default",),
-            exit_empty=True,
-        ).run()
+        original_start_method = multiprocessing.get_start_method()
+        # A forkserver worker inherits the stdout of the long-lived forkserver
+        # instead of the file descriptor this fixture replaces, so its records
+        # would never reach capfd.
+        multiprocessing.set_start_method("spawn", force=True)
+        try:
+            TaskExecutor(
+                backend=default_task_backend,
+                workers=1,
+                threads=1,
+                queues=("default",),
+                exit_empty=True,
+            ).run()
+        finally:
+            multiprocessing.set_start_method(original_start_method, force=True)
 
         captured = capfd.readouterr()
         assert "hello from task" not in captured.err
