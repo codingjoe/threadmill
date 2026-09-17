@@ -23,6 +23,13 @@ def boom():
 
 
 @task()
+def log_message(message):
+    """Log the given message at INFO level (tests task log routing)."""
+    logger.info(message)
+    return message
+
+
+@task()
 def count_users():
     """Count all users in the database (tests model access in workers)."""
     from django.contrib.auth.models import User  # noqa

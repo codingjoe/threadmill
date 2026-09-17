@@ -88,8 +88,8 @@ class WorkerCommand(DjangoBaseCommand):
         parser.add_argument(
             "--log-format",
             help=(
-                "Logging format string for worker log records, e.g."
-                " '%%(levelname)s %%(message)s'. Defaults to JSON."
+                "Logging format string for all log records of the worker process,"
+                " e.g. '%%(levelname)s %%(message)s'. Defaults to JSON."
             ),
         )
 

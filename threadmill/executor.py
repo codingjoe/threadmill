@@ -8,6 +8,7 @@ import logging
 import multiprocessing
 import random
 import socket
+import sys
 import threading
 import time
 import typing
@@ -81,10 +82,21 @@ class JsonFormatter(logging.Formatter):
 
 
 logger = multiprocessing.get_logger()
-handler = logging.StreamHandler()
+handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(JsonFormatter())
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+
+
+def configure_logging(formatter: logging.Formatter) -> None:
+    """Route every log record of this process through the threadmill handler."""
+    handler.setFormatter(formatter)
+    for existing_logger in logging.root.manager.loggerDict.values():
+        if isinstance(existing_logger, logging.Logger):
+            existing_logger.handlers.clear()
+            existing_logger.propagate = True
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -138,7 +150,7 @@ class TaskExecutor:
 
     def run(self) -> None:
         """Start consuming tasks until shutdown is requested."""
-        handler.setFormatter(self.log_formatter)
+        configure_logging(self.log_formatter)
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)
         ]
@@ -213,8 +225,8 @@ class WorkerProcess(multiprocessing.Process):
 
     def run(self) -> None:
         """Start consumer execution inside this process."""
-        handler.setFormatter(self.log_formatter)
         django.setup()
+        configure_logging(self.log_formatter)
         logger.info("Starting worker process %s", self.name)
         self.lock = threading.Lock()
         self.expired = threading.Event()
