@@ -26,6 +26,7 @@ from tests.testapp.tasks import (
     boom_with_retry,
     count_users,
     echo,
+    log_message,
 )
 from threadmill.backends.base import Broker
 from threadmill.executor import (
@@ -33,6 +34,7 @@ from threadmill.executor import (
     TaskExecutor,
     WorkerProcess,
     WorkerThread,
+    configure_logging,
     handler,
 )
 
@@ -158,6 +160,44 @@ class TestJsonFormatter:
         assert "ValueError: boom" in payload["exception"]
 
 
+class TestConfigureLogging:
+    """Tests for the configure_logging function."""
+
+    @pytest.fixture(autouse=True)
+    def restore_log_formatter(self):
+        """Restore the shared log formatter after each test."""
+        formatter = handler.formatter
+        yield
+        handler.setFormatter(formatter)
+
+    def test_configure_logging__installs_handler_on_root(self):
+        """Route the records of every logger through the shared handler."""
+        formatter = logging.Formatter("%(levelname)s %(message)s")
+        configure_logging(formatter)
+        root_logger = logging.getLogger()
+        assert root_logger.handlers == [handler]
+        assert root_logger.level == logging.INFO
+        assert handler.formatter is formatter
+
+    def test_configure_logging__replaces_foreign_handlers(self):
+        """Replace handlers of existing loggers so their records reach the root."""
+        task_logger = logging.getLogger("tests.testapp.tasks")
+        task_logger.addHandler(logging.NullHandler())
+        task_logger.propagate = False
+        configure_logging(JsonFormatter())
+        assert task_logger.handlers == []
+        assert task_logger.propagate is True
+
+    def test_configure_logging__keeps_placeholder_loggers(self):
+        """Ignore placeholder entries in the logger registry."""
+        logging.getLogger("tests.test_executor.placeholder.child")
+        configure_logging(JsonFormatter())
+        assert isinstance(
+            logging.root.manager.loggerDict["tests.test_executor.placeholder"],
+            logging.PlaceHolder,
+        )
+
+
 class TestTaskExecutor:
     """Tests for the TaskExecutor dataclass and its methods."""
 
@@ -246,6 +286,36 @@ class TestTaskExecutor:
         )
         assert {r.id for r in results} == {r.id for r in enqueued}
         assert all(r.status == TaskResultStatus.SUCCESSFUL for r in results)
+
+    def test_run__routes_task_logs_to_stdout(self, capfd):
+        """Emit task log records as JSON on standard output."""
+        enqueued = default_task_backend.enqueue(log_message, args=["hello from task"])
+
+        TaskExecutor(
+            backend=default_task_backend,
+            workers=1,
+            threads=1,
+            queues=("default",),
+            exit_empty=True,
+        ).run()
+
+        captured = capfd.readouterr()
+        assert "hello from task" not in captured.err
+        records = [
+            json.loads(line)
+            for line in captured.out.splitlines()
+            if line.startswith("{")
+        ]
+        assert any(
+            record["logger"] == "tests.testapp.tasks"
+            and record["message"] == "hello from task"
+            and record["level"] == "INFO"
+            for record in records
+        )
+        assert (
+            default_task_backend.get_result(enqueued.id).status
+            is TaskResultStatus.SUCCESSFUL
+        )
 
     def test_run__executes_model_task_in_spawned_worker(self):
         """run() executes a model-accessing task in a spawned worker process."""
