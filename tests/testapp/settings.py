@@ -43,6 +43,8 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "threadmill",
     "tests.testapp",
+    "django_tasks_db",
+    "django_tasks_redis",
 ]
 
 MIDDLEWARE = [
@@ -86,18 +88,32 @@ DATABASES = {
     }
 }
 
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
 TASKS = {
     DEFAULT_TASK_BACKEND_ALIAS: {
         "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory"],
-        "REDIS_URL": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        "REDIS_URL": REDIS_URL,
         "OPTIONS": {
             "max_connections": 10,
             "lease_ttl": datetime.timedelta(seconds=60),
         },
     },
+    "django-tasks-db": {
+        "BACKEND": "django_tasks_db.DatabaseBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
+    },
+    "django-tasks-redis": {
+        "BACKEND": "django_tasks_redis.RedisTaskBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
+        "OPTIONS": {"REDIS_URL": REDIS_URL},
+    },
     "immediate": {
         "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+    },
+    "dummy": {
+        "BACKEND": "django.tasks.backends.dummy.DummyBackend",
     },
 }
 

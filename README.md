@@ -15,6 +15,14 @@
 
 **Durable high-performance backend for Django's task framework.**
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
+    <img alt="Tasks per second with one worker: threadmill 4,989, celery 2,363, django-tasks-db 2,179, django-tasks-redis 1,712." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
+  </picture>
+</p>
+
 ## Design Principles
 
 - **Durability** – Recover from any failures, even poorly written tasks.

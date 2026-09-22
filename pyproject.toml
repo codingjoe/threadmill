@@ -49,6 +49,9 @@ dev = [
   { include-group = "test" },
 ]
 test = [
+  "celery",
+  "django-tasks-db",
+  "django-tasks-redis",
   "pytest",
   "pytest-asyncio",
   "pytest-benchmark",
@@ -64,7 +67,7 @@ write_to = "threadmill/_version.py"
 module.name = "threadmill"
 
 [tool.ruff]
-src = [ "tests", "threadmill" ]
+src = [ "benchmarks", "tests", "threadmill" ]
 lint.select = [
   "B",  # flake8-bugbear
   "C",  # flake8-comprehensions
@@ -86,7 +89,7 @@ lint.pydocstyle.convention = "pep257"
 
 [tool.pytest]
 ini_options.minversion = "6.1"
-ini_options.testpaths = [ "tests" ]
+ini_options.testpaths = [ "benchmarks", "tests" ]
 ini_options.addopts = """\
   --cov --cov-report=xml --cov-report=term --tb=short -rxs --benchmark-autosave --benchmark-group-by=fullname \
   --benchmark-min-rounds=10\
