@@ -1,12 +1,8 @@
--- Claim tasks whose processing lease has expired so the broker can decide
--- whether the retry callback requeues them or they are finalized as failed.
--- Claiming renews the lease to now + claim TTL: the task stays in the running
--- set, so a concurrent broker pass cannot take it over, and keeps its task data
--- hash, so the broker can deserialize it and evaluate the retry callback.
--- Should the broker stop before deciding, the claim lapses and the next pass
--- claims the task again. Running entries without task data are unrecoverable
--- and removed. "Now" comes from the Redis server clock, so the broker's own
--- clock does not affect lease expiry.
+-- Claim tasks whose processing lease has expired. The broker decides their
+-- fate afterwards. Claiming renews the lease to now + claim TTL, so other
+-- broker passes leave the task alone while the broker works. If the broker
+-- stops, the claim lapses and the next pass claims the task again. Running
+-- entries without task data are removed. Time comes from the Redis clock.
 --
 -- KEYS[1]  -- running set (ZSET, scored by lease deadline in milliseconds)
 -- ARGV[1]  -- claim TTL in milliseconds
