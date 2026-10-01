@@ -11,7 +11,7 @@
   <a href="https://github.com/sponsors/codingjoe">Funding</a> 💚
 </p>
 
-# Threadmill [![PyPi Version](https://img.shields.io/pypi/v/threadmill.svg)](https://pypi.python.org/pypi/threadmill/) [![Test Coverage](https://codecov.io/gh/codingjoe/threadmill/branch/main/graph/badge.svg)](https://codecov.io/gh/codingjoe/threadmill) [![GitHub License](https://img.shields.io/github/license/codingjoe/threadmill)](https://raw.githubusercontent.com/codingjoe/threadmill/master/LICENSE)
+# Threadmill [![PyPI Version](https://img.shields.io/pypi/v/threadmill.svg)](https://pypi.python.org/pypi/threadmill/) [![Test Coverage](https://codecov.io/gh/codingjoe/threadmill/branch/main/graph/badge.svg)](https://codecov.io/gh/codingjoe/threadmill) [![GitHub License](https://img.shields.io/github/license/codingjoe/threadmill)](https://raw.githubusercontent.com/codingjoe/threadmill/main/LICENSE)
 
 **Durable high-performance backend for Django's task framework.**
 
@@ -34,7 +34,7 @@
 You need to have [Django's Task framework][django-tasks] set up properly.
 
 ```console
-uv add threadmill[redis]
+uv add "threadmill[redis]"
 ```
 
 Add `threadmill` to your `INSTALLED_APPS` in `settings.py`
@@ -61,7 +61,7 @@ TASKS = {
 Optionally, install the inspector dependency if you want the TUI:
 
 ```console
-uv add threadmill[inspector]
+uv add "threadmill[inspector]"
 ```
 
 Then launch the worker pool:
@@ -82,7 +82,7 @@ Depending on your workload, you can tweak the number of processes and threads.
 Processes allow for parallel compute (no GIL) while threads are great for low-memory concurrent IO.
 
 ```console
-uv run manage.py threadmill worker --processes 4 --threads 2
+uv run manage.py threadmill worker --workers 4 --threads 2
 ```
 
 #### Health
@@ -99,7 +99,7 @@ Should a worker crash or be killed, the pool will automatically restart it.
 
 #### Shutdown
 
-A graceful shutdown is possible with the `SIGTERM` or a keyboard interrupt.
+A graceful shutdown is possible with `SIGTERM` or a keyboard interrupt.
 All workers will finish the tasks they acquired and acknowledge them.
 
 You can use `--exit-empty` to exit immediately after all tasks have been processed,
@@ -113,7 +113,7 @@ The optional TUI inspector lets you watch queues, tasks, and task details in rea
 Install it with the `inspector` extra and launch it from a separate terminal:
 
 ```console
-uv add threadmill[inspector]
+uv add "threadmill[inspector]"
 uv run manage.py threadmill inspector
 ```
 
@@ -127,7 +127,7 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 | `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before a started task is marked FAILED.             |
 | `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.            |
 | `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                  |
-| `batch_size`        | `100`                     | Max tasks to move or requeue per broker pass.                           |
+| `batch_size`        | `100`                     | Max tasks to move or reap per broker pass.                              |
 | `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll. |
 | `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                 |
 
