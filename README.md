@@ -82,8 +82,23 @@ Depending on your workload, you can tweak the number of processes and threads.
 Processes allow for parallel compute (no GIL) while threads are great for low-memory concurrent IO.
 
 ```console
-uv run manage.py threadmill worker --processes 4 --threads 2
+uv run manage.py threadmill worker --workers 4 --threads 2
 ```
+
+Each worker process runs one fetcher thread that reserves a batch of tasks in a single broker round-trip.
+Worker threads drain that buffer, which amortizes broker latency across fast tasks.
+A full buffer blocks the fetcher until a worker thread frees a slot.
+
+Set the batch size with `--prefetch-count`.
+It defaults to four times the thread count and applies per process, not per thread.
+A value of `1` disables batching.
+
+Prefetching has soft limits:
+
+- Tasks are marked `RUNNING` when they are fetched, so the time they spend in the buffer counts against `lease_ttl`.
+- The priority lookahead widens to the buffer size, so ordering is no longer strictly global.
+- `--max-tasks` may overshoot by up to the buffer size, because a prefetched task always runs.
+- `worker_ids` records the fetcher of the process, not the thread that runs the task.
 
 #### Health
 
@@ -95,12 +110,15 @@ uv run manage.py threadmill worker --max-tasks 1000 --max-tasks-jitter 100
 
 This will restart the workers after 1000 tasks have been processed, with a random jitter of up to 100 tasks to avoid all workers restarting at the same time.
 
+The limit is soft: a worker still drains its prefetch buffer, so it may process up to `--prefetch-count` tasks beyond the configured maximum.
+
 Should a worker crash or be killed, the pool will automatically restart it.
 
 #### Shutdown
 
 A graceful shutdown is possible with the `SIGTERM` or a keyboard interrupt.
-All workers will finish the tasks they acquired and acknowledge them.
+All workers will finish the tasks they acquired and acknowledge them, including the tasks already in their prefetch buffer.
+A hard kill cannot be intercepted, so buffered tasks are left to the lease reaper.
 
 You can use `--exit-empty` to exit immediately after all tasks have been processed,
 which might be useful for draining a one-off queue.
@@ -124,7 +142,7 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 
 | Option              | Default                   | Description                                                             |
 | ------------------- | ------------------------- | ----------------------------------------------------------------------- |
-| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before a started task is marked FAILED.             |
+| `lease_ttl`         | `timedelta(hours=1)`      | Max time from fetch to acknowledgement before a task is marked FAILED.  |
 | `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.            |
 | `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                  |
 | `batch_size`        | `100`                     | Max tasks to move or requeue per broker pass.                           |
@@ -133,7 +151,7 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 
 A task that is started but never acknowledged (lease expired) is marked FAILED
 with an `AcknowledgementTimeout` error. Set `lease_ttl` comfortably above your
-worst-case task runtime.
+worst-case task runtime plus the time a task may wait in a prefetch buffer.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single

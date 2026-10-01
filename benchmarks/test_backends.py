@@ -12,6 +12,8 @@ that exit on their own include their stop cost too. Subtract
 ``test_start_worker__benchmark`` from ``test_process_queue__benchmark`` and divide
 the queue depth by the difference to get the marginal throughput of a busy queue.
 
+Threadmill is measured twice, with its default prefetch buffer and with batching
+disabled, so the prefetch cost can be subtracted from both worker benchmarks.
 Threadmill, django-tasks-db and django-tasks-redis run one worker process that
 drains a queue and exits. Celery has no such mode, so the benchmark queues a
 sentinel task last and waits for it to be processed. That wait is what proves the
@@ -114,6 +116,20 @@ def drain_with_threadmill_worker() -> None:
         backend=DEFAULT_TASK_BACKEND_ALIAS,
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
+        exit_empty=True,
+        verbosity=0,
+    )
+
+
+def drain_with_threadmill_worker_no_prefetch() -> None:
+    """Process every queued task with one threadmill worker without batching."""
+    call_command(
+        "threadmill",
+        "worker",
+        backend=DEFAULT_TASK_BACKEND_ALIAS,
+        queues=[DEFAULT_TASK_QUEUE_NAME],
+        workers=1,
+        prefetch_count=1,
         exit_empty=True,
         verbosity=0,
     )
@@ -249,6 +265,11 @@ def django_task_backend(
 WORKER_QUEUES = (
     django_task_backend(
         "threadmill", DEFAULT_TASK_BACKEND_ALIAS, drain_with_threadmill_worker
+    ),
+    django_task_backend(
+        "threadmill (no prefetch)",
+        DEFAULT_TASK_BACKEND_ALIAS,
+        drain_with_threadmill_worker_no_prefetch,
     ),
     django_task_backend(
         "django-tasks-db", "django-tasks-db", drain_with_django_tasks_db_worker

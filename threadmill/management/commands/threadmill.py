@@ -69,6 +69,16 @@ class WorkerCommand(DjangoBaseCommand):
             help="Maximum random jitter to add to the max-tasks value by randint(0, max_tasks_jitter).",
         )
         parser.add_argument(
+            "--prefetch-count",
+            type=int,
+            default=None,
+            help=(
+                "Number of tasks to prefetch per worker process."
+                " Defaults to 4 × the number of threads; use 1 to disable batching."
+                " Buffered tasks still run after a worker reaches its max-tasks limit."
+            ),
+        )
+        parser.add_argument(
             "--poll-interval",
             type=float,
             default=0.01,
@@ -103,6 +113,7 @@ class WorkerCommand(DjangoBaseCommand):
         threads,
         max_tasks,
         max_tasks_jitter,
+        prefetch_count,
         poll_interval,
         poll_max_interval,
         exit_empty,
@@ -136,12 +147,15 @@ class WorkerCommand(DjangoBaseCommand):
             )
         except (TypeError, ValueError) as e:
             raise CommandError(f"Invalid log format: {log_format!r}") from e
+        if prefetch_count is not None and prefetch_count < 1:
+            raise CommandError(f"Invalid prefetch count: {prefetch_count!r}")
         exe = TaskExecutor(
             backend=backend,
             workers=workers,
             threads=threads,
             max_tasks=max_tasks,
             max_tasks_jitter=max_tasks_jitter,
+            prefetch_count=prefetch_count,
             poll_interval=datetime.timedelta(seconds=poll_interval),
             poll_max_interval=datetime.timedelta(seconds=poll_max_interval),
             exit_empty=exit_empty,
