@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
+from django.tasks.exceptions import InvalidTask, InvalidTaskBackend
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -340,6 +341,156 @@ class TestRedisBrokerReap:
                     )
                     == 0
                 )
+        finally:
+            backend.close()
+
+
+def _poison_to_unparseable_json(payload: dict) -> str:
+    """Return a stored payload that is not JSON at all."""
+    return "{not json"
+
+
+def _poison_to_empty_payload(payload: dict) -> str:
+    """Return an empty stored payload."""
+    return ""
+
+
+def _poison_to_unknown_result_field(payload: dict) -> str:
+    """Return a stored payload whose result carries a field TaskResult rejects."""
+    payload["bogus"] = 1
+    return json.dumps(payload)
+
+
+def _poison_to_missing_status(payload: dict) -> str:
+    """Return a stored payload whose result has no status."""
+    del payload["status"]
+    return json.dumps(payload)
+
+
+def _poison_to_unimportable_retry(payload: dict) -> str:
+    """Return a stored payload whose retry callback no longer imports."""
+    payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
+    return json.dumps(payload)
+
+
+def _poison_to_invalid_priority(payload: dict) -> str:
+    """Return a stored payload whose task priority is out of range."""
+    payload["task"]["priority"] = 999
+    return json.dumps(payload)
+
+
+def _poison_to_unknown_backend_alias(payload: dict) -> str:
+    """Return a stored payload whose task names a backend that does not exist."""
+    payload["task"]["backend"] = "no-such-backend"
+    return json.dumps(payload)
+
+
+def _poison_to_json_list(payload: dict) -> str:
+    """Return a stored payload that is a JSON list, not a task mapping."""
+    return json.dumps([1, 2, 3])
+
+
+def _poison_to_integer_run_after(payload: dict) -> str:
+    """Return a stored payload whose run_after is an integer, not an ISO string."""
+    payload["task"]["run_after"] = 123
+    return json.dumps(payload)
+
+
+UNREADABLE_PAYLOAD_CASES = [
+    pytest.param(
+        _poison_to_unparseable_json, ValueError, id="value-error-unparseable-json"
+    ),
+    pytest.param(_poison_to_empty_payload, ValueError, id="value-error-empty-payload"),
+    pytest.param(
+        _poison_to_unknown_result_field, TypeError, id="type-error-unexpected-field"
+    ),
+    pytest.param(_poison_to_json_list, AttributeError, id="attribute-error-json-list"),
+    pytest.param(
+        _poison_to_integer_run_after,
+        AttributeError,
+        id="attribute-error-integer-run-after",
+    ),
+    pytest.param(_poison_to_missing_status, KeyError, id="key-error-missing-status"),
+    pytest.param(
+        _poison_to_unimportable_retry, ImportError, id="import-error-unimportable-retry"
+    ),
+    pytest.param(_poison_to_invalid_priority, InvalidTask, id="invalid-task-priority"),
+    pytest.param(
+        _poison_to_unknown_backend_alias,
+        InvalidTaskBackend,
+        id="invalid-task-backend-unknown-alias",
+    ),
+]
+
+
+class TestUnreadablePayloadErrors:
+    """Verify each named unreadable-payload failure against a stored payload."""
+
+    @pytest.mark.parametrize(("poison", "expected_error"), UNREADABLE_PAYLOAD_CASES)
+    def test_reap_claimed_task__leaves_payload_as_stored(
+        self, caplog, poison, expected_error
+    ):
+        """Leave a payload whose read raises the named failure as stored."""
+        backend = _make_backend("reap_unreadable_case")
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="unreadable-case"
+            )
+            assert acquired is not None
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            poisoned = poison(json.loads(backend.client.hget(task_key, "data")))
+            backend.client.hset(task_key, "data", poisoned)
+
+            with pytest.raises(expected_error):
+                backend.get_leased_task(task_result.id)
+
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                RedisBroker(backend)._reap_claimed_task(task_result.id)
+
+            assert backend.client.hget(task_key, "data") == poisoned.encode()
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert backend.client.zscore(running_key, task_result.id) is not None
+            assert (
+                backend.client.exists(
+                    backend.RESULT_KEY.format(
+                        prefix=backend.key_prefix, result_id=task_result.id
+                    )
+                )
+                == 0
+            )
+            assert "has an unreadable payload" in caplog.text
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize(("poison", "expected_error"), UNREADABLE_PAYLOAD_CASES)
+    def test_acquire__leaves_payload_as_stored(self, caplog, poison, expected_error):
+        """Keep scanning past a payload whose read raises the named failure."""
+        backend = _make_backend("acquire_unreadable_case")
+        try:
+            poisoned_task = backend.enqueue(echo, args=[1])
+            healthy_task = backend.enqueue(echo, args=[2])
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=poisoned_task.id
+            )
+            poisoned = poison(json.loads(backend.client.hget(task_key, "data")))
+            backend.client.hset(task_key, "data", poisoned)
+
+            with pytest.raises(expected_error):
+                backend.get_leased_task(poisoned_task.id)
+
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="unreadable-case"
+                )
+
+            assert acquired.id == healthy_task.id
+            assert backend.client.hget(task_key, "data") == poisoned.encode()
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert backend.client.zscore(running_key, poisoned_task.id) is not None
+            assert "has an unreadable payload" in caplog.text
         finally:
             backend.close()
 

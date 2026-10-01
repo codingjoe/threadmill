@@ -14,7 +14,11 @@ from pathlib import Path
 import redis
 import redis.asyncio
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
-from django.tasks.exceptions import TaskResultDoesNotExist
+from django.tasks.exceptions import (
+    InvalidTask,
+    InvalidTaskBackend,
+    TaskResultDoesNotExist,
+)
 from django.tasks.signals import task_enqueued
 from django.utils import timezone
 
@@ -54,6 +58,18 @@ def _parse_lease_started_at(value: bytes | str | None) -> datetime.datetime | No
         return datetime.datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+# Failures a stored payload raises when this code cannot read it as a task.
+UNREADABLE_PAYLOAD_ERRORS = (
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    ImportError,
+    InvalidTask,
+    InvalidTaskBackend,
+)
 
 
 class RedisBroker(Broker):
@@ -108,7 +124,7 @@ class RedisBroker(Broker):
         """Requeue or fail one claimed task, or leave an unreadable payload as stored."""
         try:
             task_result = self.backend.get_leased_task(task_id)
-        except Exception:  # noqa: BLE001
+        except UNREADABLE_PAYLOAD_ERRORS:
             logger.warning(
                 "Task %r has an unreadable payload; leaving it as stored", task_id
             )
@@ -356,7 +372,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                         worker=worker,
                         lease_started_at=now,
                     )
-                except Exception:  # noqa: BLE001
+                except UNREADABLE_PAYLOAD_ERRORS:
                     logger.warning(
                         "Task %r has an unreadable payload; leaving it as stored",
                         task_id,
@@ -553,7 +569,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     )
                 else:
                     task_result = self.deserialize_task_result(stored)
-            except Exception:  # noqa: BLE001
+            except UNREADABLE_PAYLOAD_ERRORS:
                 task_result = None
             if task_result is not None:
                 yield task_result
