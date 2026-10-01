@@ -28,6 +28,7 @@ from threadmill.backends.base import (
     TelemetryEvent,
     ThreadmillTaskBackend,
 )
+from threadmill.exceptions import AcknowledgementTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,10 @@ class RedisBroker(Broker):
     MOVER_SCRIPT = _load_lua("mover")
     """Move tasks whose scheduled time has passed from the deferred to the active queue."""
     REAPER_SCRIPT = _load_lua("reaper")
-    """Fail tasks whose processing lease has expired from the running set."""
+    """Claim tasks whose processing lease has expired for the broker to decide their fate."""
+
+    CLAIM_TTL = datetime.timedelta(seconds=60)
+    """How long a reaper claim is held before another broker pass may take it over."""
 
     def __init__(self, backend: RedisTaskBackend) -> None:
         interval = backend.options.get("broker_interval", datetime.timedelta(seconds=1))
@@ -71,25 +75,62 @@ class RedisBroker(Broker):
         )
 
     def _reap_running_queue(self, queue_name: str) -> None:
-        """Fail tasks whose processing lease has expired from the running set."""
-        now = timezone.now()
-        now_ms = now.timestamp() * 1000
-        finished_at_iso = now.isoformat()
+        """Claim tasks whose processing lease has expired from the running set."""
+        now_ms = int(timezone.now().timestamp() * 1000)
+        lease_deadline_ms = now_ms + int(self.CLAIM_TTL.total_seconds() * 1000)
         running_key = self.backend._segment_key(TaskResultStatus.RUNNING, queue_name)
-        failed_results_key = self.backend._segment_key(
-            TaskResultStatus.FAILED, queue_name
-        )
-        self._reaper_script(
-            keys=[running_key, failed_results_key],
+        claimed_ids = self._reaper_script(
+            keys=[running_key],
             args=[
                 str(now_ms),
-                f"{self.backend.key_prefix}:task:",
-                f"{self.backend.key_prefix}:result:",
+                str(lease_deadline_ms),
                 str(self.backend.batch_size),
-                str(int(self.backend.result_ttl.total_seconds())),
-                finished_at_iso,
+                f"{self.backend.key_prefix}:task:",
             ],
         )
+        for claimed_id in claimed_ids:
+            task_id = (
+                claimed_id.decode() if isinstance(claimed_id, bytes) else claimed_id
+            )
+            try:
+                self._reap_task(task_id, lease_deadline_ms)
+            except Exception:  # noqa: BLE001
+                logger.exception("Reaper error for task %r", task_id)
+
+    def _reap_task(self, task_id: str, lease_deadline_ms: float) -> None:
+        """Requeue or fail a claimed task by consulting its retry callback."""
+        task_key = self.backend.TASK_KEY.format(
+            prefix=self.backend.key_prefix, task_id=task_id
+        )
+        data = self.backend.client.hget(task_key, "data")
+        if data is None:
+            logger.warning("Claimed task %r has no task data; skipping", task_id)
+            return
+        task_result = self.backend.deserialize_task_result(data)
+        now = timezone.now()
+        task_result = dataclasses.replace(
+            task_result,
+            status=TaskResultStatus.FAILED,
+            finished_at=now,
+            errors=[
+                *task_result.errors,
+                self.backend.create_task_error(
+                    AcknowledgementTimeout("Task processing lease expired.")
+                ),
+            ],
+        )
+        delay = self.backend.retry_delay(task_result)
+        logger.info(
+            "Task '%s@%s' lease expired",
+            task_result.id,
+            task_result.task.module_path,
+        )
+        if delay is None:
+            self.backend.acknowledge(task_result, lease_deadline_ms=lease_deadline_ms)
+        else:
+            self.backend.requeue(
+                task_result, now + delay, lease_deadline_ms=lease_deadline_ms
+            )
 
     def main(self) -> None:
         """Run mover and running reaper passes for all queues."""
@@ -131,6 +172,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     """Pop the next task from a priority queue and move it directly to the running set."""
     ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
     """Remove from running, persist the result, and clean up."""
+    REQUEUE_SCRIPT = _load_lua("requeue")
+    """Re-queue a failed task for a retry attempt and schedule it in the deferred set."""
 
     def _segment_key(self, status: TaskResultStatus, queue_name: str) -> str:
         return self.SEGMENT_KEY.format(
@@ -166,6 +209,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self._rotation_offset = random.randrange(len(self.queues))  # noqa: S311
         self._acquire_script = self.client.register_script(self.ACQUIRE_SCRIPT)
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
+        self._requeue_script = self.client.register_script(self.REQUEUE_SCRIPT)
 
     @property
     def async_client(self) -> redis.asyncio.Redis:
@@ -301,7 +345,16 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             self._miss_count += 1
             time.sleep(interval_secs)
 
-    def acknowledge(self, task_result: TaskResult) -> None:
+    def acknowledge(
+        self, task_result: TaskResult, *, lease_deadline_ms: float | None = None
+    ) -> None:
+        """Remove the task from running, persist the result, and clean up.
+
+        Args:
+            task_result: The finished task result to publish.
+            lease_deadline_ms: Act only while the running entry still holds this
+                lease deadline (e.g. a reaper claim); None acknowledges unconditionally.
+        """
         serialized = self.serialize_task_result(task_result)
         running_key = self._segment_key(
             TaskResultStatus.RUNNING, task_result.task.queue_name
@@ -335,10 +388,25 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 task_result.status.name,
                 self.telemetry_channel,
                 task_result.task.queue_name,
+                "" if lease_deadline_ms is None else str(lease_deadline_ms),
             ],
         )
 
-    def requeue(self, task_result: TaskResult, run_after: datetime.datetime) -> None:
+    def requeue(
+        self,
+        task_result: TaskResult,
+        run_after: datetime.datetime,
+        *,
+        lease_deadline_ms: float | None = None,
+    ) -> None:
+        """Re-queue a failed task for a retry attempt after `run_after`.
+
+        Args:
+            task_result: The failed task result to re-queue.
+            run_after: The earliest time the task may run again.
+            lease_deadline_ms: Act only while the running entry still holds this
+                lease deadline (e.g. a reaper claim); None requeues unconditionally.
+        """
         task_result = dataclasses.replace(
             task_result,
             status=TaskResultStatus.READY,
@@ -365,15 +433,19 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             self.lease_ttl.total_seconds() * 3 + self.result_ttl.total_seconds()
         )
 
-        pipe = self.client.pipeline()
-        pipe.zrem(running_key, task_result.id)
-        pipe.zrem(failed_key, task_result.id)
-        pipe.delete(result_key)
-        pipe.hset(task_key, mapping={"data": serialized, "score": str(score)})
-        pipe.expire(task_key, task_data_ttl)
-        pipe.zadd(deferred_key, {task_result.id: run_after_ms})
-        pipe.publish(self.telemetry_channel, f"ingress:{task_result.task.queue_name}")
-        pipe.execute()
+        self._requeue_script(
+            keys=[running_key, failed_key, result_key, task_key, deferred_key],
+            args=[
+                task_result.id,
+                serialized,
+                str(score),
+                str(run_after_ms),
+                str(task_data_ttl),
+                self.telemetry_channel,
+                task_result.task.queue_name,
+                "" if lease_deadline_ms is None else str(lease_deadline_ms),
+            ],
+        )
 
     def dequeue(self, task_result: TaskResult) -> None:
         self.client.zrem(

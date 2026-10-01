@@ -122,18 +122,23 @@ uv run manage.py threadmill inspector
 The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 `TASKS` configuration:
 
-| Option              | Default                   | Description                                                             |
-| ------------------- | ------------------------- | ----------------------------------------------------------------------- |
-| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before a started task is marked FAILED.             |
-| `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.            |
-| `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                  |
-| `batch_size`        | `100`                     | Max tasks to move or requeue per broker pass.                           |
-| `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll. |
-| `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                 |
+| Option              | Default                   | Description                                                              |
+| ------------------- | ------------------------- | ------------------------------------------------------------------------ |
+| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before an expired lease is retried or marked FAILED. |
+| `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.             |
+| `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                   |
+| `batch_size`        | `100`                     | Max tasks to move or requeue per broker pass.                            |
+| `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll.  |
+| `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                  |
 
-A task that is started but never acknowledged (lease expired) is marked FAILED
-with an `AcknowledgementTimeout` error. Set `lease_ttl` comfortably above your
-worst-case task runtime.
+A task that is started but never acknowledged (lease expired) is reported to its
+`retry` callback as an `AcknowledgementTimeout` error. Tasks without a retry
+callback — or whose callback returns `None` — are marked FAILED. See
+[Retrying lease expiry](#retrying-lease-expiry) for an example.
+
+Lease expiry presumes the worker died, so set `lease_ttl` comfortably above your
+worst-case task runtime. A task that outlives its lease may still run on its
+original worker, so a retry can execute concurrently with it.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
@@ -207,6 +212,37 @@ def retry_on_rate_limit(context: TaskContext) -> datetime.timedelta | None:
 
 @task(retry=retry_on_rate_limit)
 def fetch_github_api(url: str): ...
+```
+
+#### Retrying lease expiry
+
+The broker hands tasks whose lease expired to the retry callback with an
+`AcknowledgementTimeout` error, so the callback can retry them like any other
+failure. Retry only lease expiry by checking the exception class, or list it in
+`expected_exceptions`:
+
+```python
+import datetime
+
+from django.tasks import task
+from django.tasks.base import TaskContext
+
+from threadmill.exceptions import AcknowledgementTimeout
+from threadmill.retry import ExponentialBackoff
+
+
+def retry_on_lease_expiry(context: TaskContext) -> datetime.timedelta | None:
+    if context.task_result.errors[-1].exception_class is AcknowledgementTimeout:
+        return datetime.timedelta(seconds=30)
+
+
+@task(retry=retry_on_lease_expiry)
+def index_repository(): ...
+
+
+# Or with the built-in backoff:
+@task(retry=ExponentialBackoff(expected_exceptions=(AcknowledgementTimeout,)))
+def sync_catalogue(): ...
 ```
 
 ## Sponsors
