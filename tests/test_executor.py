@@ -4,6 +4,7 @@ import json
 import logging
 import multiprocessing
 import sys
+import sysconfig
 import threading
 import time
 import uuid
@@ -27,6 +28,7 @@ from tests.testapp.tasks import (
     count_users,
     echo,
     log_message,
+    record_execution,
 )
 from threadmill.backends.base import Broker
 from threadmill.executor import (
@@ -36,6 +38,9 @@ from threadmill.executor import (
     WorkerThread,
     configure_logging,
     handler,
+    is_free_threaded_build,
+    is_gil_enabled,
+    warn_when_free_threading_is_unavailable,
 )
 
 
@@ -198,6 +203,67 @@ class TestConfigureLogging:
         )
 
 
+class TestFreeThreadingDiagnostic:
+    """Tests for the interpreter free-threading diagnostic."""
+
+    def test_is_free_threaded_build__report_interpreter(self, monkeypatch):
+        """Report the free-threading build flag of the interpreter."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        assert is_free_threaded_build() is True
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 0)
+        assert is_free_threaded_build() is False
+
+    def test_is_free_threaded_build__treat_absent_flag_as_gil_build(self, monkeypatch):
+        """Treat an interpreter without the build flag as a GIL build."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: None)
+        assert is_free_threaded_build() is False
+
+    def test_is_gil_enabled__report_interpreter(self):
+        """Report the GIL state of the running interpreter."""
+        assert is_gil_enabled() is sys._is_gil_enabled()
+
+    def test_is_gil_enabled__assume_enabled_without_private_api(self, monkeypatch):
+        """Assume the GIL is enabled when the private API is absent."""
+        monkeypatch.delattr(sys, "_is_gil_enabled", raising=False)
+        assert is_gil_enabled() is True
+
+    def test_warn_when_free_threading_is_unavailable__warn_lost_parallelism(
+        self, monkeypatch, caplog
+    ):
+        """Warn when a free-threaded build runs with the GIL enabled."""
+        monkeypatch.setattr("threadmill.executor.is_free_threaded_build", lambda: True)
+        monkeypatch.setattr("threadmill.executor.is_gil_enabled", lambda: True)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "so worker threads run one at a time" in caplog.text
+
+    def test_warn_when_free_threading_is_unavailable__silent_without_gil(
+        self, monkeypatch, caplog
+    ):
+        """Stay silent when a free-threaded build runs without the GIL."""
+        monkeypatch.setattr("threadmill.executor.is_free_threaded_build", lambda: True)
+        monkeypatch.setattr("threadmill.executor.is_gil_enabled", lambda: False)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "so worker threads run one at a time" not in caplog.text
+
+    def test_warn_when_free_threading_is_unavailable__silent_on_gil_build(
+        self, monkeypatch, caplog
+    ):
+        """Stay silent on an interpreter without free threading."""
+        monkeypatch.setattr("threadmill.executor.is_free_threaded_build", lambda: False)
+        monkeypatch.setattr("threadmill.executor.is_gil_enabled", lambda: True)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "so worker threads run one at a time" not in caplog.text
+
+
 class TestTaskExecutor:
     """Tests for the TaskExecutor dataclass and its methods."""
 
@@ -286,6 +352,32 @@ class TestTaskExecutor:
         )
         assert {r.id for r in results} == {r.id for r in enqueued}
         assert all(r.status == TaskResultStatus.SUCCESSFUL for r in results)
+
+    def test_run__processes_each_task_exactly_once_with_threads(self, tmp_path):
+        """Process every queued task exactly once across concurrent worker threads."""
+        count = 40
+        execution_log = tmp_path / "executed"
+        for value in range(count):
+            default_task_backend.enqueue(
+                record_execution, args=[str(execution_log), value]
+            )
+
+        executor = TaskExecutor(
+            backend=default_task_backend,
+            workers=1,
+            threads=4,
+            queues=("default",),
+            exit_empty=True,
+        )
+        run_thread = threading.Thread(target=executor.run, daemon=True)
+        run_thread.start()
+        run_thread.join(timeout=60)
+        assert not run_thread.is_alive()
+
+        recorded = sorted(
+            int(line) for line in execution_log.read_text(encoding="utf-8").split()
+        )
+        assert recorded == list(range(count))
 
     def test_run__routes_task_logs_to_stdout(self, capfd):
         """Emit task log records as JSON on standard output."""
@@ -576,6 +668,7 @@ class TestWorkerThread:
         """Return None and log when the retry callback raises an exception."""
         mp_logger = multiprocessing.get_logger()
         mp_logger.addHandler(caplog.handler)
+        original_level = mp_logger.level
         mp_logger.setLevel(logging.ERROR)
         result = _task_result(boom_retry_raises)
         result = dataclasses.replace(
@@ -587,6 +680,7 @@ class TestWorkerThread:
             assert WorkerThread.retry_delay(result) is None
         finally:
             mp_logger.removeHandler(caplog.handler)
+            mp_logger.setLevel(original_level)
         assert "Retry callback failed" in caplog.text
 
     def test_retry_delay__passes_task_context(self) -> None:

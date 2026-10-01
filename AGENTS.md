@@ -13,9 +13,11 @@ All commands run via `uv`:
 ```bash
 uv run pytest                              # full suite (incl. benchmarks, coverage)
 uv run pytest -m "not benchmark"           # what CI runs by default
+uv run --python 3.14t pytest -m "not benchmark"   # free-threaded build (uv installs 3.14t on demand)
 uv run pytest -m integration               # integration tests only
 uv run pytest -m "integration and benchmark"
 uv run pytest --benchmark-compare          # compare vs main baseline (run main first)
+uv run pytest benchmarks/test_scaling.py -m benchmark   # process vs thread scaling; run on 3.14 and 3.14t
 uvx prek run --all-files
 uv run manage.py threadmill worker         # run the worker pool
 uv run manage.py threadmill inspector    # launch the textual TUI inspector

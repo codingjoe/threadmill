@@ -6,6 +6,7 @@ import datetime
 import logging
 import queue
 import random
+import threading
 import time
 import uuid
 from collections.abc import Generator, Sequence
@@ -37,6 +38,18 @@ _LUA_DIR = Path(__file__).resolve().parent / "lua"
 def _load_lua(name: str) -> str:
     """Load a Lua script from the lua directory."""
     return (_LUA_DIR / f"{name}.lua").read_text()
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class IdleBackoff:
+    """Idle polling state for a single worker thread.
+
+    Every worker thread backs off and rotates independently, so one thread's
+    misses never reset or double another thread's delay.
+    """
+
+    miss_count: int = 0
+    rotation_offset: int = 0
 
 
 class RedisBroker(Broker):
@@ -162,10 +175,20 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self.poll_max_interval = self.options.get(
             "poll_max_interval", datetime.timedelta(seconds=1)
         )
-        self._miss_count = 0
-        self._rotation_offset = random.randrange(len(self.queues))  # noqa: S311
+        self._idle_backoffs = threading.local()
         self._acquire_script = self.client.register_script(self.ACQUIRE_SCRIPT)
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
+
+    @property
+    def _idle_backoff(self) -> IdleBackoff:
+        """Return the idle polling state of the calling worker thread."""
+        backoff = getattr(self._idle_backoffs, "backoff", None)
+        if backoff is None:
+            backoff = IdleBackoff(
+                rotation_offset=random.randrange(len(self.queues))  # noqa: S311
+            )
+            self._idle_backoffs.backoff = backoff
+        return backoff
 
     @property
     def async_client(self) -> redis.asyncio.Redis:
@@ -263,6 +286,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             )
         ]
 
+        idle_backoff = self._idle_backoff
         while True:
             now = timezone.now()
             now_ms = now.timestamp() * 1000
@@ -277,11 +301,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     str(len(queue_names)),
                     worker,
                     str(int(self.lease_ttl.total_seconds() * 1000)),
-                    str(self._rotation_offset),
+                    str(idle_backoff.rotation_offset),
                 ],
             ):
-                self._miss_count = 0
-                self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
+                idle_backoff.miss_count = 0
+                idle_backoff.rotation_offset = (idle_backoff.rotation_offset + 1) % len(
+                    queue_names
+                )
                 return self.deserialize_task_result(data)
 
             try:
@@ -294,11 +320,12 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             # exponents would only overflow the float math.
             cap = int(self.poll_max_interval / self.poll_interval).bit_length()
             interval_secs = min(
-                self.poll_interval.total_seconds() * 2 ** min(self._miss_count, cap),
+                self.poll_interval.total_seconds()
+                * 2 ** min(idle_backoff.miss_count, cap),
                 self.poll_max_interval.total_seconds(),
                 remaining,
             )
-            self._miss_count += 1
+            idle_backoff.miss_count += 1
             time.sleep(interval_secs)
 
     def acknowledge(self, task_result: TaskResult) -> None:
