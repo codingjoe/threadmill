@@ -131,14 +131,10 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 | `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll.  |
 | `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                  |
 
-A task that is started but never acknowledged (lease expired) is reported to its
-`retry` callback as an `AcknowledgementTimeout` error. Tasks without a retry
-callback — or whose callback returns `None` — are marked FAILED. See
-[Retrying lease expiry](#retrying-lease-expiry) for an example.
-
-Lease expiry presumes the worker died, so set `lease_ttl` comfortably above your
-worst-case task runtime. A task that outlives its lease may still run on its
-original worker, so a retry can execute concurrently with it.
+A task whose lease expired reaches the `retry` callback as an
+`AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
+Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
+can still be running, so a retry may execute concurrently with it.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
@@ -152,8 +148,10 @@ The callback receives a `TaskContext` — use `context.attempt` for the current
 attempt count and `context.task_result.errors[-1]` for the latest error.
 Return a `timedelta` to schedule the next attempt, or `None` to stop retrying.
 
-The worker re-queues the failed task, preserving its ID and error history;
-the broker promotes it back to the ready queue once the delay elapses.
+Tasks whose processing lease expired reach the callback the same way, with an
+`AcknowledgementTimeout` error. The task is re-queued preserving its ID and
+error history, and the broker promotes it back to the ready queue once the delay
+elapses.
 
 #### Built-in `ExponentialBackoff`
 
@@ -212,37 +210,6 @@ def retry_on_rate_limit(context: TaskContext) -> datetime.timedelta | None:
 
 @task(retry=retry_on_rate_limit)
 def fetch_github_api(url: str): ...
-```
-
-#### Retrying lease expiry
-
-The broker hands tasks whose lease expired to the retry callback with an
-`AcknowledgementTimeout` error, so the callback can retry them like any other
-failure. Retry only lease expiry by checking the exception class, or list it in
-`expected_exceptions`:
-
-```python
-import datetime
-
-from django.tasks import task
-from django.tasks.base import TaskContext
-
-from threadmill.exceptions import AcknowledgementTimeout
-from threadmill.retry import ExponentialBackoff
-
-
-def retry_on_lease_expiry(context: TaskContext) -> datetime.timedelta | None:
-    if context.task_result.errors[-1].exception_class is AcknowledgementTimeout:
-        return datetime.timedelta(seconds=30)
-
-
-@task(retry=retry_on_lease_expiry)
-def index_repository(): ...
-
-
-# Or with the built-in backoff:
-@task(retry=ExponentialBackoff(expected_exceptions=(AcknowledgementTimeout,)))
-def sync_catalogue(): ...
 ```
 
 ## Sponsors
