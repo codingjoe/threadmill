@@ -220,11 +220,11 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
         text(
             28,
             row_centers[-1] + FOOTNOTE_GAP,
-            # joe: width checked by hand (right edge 836.7 of 900 at 11.5px); add a
+            # joe: width checked by hand (right edge 873.7 of 900 at 11.5px); add a
             # width guard if the canvas width or the font stack changes.
-            "One worker process and one thread; each queue at its own default "
-            "read-ahead. dramatiq's Redis broker polls, so two in flight cost a "
-            "backoff per poll.",
+            "One worker process and one thread; each reads four messages ahead. "
+            "The Django backends read one at a time - their workers have no "
+            "read-ahead setting.",
             theme=theme,
             size=11.5,
             fill=theme.faint,
