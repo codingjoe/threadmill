@@ -211,20 +211,28 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     def acquire(
         self,
         *queue_names: str,
+        count: int = 1,
         timeout: datetime.timedelta | None = None,
         worker: str = "",
-    ) -> TaskResult:
+    ) -> list[TaskResult]:
         """
-        Return and lock the next task to be processed without removing it from the queue.
+        Return and lock up to `count` tasks without removing them from the queue.
+
+        Waits up to `timeout` for the first task only and fills the remaining
+        `count - 1` tasks without waiting.
 
         Args:
             queue_names: The names of the queues to acquire tasks from.
-            timeout: The maximum time to wait for a task. If None, wait indefinitely.
-            worker: The name of the worker thread acquiring the task.
+            count: The maximum number of tasks to acquire, at least 1.
+            timeout: The maximum time to wait for the first task. If None, wait indefinitely.
+            worker: The name of the worker thread acquiring the tasks.
 
         Raises:
-            TimeoutError: If no task is available within the specified timeout.
-            queue.Empty: If no task is available and timeout is None.
+            TimeoutError: If the first task does not arrive within the specified timeout.
+            queue.Empty: If the first task is unavailable and timeout is None.
+
+        Returns:
+            Between one and `count` task results, never an empty list.
         """
         raise NotImplementedError
 

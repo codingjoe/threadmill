@@ -115,6 +115,10 @@ TASKS = {
     "dummy": {
         "BACKEND": "django.tasks.backends.dummy.DummyBackend",
     },
+    "stub": {
+        "BACKEND": "tests.testapp.backends.StubTaskBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
+    },
 }
 
 # Password validation

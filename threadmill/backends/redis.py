@@ -128,7 +128,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
-    """Pop the next task from a priority queue and move it directly to the running set."""
+    """Pop up to a given number of tasks from the priority queues and move them directly to the running set."""
     ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
     """Remove from running, persist the result, and clean up."""
 
@@ -249,9 +249,10 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def acquire(
         self,
         *queue_names: str,
+        count: int = 1,
         timeout: datetime.timedelta | None = None,
         worker: str = "",
-    ) -> TaskResult:
+    ) -> list[TaskResult]:
         queue_names = queue_names or tuple(self.queues)
         deadline = time.monotonic() + timeout.total_seconds() if timeout else None
         keys = [
@@ -278,11 +279,12 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     worker,
                     str(int(self.lease_ttl.total_seconds() * 1000)),
                     str(self._rotation_offset),
+                    str(count),
                 ],
             ):
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
-                return self.deserialize_task_result(data)
+                return [self.deserialize_task_result(item) for item in data]
 
             try:
                 remaining = deadline - time.monotonic()

@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import multiprocessing
+import queue
 import random
 import socket
 import sys
@@ -14,7 +15,7 @@ import time
 import typing
 from concurrent.futures import ThreadPoolExecutor
 from inspect import iscoroutinefunction
-from queue import Empty
+from queue import Empty, Full
 from traceback import format_exception
 
 import django
@@ -99,6 +100,10 @@ def configure_logging(formatter: logging.Formatter) -> None:
     root_logger.setLevel(logging.INFO)
 
 
+# Maximum wait for a task from the backend or the prefetch buffer.
+TASK_WAIT_TIMEOUT = datetime.timedelta(seconds=1)
+
+
 @dataclasses.dataclass(kw_only=True, slots=True)
 class TaskExecutor:
     """Tasks consumed from shared joinable queues via process and thread pools."""
@@ -108,6 +113,7 @@ class TaskExecutor:
     threads: int = 1
     max_tasks: int = 0
     max_tasks_jitter: int = 0
+    prefetch_count: int | None = None
     poll_interval: datetime.timedelta = datetime.timedelta(seconds=0.01)
     poll_max_interval: datetime.timedelta = datetime.timedelta(seconds=1)
     is_publishing: bool = dataclasses.field(default=True, init=False)
@@ -125,19 +131,23 @@ class TaskExecutor:
         """Initialize derived orchestration fields and queues."""
         self.process_count = self.workers or max(multiprocessing.cpu_count() - 1, 1)
         self.thread_count = max(self.threads, 1)
+        if self.prefetch_count is None:
+            self.prefetch_count = self.thread_count * 4
+        if self.prefetch_count < 1:
+            raise ValueError("prefetch_count must be at least 1")
 
     def get_maximum_tasks_per_child(self) -> int | None:
         """Return worker recycling limit based on config and thread count."""
         if self.max_tasks:
-            return (
-                self.max_tasks + random.randint(0, self.max_tasks_jitter)  # noqa: S311
-            ) // self.thread_count
+            jitter = random.randint(0, self.max_tasks_jitter)  # noqa: S311
+            return max((self.max_tasks + jitter) // self.thread_count, 1)
 
     def create_worker_process(self) -> WorkerProcess:
         """Create and start a new worker process."""
         worker = WorkerProcess(
             thread_count=self.thread_count,
             max_tasks=self.get_maximum_tasks_per_child(),
+            prefetch_count=self.prefetch_count,
             backend_alias=self.backend.alias,
             queues=self.queues,
             exit_empty=self.exit_empty,
@@ -151,6 +161,12 @@ class TaskExecutor:
     def run(self) -> None:
         """Start consuming tasks until shutdown is requested."""
         configure_logging(self.log_formatter)
+        logger.info(
+            "Starting %d worker processes with %d threads and %d prefetched tasks each",
+            self.process_count,
+            self.thread_count,
+            self.prefetch_count,
+        )
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)
         ]
@@ -194,13 +210,14 @@ class TaskExecutor:
 
 
 class WorkerProcess(multiprocessing.Process):
-    """Single worker process running thread_count consumer threads."""
+    """Single worker process running a prefetcher and thread_count consumer threads."""
 
     def __init__(
         self,
         *,
         thread_count: int,
         max_tasks: int | None = None,
+        prefetch_count: int = 1,
         backend_alias: str = "",
         queues: tuple[str, ...] = (),
         exit_empty: bool = False,
@@ -213,6 +230,7 @@ class WorkerProcess(multiprocessing.Process):
         super().__init__(daemon=True)
         self.thread_count = thread_count
         self.max_tasks = max_tasks
+        self.prefetch_count = prefetch_count
         self.backend_alias = backend_alias
         self.queues = queues
         self.exit_empty = exit_empty
@@ -222,9 +240,9 @@ class WorkerProcess(multiprocessing.Process):
         self.task_count = 0
         self.lock: threading.Lock | None = None
         self.expired: threading.Event | None = None
+        self.prefetcher: TaskPrefetcher | None = None
 
     def run(self) -> None:
-        """Start consumer execution inside this process."""
         django.setup()
         configure_logging(self.log_formatter)
         logger.info("Starting worker process %s", self.name)
@@ -233,16 +251,32 @@ class WorkerProcess(multiprocessing.Process):
         backend = task_backends[self.backend_alias]
         backend.poll_interval = self.poll_interval
         backend.poll_max_interval = self.poll_max_interval
+        self.prefetcher = TaskPrefetcher(
+            worker=self, backend=backend, prefetch_count=self.prefetch_count
+        )
+        self.prefetcher.start()
         consumer_threads = [
             WorkerThread(worker=self, index=index, backend=backend)
             for index in range(self.thread_count)
         ]
         for consumer_thread in consumer_threads:
             consumer_thread.start()
+        join_timeout = (
+            backend.result_ttl.total_seconds() if backend.result_ttl else None
+        )
         for consumer_thread in consumer_threads:
-            consumer_thread.join(
-                backend.result_ttl.total_seconds() if backend.result_ttl else None
-            )
+            consumer_thread.join(join_timeout)
+        self.prefetcher.stop_requested.set()
+        self.prefetcher.join(join_timeout)
+        if (failure := self.prefetcher.failure) is not None:
+            logger.error("Worker process %s exits after a fetch failure", self.name)
+            raise failure
+
+    def remaining_tasks(self) -> int | None:
+        """Return how many more tasks this process may run, or None when unlimited."""
+        if self.max_tasks is None:
+            return None
+        return max(self.max_tasks - self.task_count, 0)
 
     def record_task(self) -> None:
         """Record one processed task and stop when max_tasks is reached."""
@@ -262,8 +296,79 @@ class WorkerProcess(multiprocessing.Process):
         self.join()
 
 
+class TaskPrefetcher(threading.Thread):
+    """Single prefetcher thread filling the task buffer of one worker process."""
+
+    def __init__(
+        self,
+        *,
+        worker: WorkerProcess,
+        backend: ThreadmillTaskBackend,
+        prefetch_count: int,
+    ) -> None:
+        super().__init__(name=f"{socket.gethostname()}:{worker.pid}-fetch", daemon=True)
+        self.worker = worker
+        self.backend = backend
+        self.prefetch_count = prefetch_count
+        self.task_buffer: queue.Queue[TaskResult] = queue.Queue(maxsize=prefetch_count)
+        self.finished = threading.Event()
+        self.stop_requested = threading.Event()
+        self.failure: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            while not self.stop_requested.is_set() and not self.worker.expired.is_set():
+                remaining = self.worker.remaining_tasks()
+                count = (
+                    self.prefetch_count
+                    if remaining is None
+                    else min(self.prefetch_count, remaining)
+                )
+                if count < 1:
+                    break
+                try:
+                    batch = self.backend.acquire(
+                        *self.worker.queues,
+                        count=count,
+                        timeout=TASK_WAIT_TIMEOUT,
+                        worker=self.name,
+                    )
+                except Empty, TimeoutError:
+                    if (
+                        self.worker.exit_empty
+                        or self.worker.shutdown_requested.is_set()
+                    ):
+                        break
+                else:
+                    # joe: buffered tasks are leased at fetch time, so buffer dwell
+                    # counts against lease_ttl; renew leases if dwell ever matters
+                    for task_result in batch:
+                        if not self.buffer(task_result):
+                            break
+                    if self.worker.shutdown_requested.is_set():
+                        break
+        except Exception as exception:
+            self.failure = exception
+            logger.exception("Task prefetcher '%s' failed", self.name)
+            raise
+        finally:
+            self.finished.set()
+
+    def buffer(self, task_result: TaskResult) -> bool:
+        """Buffer one task result; return False when the prefetcher must stop."""
+        while not self.stop_requested.is_set():
+            try:
+                self.task_buffer.put(
+                    task_result, timeout=TASK_WAIT_TIMEOUT.total_seconds()
+                )
+            except Full:
+                continue
+            return True
+        return False
+
+
 class WorkerThread(threading.Thread):
-    """Single worker thread consuming tasks from the process queue."""
+    """Single worker thread consuming tasks from the process prefetch buffer."""
 
     def __init__(
         self,
@@ -278,16 +383,14 @@ class WorkerThread(threading.Thread):
         self.backend = backend
 
     def run(self) -> None:
-        """Start consuming tasks for this thread."""
-        while self.worker.expired is None or not self.worker.expired.is_set():
+        prefetcher = self.worker.prefetcher
+        while True:
             try:
-                task_result = self.backend.acquire(
-                    *self.worker.queues,
-                    timeout=datetime.timedelta(seconds=1),
-                    worker=self.name,
+                task_result = prefetcher.task_buffer.get(
+                    timeout=TASK_WAIT_TIMEOUT.total_seconds()
                 )
-            except Empty, TimeoutError:
-                if self.worker.shutdown_requested.is_set() or self.worker.exit_empty:
+            except Empty:
+                if prefetcher.finished.is_set():
                     return
                 continue
 

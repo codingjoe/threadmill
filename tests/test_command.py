@@ -1,5 +1,7 @@
 import argparse
 import datetime
+import io
+import json
 import logging
 import re
 import signal
@@ -7,9 +9,14 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.tasks import default_task_backend
+from django.tasks import TaskResultStatus, default_task_backend
 
-from tests.testapp.tasks import compute_workload, io_workload, memory_workload
+from tests.testapp.tasks import (
+    compute_workload,
+    echo,
+    io_workload,
+    memory_workload,
+)
 from threadmill.executor import JsonFormatter, handler
 from threadmill.management.commands import threadmill
 
@@ -43,6 +50,7 @@ class TestCommand:
         assert parsed_arguments.max_tasks_jitter == 0
         assert parsed_arguments.poll_interval == 0.01
         assert parsed_arguments.poll_max_interval == 1
+        assert parsed_arguments.prefetch_count is None
         assert parsed_arguments.log_format is None
 
     def test_add_arguments__parse_poll_intervals_as_floats(self):
@@ -54,6 +62,13 @@ class TestCommand:
         )
         assert parsed_arguments.poll_interval == 0.05
         assert parsed_arguments.poll_max_interval == 0.2
+
+    def test_add_arguments__parse_prefetch_count(self):
+        """Parse the prefetch count option as an int."""
+        parser = argparse.ArgumentParser()
+        threadmill.WorkerCommand().add_arguments(parser)
+        parsed_arguments = parser.parse_args(["--prefetch-count", "8"])
+        assert parsed_arguments.prefetch_count == 8
 
     def test_call_command__log_format(self):
         """Run the worker with the given log format string."""
@@ -112,6 +127,49 @@ class TestCommand:
             "threadmill", logging.INFO, __file__, 1, "Hello %s", ("world",), None
         )
         assert handler.formatter.format(record) == "Hello world"
+
+    def test_call_command__prefetch_count(self):
+        """Pass the prefetch count through to the running task executor."""
+        enqueued = default_task_backend.enqueue(echo, args=[1])
+        original_stream = handler.stream
+        parent_log = io.StringIO()
+        handler.setStream(parent_log)
+        try:
+            call_command(
+                "threadmill",
+                "worker",
+                verbosity=0,
+                workers=1,
+                queues=["default"],
+                exit_empty=True,
+                prefetch_count=7,
+            )
+        finally:
+            handler.setStream(original_stream)
+        records = [
+            json.loads(line)
+            for line in parent_log.getvalue().splitlines()
+            if line.startswith("{")
+        ]
+        assert any("7 prefetched tasks each" in record["message"] for record in records)
+        assert (
+            default_task_backend.get_result(enqueued.id).status
+            is TaskResultStatus.SUCCESSFUL
+        )
+
+    @pytest.mark.parametrize("prefetch_count", [0, -1])
+    def test_call_command__prefetch_count__raise_command_error(self, prefetch_count):
+        """Reject a prefetch count below one with a CommandError."""
+        with pytest.raises(
+            CommandError,
+            match=re.escape(f"Invalid prefetch count: {prefetch_count!r}"),
+        ):
+            call_command(
+                "threadmill",
+                "worker",
+                verbosity=0,
+                prefetch_count=prefetch_count,
+            )
 
     def test_call_command__poll_intervals(self):
         """Convert poll options to timedeltas for the task executor."""
