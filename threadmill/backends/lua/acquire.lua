@@ -10,14 +10,16 @@
 --                KEYS[1] = running set, KEYS[2] = queue set, KEYS[3] = running,
 --                KEYS[4] = queue, etc.
 -- ARGV[1]     -- current time in milliseconds
--- ARGV[2]     -- current time as ISO-8601 string
+-- ARGV[2]     -- current time as ISO-8601 string, stamped as lease_started_at
 -- ARGV[3]     -- task key prefix (e.g. "threadmill:task:")
 -- ARGV[4]     -- number of queue pairs (N/2)
--- ARGV[5]     -- worker name
+-- ARGV[5]     -- worker name, stamped as lease_worker
 -- ARGV[6]     -- lease TTL in milliseconds
 -- ARGV[7]     -- start_index; 0-based index of the queue pair to scan first, so
 --                start_index 0 is the pair at KEYS[1] and KEYS[2]
--- Returns: the stored serialized task data on success, nil if all queues are empty.
+-- Returns: the task ID and its stored serialized data on success, or nil when
+-- no queue yields a task. A popped entry whose hash holds no data produces nil
+-- too: it leaves its queue unleased.
 
 local num_queues = tonumber(ARGV[4])
 local lease_ttl_ms = tonumber(ARGV[6])
@@ -33,7 +35,7 @@ for offset = 0, num_queues - 1 do
       local deadline = tonumber(ARGV[1]) + lease_ttl_ms
       redis.call('ZADD', KEYS[queue_index * 2 - 1], deadline, task_id)
       redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'lease_started_at', ARGV[2])
-      return data
+      return {task_id, data}
     end
   end
 end

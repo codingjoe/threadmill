@@ -136,6 +136,9 @@ A task whose lease expired reaches the `retry` callback as an
 Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
 can still be running, so a retry may execute concurrently with it.
 
+A task whose stored payload is unreadable is left as stored; the worker fetching
+it and the broker reaping it log a warning instead of discarding queued work.
+
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
 shard. Scale horizontally by running additional backend aliases, not by relying

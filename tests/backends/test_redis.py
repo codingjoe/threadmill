@@ -28,7 +28,11 @@ from threadmill.backends.base import (
     QueueRates,
     QueueStats,
 )
-from threadmill.backends.redis import RedisBroker, RedisTaskBackend  # noqa: E402
+from threadmill.backends.redis import (  # noqa: E402
+    RedisBroker,
+    RedisTaskBackend,
+    _decode_text,
+)
 
 TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
 
@@ -131,6 +135,19 @@ def _claim_expired(
     return [item.decode() if isinstance(item, bytes) else item for item in claimed]
 
 
+class TestDecodeText:
+    """Tests for the Redis string reply decoder."""
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [(b"stored", "stored"), ("stored", "stored"), (None, "")],
+        ids=["bytes", "str", "missing"],
+    )
+    def test_decode_text__returns_text(self, reply, expected):
+        """Return both reply types as text; a missing reply as empty text."""
+        assert _decode_text(reply) == expected
+
+
 class TestRedisBroker:
     def test_mover__moves_deferred_task_to_ready(self):
         """Mover promotes due deferred tasks to the ready queue."""
@@ -200,14 +217,14 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap_task__skips_when_task_data_is_missing(self, caplog):
-        """_reap_task logs and skips when the claimed task data is gone."""
+    def test_reap_claimed_task__skips_when_task_data_is_missing(self, caplog):
+        """Skip a claimed task whose stored payload is gone."""
         backend = _make_backend("reap_missing_data_test")
         try:
             broker = RedisBroker(backend)
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                broker._reap_task("missing-task-id")
-            assert "has no task data" in caplog.text
+            with caplog.at_level(logging.DEBUG, logger="threadmill.backends.redis"):
+                broker._reap_claimed_task("missing-task-id")
+            assert "has no stored payload; skipping" in caplog.text
         finally:
             backend.close()
 
@@ -266,7 +283,7 @@ class TestRedisBrokerReap:
             backend.close()
 
     def test_reap_running_queue__logs_and_continues_after_task_error(self, caplog):
-        """A failing reap decision is logged per cause and does not stop the batch."""
+        """Log an unreadable claim, leave it stored, and keep reaping the batch."""
         backend = _make_backend(
             "reap_error_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -296,12 +313,33 @@ class TestRedisBrokerReap:
             payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
             backend.client.hset(gone_key, "data", json.dumps(payload))
 
-            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert "has an unreadable payload" in caplog.text
-            assert "gone from the code base" in caplog.text
+            assert caplog.text.count("has an unreadable payload") == 2
+            assert unreadable_id in caplog.text
+            assert gone_id in caplog.text
             assert backend.get_result(recovered_id).status == TaskResultStatus.FAILED
+
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            for task_id in (unreadable_id, gone_id):
+                assert (
+                    backend.client.exists(
+                        backend.TASK_KEY.format(
+                            prefix=backend.key_prefix, task_id=task_id
+                        )
+                    )
+                    == 1
+                )
+                assert backend.client.zscore(running_key, task_id) is not None
+                assert (
+                    backend.client.exists(
+                        backend.RESULT_KEY.format(
+                            prefix=backend.key_prefix, result_id=task_id
+                        )
+                    )
+                    == 0
+                )
         finally:
             backend.close()
 
@@ -339,10 +377,10 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def test_acquire__sets_last_attempted_at(self):
-        """acquire() starts the attempt and records it as the task hash lease."""
+    def test_acquire__stamps_lease_on_task_hash(self):
+        """Record the acquiring worker and lease start on the task hash."""
         backend = RedisTaskBackend(
-            "last_attempted_test",
+            "acquire_lease_test",
             {
                 "QUEUES": ["default"],
                 "REDIS_URL": "redis://localhost:6379/0",
@@ -362,14 +400,51 @@ class TestRedisTaskBackend:
             assert acquired.started_at == acquired.last_attempted_at
             assert acquired.worker_ids == ["test-worker"]
 
-            # Verify it's persisted in Redis
+            # Verify the lease is persisted, not only applied in memory.
+            restored = backend.get_leased_task(task_result.id)
+            assert restored is not None
+            assert restored.worker_ids == acquired.worker_ids
+            assert restored.started_at == acquired.started_at
+            assert restored.last_attempted_at == acquired.last_attempted_at
+        finally:
+            backend.close()
+
+    def test_get_leased_task__keeps_stored_attempt_when_lease_fields_are_missing(self):
+        """Read a running payload without lease fields as its stored attempt.
+
+        A task leased before the lease fields existed records the attempt inside
+        its payload. Keeping that attempt counts it for the retry limit while a
+        rolling upgrade still has such tasks in flight.
+        """
+        backend = _make_backend("upgrade_lease_test")
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            attempted_at = (timezone.now() - datetime.timedelta(minutes=5)).replace(
+                microsecond=0
+            )
+            stored = replace(
+                task_result,
+                status=TaskResultStatus.RUNNING,
+                started_at=attempted_at,
+                last_attempted_at=attempted_at,
+                worker_ids=["upgrade-worker"],
+            )
             task_key = backend.TASK_KEY.format(
                 prefix=backend.key_prefix, task_id=task_result.id
             )
-            assert backend.client.hmget(task_key, *backend.LEASE_FIELDS) == [
-                b"test-worker",
-                acquired.last_attempted_at.isoformat().encode(),
-            ]
+            backend.client.hset(task_key, "data", backend.serialize_task_result(stored))
+            backend.client.zadd(
+                backend._segment_key(TaskResultStatus.RUNNING, "default"),
+                {task_result.id: _now_ms()},
+            )
+
+            restored = backend.get_leased_task(task_result.id)
+
+            assert restored is not None
+            assert restored.status == TaskResultStatus.RUNNING
+            assert restored.started_at == attempted_at
+            assert restored.last_attempted_at == attempted_at
+            assert restored.worker_ids == ["upgrade-worker"]
         finally:
             backend.close()
 
@@ -403,6 +478,80 @@ class TestRedisTaskBackend:
                 backend.deserialize_task_result(enqueued_data).status
                 == TaskResultStatus.READY
             )
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize("payload", ["{not json", ""])
+    def test_acquire__leaves_unreadable_payload_as_stored(self, caplog, payload):
+        """Leave a payload acquire() cannot read as stored and keep scanning."""
+        backend = _make_backend("acquire_unreadable_test")
+        try:
+            poisoned = backend.enqueue(echo, args=[1])
+            healthy = backend.enqueue(echo, args=[2])
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=poisoned.id
+            )
+            backend.client.hset(task_key, "data", payload)
+
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="unreadable-test"
+                )
+
+            assert acquired.id == healthy.id
+            assert backend.client.exists(task_key) == 1
+            assert (
+                backend.client.zscore(
+                    backend._segment_key(TaskResultStatus.RUNNING, "default"),
+                    poisoned.id,
+                )
+                is not None
+            )
+            assert "has an unreadable payload" in caplog.text
+            assert poisoned.id in caplog.text
+        finally:
+            backend.close()
+
+    def test_acquire__leaves_payload_with_gone_retry_callback_as_stored(self, caplog):
+        """Leave a payload whose retry callback no longer imports as stored."""
+        backend = _make_backend("acquire_gone_retry_test")
+        try:
+            poisoned = backend.enqueue(boom_no_retry, args=[])
+            healthy = backend.enqueue(echo, args=[2])
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=poisoned.id
+            )
+            payload = json.loads(backend.client.hget(task_key, "data"))
+            payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
+            backend.client.hset(task_key, "data", json.dumps(payload))
+
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="gone-retry-test"
+                )
+
+            assert acquired.id == healthy.id
+            assert backend.client.exists(task_key) == 1
+            assert (
+                backend.client.zscore(
+                    backend._segment_key(TaskResultStatus.RUNNING, "default"),
+                    poisoned.id,
+                )
+                is not None
+            )
+            assert "has an unreadable payload" in caplog.text
+            assert poisoned.id in caplog.text
+        finally:
+            backend.close()
+
+    def test_acquire__records_attempt_for_empty_worker_name(self):
+        """acquire() counts an attempt even when the worker name is empty."""
+        backend = _make_backend("acquire_empty_worker_test")
+        try:
+            backend.enqueue(echo, args=[1])
+            acquired = backend.acquire(timeout=datetime.timedelta(seconds=1), worker="")
+
+            assert acquired.worker_ids == [""]
         finally:
             backend.close()
 
@@ -912,6 +1061,32 @@ class TestRedisTaskBackend:
 
         assert results == []
 
+    def test_peek__running_tasks_skip_unreadable_payload_between_rows(self):
+        """Skip an unreadable row and still yield the readable rows around it."""
+        first_task = default_task_backend.enqueue(echo, args=[1])
+        poisoned_task = default_task_backend.enqueue(echo, args=[2])
+        last_task = default_task_backend.enqueue(echo, args=[3])
+        for _index in range(3):
+            acquired = default_task_backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="poison-peek-test"
+            )
+            assert acquired is not None
+        default_task_backend.client.hset(
+            default_task_backend.TASK_KEY.format(
+                prefix=default_task_backend.key_prefix, task_id=poisoned_task.id
+            ),
+            "data",
+            "{not json",
+        )
+
+        results = list(
+            default_task_backend.peek(
+                queue_name="default", status=TaskResultStatus.RUNNING, count=10
+            )
+        )
+
+        assert [result.id for result in results] == [first_task.id, last_task.id]
+
     def test_peek__successful_and_failed_history(self):
         """Peek SUCCESSFUL/FAILED filter acknowledged results by status."""
         successful_id = self._acknowledge(TaskResultStatus.SUCCESSFUL)
@@ -1018,10 +1193,12 @@ class TestRedisTaskBackend:
             )
             assert backend.client.zscore(running_key, task_result.id) is None
             assert backend.client.zscore(deferred_key, task_result.id) is not None
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=task_result.id
-            )
-            assert backend.client.hmget(task_key, *backend.LEASE_FIELDS) == [b"", b""]
+            # A cleared lease reads as no lease: no worker joins the attempt
+            # history and no start time is applied.
+            restored = backend.get_leased_task(task_result.id)
+            assert restored is not None
+            assert restored.worker_ids == acquired.worker_ids
+            assert restored.started_at is None
         finally:
             backend.close()
 

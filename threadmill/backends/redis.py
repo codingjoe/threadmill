@@ -41,10 +41,12 @@ def _load_lua(name: str) -> str:
 
 
 def _decode_text(value: bytes | str | None) -> str:
-    """Return a Redis string reply as text; a missing reply becomes an empty string."""
-    if value is None:
-        return ""
-    return value.decode() if isinstance(value, bytes) else value
+    """Return a Redis string reply as text; a missing reply becomes an empty string.
+
+    Replies are bytes, unless the connection URL sets `decode_responses=True`,
+    in which case they already arrive as text. Either way decodes alike.
+    """
+    return value.decode() if isinstance(value, bytes) else value or ""
 
 
 def _parse_lease_started_at(value: bytes | str | None) -> datetime.datetime | None:
@@ -104,25 +106,30 @@ class RedisBroker(Broker):
             ],
         )
         for member in claimed_ids:
-            task_id = member.decode() if isinstance(member, bytes) else member
-            try:
-                self._reap_task(task_id)
-            except ImportError:
-                logger.exception(
-                    "Task %r retry callback is gone from the code base; "
-                    "skipping the reap",
-                    task_id,
-                )
-            except TypeError, ValueError:
-                logger.exception(
-                    "Task %r has an unreadable payload; skipping the reap", task_id
-                )
+            self._reap_claimed_task(_decode_text(member))
 
-    def _reap_task(self, task_id: str) -> None:
-        """Requeue or fail a claimed task."""
-        if (task_result := self.backend.get_leased_task(task_id)) is None:
-            logger.warning("Claimed task %r has no task data; skipping", task_id)
+    def _reap_claimed_task(self, task_id: str) -> None:
+        """Requeue or fail one claimed task, or leave an unreadable payload as stored."""
+        try:
+            task_result = self.backend.get_leased_task(task_id)
+        except Exception:  # noqa: BLE001
+            # Reading a stored payload is one rule, not a list of failures: a
+            # task module or retry callback gone from the code base, a document
+            # another version wrote. Report it and leave it as stored, letting
+            # the claim lapse for a later pass, so a deploy or an environment
+            # skew cannot destroy queued work.
+            logger.warning(
+                "Task %r has an unreadable payload; leaving it as stored", task_id
+            )
             return
+        if task_result is None:
+            # No payload is stored: the task finished inside the claim window.
+            logger.debug("Task %r has no stored payload; skipping", task_id)
+            return
+        self._reap_task(task_result)
+
+    def _reap_task(self, task_result: TaskResult) -> None:
+        """Requeue or fail a claimed task."""
         now = timezone.now()
         task_result = dataclasses.replace(
             task_result,
@@ -183,7 +190,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     DEFERRED_KEY = "{prefix}:{queue_name}:deferred"
 
     LEASE_FIELDS = ("lease_worker", "lease_started_at")
-    """Task hash fields holding the processing lease stamped by the acquire script."""
 
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
@@ -200,21 +206,20 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         )
 
     def get_leased_task(self, task_id: str) -> TaskResult | None:
-        """Return a running task as its lease holds it, or None when its data is gone.
+        """Return a running task as its lease holds it, or None when no payload is stored.
 
-        The task hash stores the payload as it was enqueued, so a task taken
-        from the running set is returned under the lease the acquire script
-        stamped beside it — the same view ``peek()`` gives for RUNNING tasks.
+        Matches the RUNNING view `peek()` gives. A payload that will not read
+        raises; the caller reports it and leaves it as stored.
         """
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
         data, lease_worker, lease_started_at = self.client.hmget(
             task_key, "data", *self.LEASE_FIELDS
         )
-        if not data:
+        if data is None:
             return None
         return self._apply_lease(
             self.deserialize_task_result(data),
-            worker=_decode_text(lease_worker),
+            worker=_decode_text(lease_worker) or None,
             lease_started_at=_parse_lease_started_at(lease_started_at),
         )
 
@@ -347,7 +352,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             now_ms = now.timestamp() * 1000
             now_iso = now.isoformat()
 
-            if data := self._acquire_script(
+            if reply := self._acquire_script(
                 keys=keys,
                 args=[
                     str(now_ms),
@@ -359,13 +364,29 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     str(self._rotation_offset),
                 ],
             ):
+                task_id, data = _decode_text(reply[0]), reply[1]
+                try:
+                    task_result = self._apply_lease(
+                        self.deserialize_task_result(data),
+                        worker=worker,
+                        lease_started_at=now,
+                    )
+                except Exception:  # noqa: BLE001
+                    # Reading a stored payload is one rule, not a list of
+                    # failures (an unknown task module, a retry callback that no
+                    # longer imports, a malformed document). Report it and leave
+                    # it as stored, then keep scanning: deleting it would turn a
+                    # deploy or an environment skew into permanent task loss,
+                    # and one poison must not stall the worker.
+                    logger.warning(
+                        "Task %r has an unreadable payload; leaving it as stored",
+                        task_id,
+                    )
+                    continue
+
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
-                return self._apply_lease(
-                    self.deserialize_task_result(data),
-                    worker=worker,
-                    lease_started_at=now,
-                )
+                return task_result
 
             try:
                 remaining = deadline - time.monotonic()
@@ -388,15 +409,17 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def _apply_lease(
         task_result: TaskResult,
         *,
-        worker: str = "",
-        lease_started_at: datetime.datetime | None = None,
+        worker: str | None,
+        lease_started_at: datetime.datetime | None,
     ) -> TaskResult:
-        """Return a stored task result as it is held by a processing lease.
+        """Return a stored task result as a running attempt.
 
-        The task hash stores the task as it was enqueued, so the lease is
-        applied on read: the lease holder joins the attempt history, and the
-        lease start is both the task's start and its last attempt. A hash
-        without a recorded lease only gains the RUNNING state.
+        The lease holder joins the attempt history, and the lease start becomes
+        both the task's start and its last attempt; a task that already records
+        a start keeps it.
+
+        Pass `worker=None` when no worker is recorded on the lease: the attempt
+        history stays as stored, while an empty string still counts as an attempt.
         """
         return dataclasses.replace(
             task_result,
@@ -404,7 +427,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             started_at=task_result.started_at or lease_started_at,
             last_attempted_at=lease_started_at or task_result.last_attempted_at,
             worker_ids=(
-                [*task_result.worker_ids, worker] if worker else task_result.worker_ids
+                [*task_result.worker_ids, worker]
+                if worker is not None
+                else task_result.worker_ids
             ),
         )
 
@@ -481,8 +506,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             mapping={
                 "data": serialized,
                 "score": str(score),
-                "lease_worker": "",
-                "lease_started_at": "",
+                **dict.fromkeys(self.LEASE_FIELDS, ""),
             },
         )
         pipe.expire(task_key, task_data_ttl)
@@ -525,10 +549,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def _peek_tasks(
         self, zset_key: str, count: int, *, leased: bool
     ) -> Generator[TaskResult]:
-        """Yield up to `count` stored tasks in queue order, leased ones included.
+        """Yield up to `count` stored tasks in queue order.
 
-        A leased task is stored as it was enqueued, so the lease the acquire
-        script stamped onto its hash is what makes the yielded task RUNNING.
+        When `leased` is true, each task is yielded as its lease reports it;
+        otherwise the tasks are yielded as stored. An entry whose payload will
+        not read is skipped, so the rest of the page still yields.
         """
         pipe = self.client.pipeline()
         for member in self.client.zrange(zset_key, 0, count - 1):
@@ -542,16 +567,25 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         for stored in pipe.execute():
             if not stored:
                 continue
-            if leased:
-                data, lease_worker, lease_started_at = stored
-                if data:
-                    yield self._apply_lease(
+            try:
+                if leased:
+                    data, lease_worker, lease_started_at = stored
+                    if not data:
+                        continue
+                    task_result = self._apply_lease(
                         self.deserialize_task_result(data),
-                        worker=_decode_text(lease_worker),
+                        worker=_decode_text(lease_worker) or None,
                         lease_started_at=_parse_lease_started_at(lease_started_at),
                     )
-            else:
-                yield self.deserialize_task_result(stored)
+                else:
+                    task_result = self.deserialize_task_result(stored)
+            except Exception:  # noqa: BLE001
+                # An entry this code cannot read is skipped whole so the rest of
+                # the page still renders; peek is polled, so it stays quiet where
+                # the fetch and reap paths report the anomaly.
+                task_result = None
+            if task_result is not None:
+                yield task_result
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
         """Yield up to `count` finished results in finish order."""
