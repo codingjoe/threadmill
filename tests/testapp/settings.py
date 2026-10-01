@@ -117,6 +117,19 @@ TASKS = {
     },
 }
 
+# Run workers as quietly as the celery and dramatiq benchmarks. Django's
+# default logging pins django.tasks to INFO, so quiet it explicitly; the
+# test app's task logs stay visible.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "root": {"level": "WARNING"},
+    "loggers": {
+        "django": {"level": "WARNING"},
+        "tests.testapp": {"level": "INFO"},
+    },
+}
+
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
 

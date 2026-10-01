@@ -1,5 +1,6 @@
 import dataclasses
 import datetime
+import io
 import json
 import logging
 import multiprocessing
@@ -172,10 +173,11 @@ class TestConfigureLogging:
     def test_configure_logging__installs_handler_on_root(self):
         """Route the records of every logger through the shared handler."""
         formatter = logging.Formatter("%(levelname)s %(message)s")
-        configure_logging(formatter)
         root_logger = logging.getLogger()
+        root_logger.setLevel(logging.ERROR)
+        configure_logging(formatter)
         assert root_logger.handlers == [handler]
-        assert root_logger.level == logging.INFO
+        assert root_logger.level == logging.ERROR
         assert handler.formatter is formatter
 
     def test_configure_logging__replaces_foreign_handlers(self):
@@ -520,6 +522,35 @@ class TestWorkerThread:
         task_result = dataclasses.replace(task_result, worker_ids=["pre-set-worker"])
         result = thread.execute_task_result(task_result)
         assert result.worker_ids == ["pre-set-worker"]
+
+    def test_execute_task_result__logs_info_records(self, monkeypatch):
+        """Log task start and success records at INFO level."""
+        stream = io.StringIO()
+        monkeypatch.setattr(handler, "stream", stream)
+        configure_logging(JsonFormatter())
+        logging.getLogger().setLevel(logging.INFO)
+        task_result = _task_result(log_message, "hello")
+        WorkerThread(
+            worker=_make_worker(), index=0, backend=default_task_backend
+        ).execute_task_result(task_result)
+
+        progress_levels = {
+            record["message"]: record["level"]
+            for record in map(json.loads, stream.getvalue().splitlines())
+            if record["logger"] == "multiprocessing"
+        }
+        assert (
+            progress_levels[
+                f"Executing task '{task_result.id}@{log_message.module_path}'"
+            ]
+            == "INFO"
+        )
+        assert (
+            progress_levels[
+                f"Task '{task_result.id}@{log_message.module_path}' succeeded"
+            ]
+            == "INFO"
+        )
 
     def test_call_task__calls_function_with_args(self):
         """call_task invokes the task function with args and kwargs."""
