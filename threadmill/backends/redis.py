@@ -89,7 +89,7 @@ class RedisBroker(Broker):
             task_id = member.decode() if isinstance(member, bytes) else member
             try:
                 self._reap_task(task_id)
-            except Exception:  # noqa: BLE001
+            except ImportError, TypeError, ValueError:
                 logger.exception("Reaper error for task %r", task_id)
 
     def _reap_task(self, task_id: str) -> None:
