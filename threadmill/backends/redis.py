@@ -94,33 +94,32 @@ class RedisBroker(Broker):
 
     def _reap_task(self, task_id: str) -> None:
         """Requeue or fail a claimed task."""
-        data = self.backend._get_task_data(task_id)
-        if data is None:
-            logger.warning("Claimed task %r has no task data; skipping", task_id)
-            return
-        task_result = self.backend.deserialize_task_result(data)
-        now = timezone.now()
-        task_result = dataclasses.replace(
-            task_result,
-            status=TaskResultStatus.FAILED,
-            finished_at=now,
-            errors=[
-                *task_result.errors,
-                self.backend.create_task_error(
-                    AcknowledgementTimeout("Task processing lease expired.")
-                ),
-            ],
-        )
-        delay = self.backend.retry_delay(task_result)
-        logger.info(
-            "Task '%s@%s' lease expired",
-            task_result.id,
-            task_result.task.module_path,
-        )
-        if delay is None:
-            self.backend.acknowledge(task_result)
+        if data := self.backend._get_task_data(task_id):
+            task_result = self.backend.deserialize_task_result(data)
+            now = timezone.now()
+            task_result = dataclasses.replace(
+                task_result,
+                status=TaskResultStatus.FAILED,
+                finished_at=now,
+                errors=[
+                    *task_result.errors,
+                    self.backend.create_task_error(
+                        AcknowledgementTimeout("Task processing lease expired.")
+                    ),
+                ],
+            )
+            delay = self.backend.retry_delay(task_result)
+            logger.info(
+                "Task '%s@%s' lease expired",
+                task_result.id,
+                task_result.task.module_path,
+            )
+            if delay is None:
+                self.backend.acknowledge(task_result)
+            else:
+                self.backend.requeue(task_result, now + delay)
         else:
-            self.backend.requeue(task_result, now + delay)
+            logger.warning("Claimed task %r has no task data; skipping", task_id)
 
     def main(self) -> None:
         """Run mover and running reaper passes for all queues."""
