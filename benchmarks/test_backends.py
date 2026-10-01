@@ -7,12 +7,9 @@ the numbers reflect queue and worker overhead instead of task work:
 - ``test_start_worker__benchmark``: time for a worker to start and process one queued task.
 - ``test_process_queue__benchmark``: time for a worker to process a full queue.
 
-The processing benchmark queues 20,000 tasks, except for dramatiq, which queues
-5,000: dramatiq's Redis consumer polls rather than blocks, so its four-message
-read-ahead costs about 2.3 ms per task in backoff, and the full depth would take
-about 46 seconds to drain. The fixed cost of a cold worker start and stop is
-quantized to about a second, so a deep queue is what makes the marginal drain per
-task — the number the chart plots — measurable.
+The processing benchmark queues 20,000 tasks per queue. The fixed cost of a cold
+worker start and stop is quantized to about a second, so a deep queue is what
+makes the marginal drain per task — the number the chart plots — measurable.
 
 Both worker benchmarks include the worker's fixed start cost, and the queues
 that exit on their own include their stop cost too. Subtract
@@ -20,14 +17,14 @@ that exit on their own include their stop cost too. Subtract
 that queue's task count by the difference to get the marginal throughput of a
 busy queue.
 
-Every queue runs one worker process and one thread and reads four messages ahead,
-threadmill's default prefetch count of four per thread, so no queue is measured
-with a read-ahead advantage. The two Django backends are the exception: their
-shipped workers read one task at a time and expose no read-ahead setting.
-dramatiq pays a jittered 5-10 ms poll backoff roughly once per four messages.
+Every queue runs one worker process and one thread and reads ``READ_AHEAD`` (128)
+messages ahead, so the numbers rank the queues rather than their polling
+strategies: dramatiq's poll backoff is amortized over the window, while celery and
+threadmill block on an empty queue. The two Django backends are the exception:
+their shipped workers read one task at a time and expose no read-ahead setting.
 
-Threadmill is measured twice, with its default prefetch buffer and with batching
-disabled, so the prefetch cost can be subtracted from both worker benchmarks. Its
+Threadmill is measured twice, reading 128 messages ahead and reading one at a
+time, so the read-ahead cost can be subtracted from both worker benchmarks. Its
 queues are deeper than the others because its marginal drain is only seconds long,
 which would otherwise sit inside the one-second quantization of the fixed cost.
 Threadmill, django-tasks-db and django-tasks-redis run one worker process that
@@ -74,6 +71,16 @@ ENQUEUE_ITERATIONS = 500
 QUEUE_DEPTH = 20_000
 """Default tasks queued before one processing benchmark round."""
 
+READ_AHEAD = 128
+"""Messages each worker reads ahead, where its queue has such a setting.
+
+Deep enough that each consumer's wait mechanism stops deciding the ranking:
+dramatiq's Redis consumer polls, and its jittered 5-10 ms backoff costs about
+0.06 ms per task over 128 messages, while celery and threadmill block on an empty
+queue. The Django backends expose no read-ahead setting and read one task at a
+time.
+"""
+
 CELERY_WORKER = (
     sys.executable,
     "-m",
@@ -82,17 +89,17 @@ CELERY_WORKER = (
     "benchmarks.celery_app:celery_app",
     "worker",
     "--pool=solo",
-    "--prefetch-multiplier=4",
+    f"--prefetch-multiplier={READ_AHEAD}",
     "--loglevel=WARNING",
     "--without-gossip",
     "--without-mingle",
     "--without-heartbeat",
 )
-"""Celery worker running as one process with one thread, four messages ahead.
+"""Celery worker running as one process with one thread, ``READ_AHEAD`` messages ahead.
 
 The default prefork pool crashes on CPython 3.14, where the pool child loses
 the task handler state it expects, so the worker runs on the solo pool. With one
-concurrent task, ``--prefetch-multiplier=4`` sets the prefetch count to four, the
+concurrent task, ``--prefetch-multiplier=128`` sets the prefetch count to 128, the
 benchmark rate. Celery's Redis consumer blocks while its queue is empty, so the
 prefetch adds no sleep per message.
 """
@@ -107,12 +114,12 @@ DRAMATIQ_WORKER = (
     "--threads",
     "1",
 )
-"""dramatiq worker running as one process with one thread, four messages ahead.
+"""dramatiq worker running as one process with one thread, ``READ_AHEAD`` messages ahead.
 
 The Redis broker polls rather than blocks: its consumer fetches only while fewer
 than its read-ahead of messages are unacked and, with that window full, sleeps a
 jittered 5-10 ms backoff before polling again. The CLI has no read-ahead flag, so
-the worker environment carries ``dramatiq_queue_prefetch=4``, the benchmark rate.
+the worker environment carries ``dramatiq_queue_prefetch=128``, the benchmark rate.
 """
 
 WORKER_STOP_TIMEOUT_SECONDS = 20
@@ -158,13 +165,18 @@ def drain_with_threadmill_worker() -> None:
         backend=DEFAULT_TASK_BACKEND_ALIAS,
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
+        prefetch_count=READ_AHEAD,
         exit_empty=True,
         verbosity=0,
     )
 
 
 def drain_with_threadmill_worker_no_prefetch() -> None:
-    """Process every queued task with one threadmill worker without batching."""
+    """Process every queued task with one threadmill worker reading one at a time.
+
+    The no-prefetch ablation of the entry above, so the read-ahead cost can be
+    subtracted.
+    """
     call_command(
         "threadmill",
         "worker",
@@ -213,7 +225,7 @@ def drain_with_dramatiq_worker() -> None:
     dramatiq_mark_processed.send()
     drain_with_subprocess_worker(
         DRAMATIQ_WORKER,
-        env={**os.environ, "dramatiq_queue_prefetch": "4"},
+        env={**os.environ, "dramatiq_queue_prefetch": str(READ_AHEAD)},
     )
 
 
@@ -362,7 +374,6 @@ WORKER_QUEUES = (
         name="dramatiq",
         enqueue=enqueue_dramatiq_tasks,
         drain=drain_with_dramatiq_worker,
-        task_count=5_000,  # about 2.3 ms per task, a drain near 12 s; see the module docstring
     ),
 )
 """Queues that ship a worker to process queued tasks."""

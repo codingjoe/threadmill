@@ -220,10 +220,10 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
         text(
             28,
             row_centers[-1] + FOOTNOTE_GAP,
-            # joe: width checked by hand (right edge 873.7 of 900 at 11.5px); add a
+            # joe: width checked by hand (right edge 856.1 of 900 at 11.5px); add a
             # width guard if the canvas width or the font stack changes.
-            "One worker process and one thread; each reads four messages ahead. "
-            "The Django backends read one at a time - their workers have no "
+            "One process and one thread each, reading 128 messages ahead. "
+            "The Django backends read one at a time - their workers expose no "
             "read-ahead setting.",
             theme=theme,
             size=11.5,
