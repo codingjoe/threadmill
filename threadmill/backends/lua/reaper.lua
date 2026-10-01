@@ -1,8 +1,5 @@
--- Claim tasks whose processing lease has expired. The broker decides their
--- fate afterwards. Claiming renews the lease to now + claim TTL, so other
--- broker passes leave the task alone while the broker works. If the broker
--- stops, the claim lapses and the next pass claims the task again. Running
--- entries without task data are removed. Time comes from the Redis clock.
+-- Claim expired tasks for the broker to decide. Undecided claims are picked up
+-- again, and running entries without task data are dropped.
 --
 -- KEYS[1]  -- running set (ZSET, scored by lease deadline in milliseconds)
 -- ARGV[1]  -- claim TTL in milliseconds
