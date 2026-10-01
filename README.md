@@ -89,6 +89,8 @@ A pool on a free-threaded interpreter therefore reaches the same throughput with
 uv run manage.py threadmill worker --workers 1 --threads 8
 ```
 
+Threads all live in one process, so a crash or a `--max-tasks` recycle takes every thread down at once. One process per core, the default, confines that to a single process. Prefer threads when memory matters more than that isolation, and keep the default when it does not.
+
 A free-threaded interpreter can be slower than a regular one for single-threaded work, so a GIL build stays the better choice for IO-bound tasks. Pick the interpreter that fits your workload rather than assuming free threading is an upgrade.
 
 > [!WARNING]
