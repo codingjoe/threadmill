@@ -410,12 +410,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     def test_get_leased_task__keeps_stored_attempt_when_lease_fields_are_missing(self):
-        """Read a running payload without lease fields as its stored attempt.
-
-        A task leased before the lease fields existed records the attempt inside
-        its payload. Keeping that attempt counts it for the retry limit while a
-        rolling upgrade still has such tasks in flight.
-        """
+        """Read a running payload without lease fields as its stored attempt."""
         backend = _make_backend("upgrade_lease_test")
         try:
             task_result = backend.enqueue(echo, args=[1])
@@ -1193,8 +1188,7 @@ class TestRedisTaskBackend:
             )
             assert backend.client.zscore(running_key, task_result.id) is None
             assert backend.client.zscore(deferred_key, task_result.id) is not None
-            # A cleared lease reads as no lease: no worker joins the attempt
-            # history and no start time is applied.
+            # A cleared lease reads as no lease.
             restored = backend.get_leased_task(task_result.id)
             assert restored is not None
             assert restored.worker_ids == acquired.worker_ids

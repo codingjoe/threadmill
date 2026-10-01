@@ -1,10 +1,9 @@
 -- Atomically pop the lowest-scored task from any of the given priority queues,
 -- move it directly to the running set with a lease deadline, and stamp the task
 -- hash with the lease that holds it. The stored payload is left as it was
--- enqueued, so the caller receives the task data without either side decoding
--- or re-encoding it, and applies the RUNNING state from the lease itself.
--- Scans the queues round-robin from ARGV[7] and returns the first available
--- task, so a backlogged queue cannot starve its neighbours.
+-- enqueued; the caller applies the RUNNING state from the lease itself. Scans
+-- the queues round-robin from ARGV[7] and returns the first available task, so
+-- a backlogged queue cannot starve its neighbours.
 --
 -- KEYS[1..N]  -- interleaved running keys and queue keys, one pair per queue:
 --                KEYS[1] = running set, KEYS[2] = queue set, KEYS[3] = running,
@@ -17,9 +16,8 @@
 -- ARGV[6]     -- lease TTL in milliseconds
 -- ARGV[7]     -- start_index; 0-based index of the queue pair to scan first, so
 --                start_index 0 is the pair at KEYS[1] and KEYS[2]
--- Returns: the task ID and its stored serialized data on success, or nil when
--- no queue yields a task. A popped entry whose hash holds no data produces nil
--- too: it leaves its queue unleased.
+-- Returns: the task ID and its stored data, or nil when no queue yields a task.
+-- An entry whose hash holds no data returns nil too, leaving its queue unleased.
 
 local num_queues = tonumber(ARGV[4])
 local lease_ttl_ms = tonumber(ARGV[6])
