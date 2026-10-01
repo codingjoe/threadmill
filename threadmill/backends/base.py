@@ -254,36 +254,16 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         """
         raise NotImplementedError
 
-    def acknowledge(
-        self, task_result: TaskResult, *, lease_deadline_ms: float | None = None
-    ) -> None:
-        """Remove the task from the queue and publish the result.
-
-        Args:
-            task_result: The finished task result to publish.
-            lease_deadline_ms: Act only while the running entry still holds this
-                lease deadline (e.g. a reaper claim); None acknowledges unconditionally.
-        """
+    def acknowledge(self, task_result: TaskResult) -> None:
+        """Remove the task from the queue and publish the result."""
         raise NotImplementedError
 
-    def requeue(
-        self,
-        task_result: TaskResult,
-        run_after: datetime.datetime,
-        *,
-        lease_deadline_ms: float | None = None,
-    ) -> None:
+    def requeue(self, task_result: TaskResult, run_after: datetime.datetime) -> None:
         """Re-queue a failed task result for a retry attempt after `run_after`.
 
         Cleans up any persisted failed result so the method works both for
         in-flight retries (task still running) and inspector-driven requeues
         of already-failed tasks.
-
-        Args:
-            task_result: The failed task result to re-queue.
-            run_after: The earliest time the task may run again.
-            lease_deadline_ms: Act only while the running entry still holds this
-                lease deadline (e.g. a reaper claim); None requeues unconditionally.
         """
         raise NotImplementedError
 

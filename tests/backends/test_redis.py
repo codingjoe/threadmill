@@ -29,7 +29,11 @@ from threadmill.backends.base import (
     QueueRates,
     QueueStats,
 )
-from threadmill.backends.redis import RedisBroker, RedisTaskBackend  # noqa: E402
+from threadmill.backends.redis import (  # noqa: E402
+    RedisBroker,
+    RedisTaskBackend,
+    _to_epoch_ms,
+)
 
 TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
 
@@ -113,23 +117,23 @@ def _claim_expired(
     backend: RedisTaskBackend,
     broker: RedisBroker,
     *,
-    now_ms: int,
+    now_at: datetime.datetime,
     queue_name: str = "default",
-) -> tuple[list[str], int]:
+) -> tuple[list[str], datetime.datetime]:
     """Run the reaper claim script and return the claimed IDs and claim deadline."""
-    lease_deadline_ms = now_ms + int(RedisBroker.CLAIM_TTL.total_seconds() * 1000)
+    lease_deadline_at = now_at + RedisBroker.CLAIM_TTL
     claimed = broker._reaper_script(
         keys=[backend._segment_key(TaskResultStatus.RUNNING, queue_name)],
         args=[
-            str(now_ms),
-            str(lease_deadline_ms),
+            str(_to_epoch_ms(now_at)),
+            str(_to_epoch_ms(lease_deadline_at)),
             str(backend.batch_size),
             f"{backend.key_prefix}:task:",
         ],
     )
     return [
         item.decode() if isinstance(item, bytes) else item for item in claimed
-    ], lease_deadline_ms
+    ], lease_deadline_at
 
 
 class TestRedisBroker:
@@ -260,7 +264,7 @@ class TestRedisBrokerReap:
         try:
             broker = RedisBroker(backend)
             with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                broker._reap_task("missing-task-id", 0)
+                broker._reap_task("missing-task-id")
             assert "has no task data" in caplog.text
         finally:
             backend.close()
@@ -279,22 +283,24 @@ class TestRedisBrokerReap:
             _expire_lease(backend, task_result.id)
 
             broker = RedisBroker(backend)
-            now_ms = int(timezone.now().timestamp() * 1000)
-            claimed_ids, lease_deadline_ms = _claim_expired(
-                backend, broker, now_ms=now_ms
+            now_at = timezone.now()
+            claimed_ids, lease_deadline_at = _claim_expired(
+                backend, broker, now_at=now_at
             )
 
             running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
             assert claimed_ids == [task_result.id]
             assert backend.client.zscore(running_key, task_result.id) == (
-                lease_deadline_ms
+                _to_epoch_ms(lease_deadline_at)
             )
 
-            concurrent_ids, _ = _claim_expired(backend, broker, now_ms=now_ms)
+            concurrent_ids, _ = _claim_expired(backend, broker, now_at=now_at)
             assert concurrent_ids == []
 
             reclaimed_ids, _ = _claim_expired(
-                backend, broker, now_ms=lease_deadline_ms + 1
+                backend,
+                broker,
+                now_at=lease_deadline_at + datetime.timedelta(milliseconds=1),
             )
             assert reclaimed_ids == [task_result.id]
         finally:
@@ -339,10 +345,7 @@ class TestRedisBrokerReap:
             _expire_lease(backend, task_result.id)
 
             broker = RedisBroker(backend)
-            now_ms = int(timezone.now().timestamp() * 1000)
-            claimed_ids, lease_deadline_ms = _claim_expired(
-                backend, broker, now_ms=now_ms
-            )
+            claimed_ids, _ = _claim_expired(backend, broker, now_at=timezone.now())
             assert claimed_ids == [task_result.id]
 
             # The worker finishes and acknowledges before the broker decides.
@@ -353,7 +356,7 @@ class TestRedisBrokerReap:
                     finished_at=timezone.now(),
                 )
             )
-            broker._reap_task(task_result.id, lease_deadline_ms)
+            broker._reap_task(task_result.id)
 
             assert backend.get_result(task_result.id).status == (
                 TaskResultStatus.SUCCESSFUL
@@ -362,72 +365,6 @@ class TestRedisBrokerReap:
                 prefix=backend.key_prefix, queue_name="default"
             )
             assert backend.client.zscore(deferred_key, task_result.id) is None
-        finally:
-            backend.close()
-
-    def test_acknowledge__skips_when_lease_deadline_differs(self):
-        """acknowledge() is a no-op when the running entry holds another lease."""
-        backend = _make_backend("ack_guard_test")
-        try:
-            task_result = backend.enqueue(echo, args=[42])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="worker-1"
-            )
-            assert acquired is not None
-            finished = replace(
-                acquired,
-                status=TaskResultStatus.SUCCESSFUL,
-                finished_at=timezone.now(),
-            )
-
-            backend.acknowledge(finished, lease_deadline_ms=0)
-            with pytest.raises(TaskResultDoesNotExist):
-                backend.get_result(task_result.id)
-
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            lease_deadline_ms = backend.client.zscore(running_key, task_result.id)
-            assert lease_deadline_ms is not None
-            backend.acknowledge(finished, lease_deadline_ms=lease_deadline_ms)
-            assert backend.get_result(task_result.id).status == (
-                TaskResultStatus.SUCCESSFUL
-            )
-
-            # The lease is gone, so a repeated guarded acknowledgement is a no-op.
-            backend.acknowledge(finished, lease_deadline_ms=lease_deadline_ms)
-            assert backend.get_result(task_result.id).status == (
-                TaskResultStatus.SUCCESSFUL
-            )
-        finally:
-            backend.close()
-
-    def test_requeue__skips_when_lease_deadline_differs(self):
-        """requeue() is a no-op when the running entry holds another lease."""
-        backend = _make_backend("requeue_guard_test")
-        try:
-            task_result = backend.enqueue(boom_no_retry, args=[])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="worker-1"
-            )
-            assert acquired is not None
-            failed = replace(
-                acquired,
-                status=TaskResultStatus.FAILED,
-                finished_at=timezone.now(),
-            )
-            deferred_key = backend.DEFERRED_KEY.format(
-                prefix=backend.key_prefix, queue_name="default"
-            )
-
-            backend.requeue(failed, timezone.now(), lease_deadline_ms=0)
-            assert backend.client.zscore(deferred_key, task_result.id) is None
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, task_result.id) is not None
-
-            lease_deadline_ms = backend.client.zscore(running_key, task_result.id)
-            assert lease_deadline_ms is not None
-            backend.requeue(failed, timezone.now(), lease_deadline_ms=lease_deadline_ms)
-            assert backend.client.zscore(deferred_key, task_result.id) is not None
-            assert backend.client.zscore(running_key, task_result.id) is None
         finally:
             backend.close()
 
@@ -451,11 +388,11 @@ class TestRedisBrokerReap:
             observed: list[str] = []
             decide = broker._reap_task
 
-            def reap_or_raise(task_id: str, lease_deadline_ms: int) -> None:
+            def reap_or_raise(task_id: str) -> None:
                 observed.append(task_id)
                 if len(observed) == 1:
                     raise RuntimeError("reap failed")
-                decide(task_id, lease_deadline_ms)
+                decide(task_id)
 
             with (
                 caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"),

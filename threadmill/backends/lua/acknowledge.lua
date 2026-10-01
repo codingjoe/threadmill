@@ -18,16 +18,8 @@
 -- ARGV[5]  -- status (SUCCESSFUL or FAILED)
 -- ARGV[6]  -- telemetry pub/sub channel
 -- ARGV[7]  -- queue name
--- ARGV[8]  -- expected lease deadline in milliseconds, "" to acknowledge unconditionally
--- Returns: 1 on success, 0 if task was not in the running set or the lease guard rejected it
+-- Returns: 1 on success, 0 if task was not in the running set
 
-local lease_deadline = ARGV[8]
-if lease_deadline ~= '' then
-  local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
-  if not score or tonumber(score) ~= tonumber(lease_deadline) then
-    return 0
-  end
-end
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 if removed == 0 then
   return 0  -- Task already reaped, skip
