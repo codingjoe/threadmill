@@ -1,6 +1,7 @@
 import collections.abc
 import dataclasses
 import datetime
+import json
 import logging
 import queue
 import time
@@ -265,13 +266,13 @@ class TestRedisBrokerReap:
             backend.close()
 
     def test_reap_running_queue__logs_and_continues_after_task_error(self, caplog):
-        """A failing reap decision does not stop the rest of the batch."""
+        """A failing reap decision is logged per cause and does not stop the batch."""
         backend = _make_backend(
             "reap_error_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
             task_ids = []
-            for _index in range(2):
+            for _index in range(3):
                 task_result = backend.enqueue(boom_no_retry, args=[])
                 acquired = backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="worker-1"
@@ -280,19 +281,26 @@ class TestRedisBrokerReap:
                 _expire_lease(backend, task_result.id)
                 task_ids.append(task_result.id)
 
-            corrupted_id, recovered_id = task_ids
+            unreadable_id, gone_id, recovered_id = task_ids
             backend.client.hset(
                 backend.TASK_KEY.format(
-                    prefix=backend.key_prefix, task_id=corrupted_id
+                    prefix=backend.key_prefix, task_id=unreadable_id
                 ),
                 "data",
                 "{not json",
             )
+            gone_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=gone_id
+            )
+            payload = json.loads(backend.client.hget(gone_key, "data"))
+            payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
+            backend.client.hset(gone_key, "data", json.dumps(payload))
 
             with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert "Reaper error for task" in caplog.text
+            assert "has an unreadable payload" in caplog.text
+            assert "gone from the code base" in caplog.text
             assert backend.get_result(recovered_id).status == TaskResultStatus.FAILED
         finally:
             backend.close()
