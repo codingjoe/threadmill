@@ -96,7 +96,6 @@ def configure_logging(formatter: logging.Formatter) -> None:
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
-    root_logger.setLevel(logging.INFO)
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
