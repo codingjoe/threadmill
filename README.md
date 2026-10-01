@@ -149,9 +149,9 @@ attempt count and `context.task_result.errors[-1]` for the latest error.
 Return a `timedelta` to schedule the next attempt, or `None` to stop retrying.
 
 Tasks whose processing lease expired reach the callback the same way, with an
-`AcknowledgementTimeout` error. The task is re-queued preserving its ID and
-error history, and the broker promotes it back to the ready queue once the delay
-elapses.
+`AcknowledgementTimeout` error. Failed tasks are re-queued preserving their ID
+and error history; the broker promotes them back to the ready queue once the
+delay elapses.
 
 #### Built-in `ExponentialBackoff`
 
@@ -166,6 +166,7 @@ import datetime
 from django.tasks import task
 from requests import HTTPError
 
+from threadmill.exceptions import AcknowledgementTimeout
 from threadmill.retry import ExponentialBackoff
 
 
@@ -175,7 +176,7 @@ from threadmill.retry import ExponentialBackoff
         max_delay=datetime.timedelta(minutes=5),
         factor=2.0,
         max_retries=5,
-        expected_exceptions=(HTTPError,),
+        expected_exceptions=(HTTPError, AcknowledgementTimeout),
     )
 )
 def fetch_github_api(url: str): ...
