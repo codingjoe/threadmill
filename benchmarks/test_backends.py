@@ -418,7 +418,7 @@ def stop_workers(empty_queues):
 
 @pytest.fixture
 def empty_queues():
-    """Delete queued tasks from every compared queue before and after a benchmark."""
+    """Delete queued tasks and stored results from every compared queue before and after a benchmark."""
     client = task_backends[DEFAULT_TASK_BACKEND_ALIAS].client
 
     def delete_queued_tasks() -> None:
@@ -426,7 +426,7 @@ def empty_queues():
             "threadmill:*",
             "django_tasks:*",
             "celery*",
-            "dramatiq:*",
+            "dramatiq:*",  # broker keys and the dramatiq:results:* results
             "_kombu*",
         ):
             if keys := client.keys(key_pattern):

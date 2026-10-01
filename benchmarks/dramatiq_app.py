@@ -3,7 +3,9 @@
 The dramatiq worker CLI imports this module without setting up Django, so it
 must not import Django or any Django application. The broker carries the Results
 middleware so the echo actor stores its return value in Redis, the way the Celery
-app's result backend does.
+app's result backend does. The result backend names its keys
+``dramatiq:results:<queue>:<actor>:<message_id>`` rather than the default bare MD5
+hash, so the benchmark cleanup's ``dramatiq:*`` pattern deletes them.
 """
 
 import os
@@ -22,7 +24,17 @@ PROCESSED_KEY = "benchmark:processed"
 client = redis.Redis.from_url(REDIS_URL)
 
 redis_broker = RedisBroker(url=REDIS_URL)
-redis_broker.add_middleware(Results(backend=RedisBackend(client=client)))
+# A greppable namespace the benchmark cleanup's "dramatiq:*" pattern matches;
+# the backend's default key is a bare MD5 hash no pattern can name.
+redis_broker.add_middleware(
+    Results(
+        backend=RedisBackend(
+            client=client,
+            namespace="dramatiq:results",
+            use_namespace_prefix_keys=True,
+        ),
+    ),
+)
 
 
 @dramatiq.actor(broker=redis_broker, store_results=True)
