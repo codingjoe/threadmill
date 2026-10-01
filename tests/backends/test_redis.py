@@ -1,6 +1,7 @@
 import collections.abc
 import dataclasses
 import datetime
+import json
 import logging
 import queue
 import time
@@ -13,7 +14,14 @@ from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
 from django.utils import timezone
 
-from tests.testapp.tasks import boom, boom_with_retry, compute_workload, echo
+from tests.testapp.tasks import (
+    boom,
+    boom_no_retry,
+    boom_with_retry,
+    compute_workload,
+    echo,
+    echo_retry_on_lease_expiry,
+)
 from threadmill.backends.base import (
     BackendTelemetry,
     QueueCounts,
@@ -91,6 +99,38 @@ def _measure_wait_deltas(calls: list[float]) -> list[float]:
     return [calls[index + 1] - calls[index] for index in range(len(calls) - 1)]
 
 
+def _now_ms() -> float:
+    """Return the current time in milliseconds since the UNIX epoch."""
+    return timezone.now().timestamp() * 1000
+
+
+def _expire_lease(
+    backend: RedisTaskBackend, task_id: str, queue_name: str = "default"
+) -> None:
+    """Backdate a running task's lease so the next reaper pass claims it."""
+    backend.client.zadd(
+        backend._segment_key(TaskResultStatus.RUNNING, queue_name), {task_id: 0}
+    )
+
+
+def _claim_expired(
+    backend: RedisTaskBackend,
+    broker: RedisBroker,
+    *,
+    queue_name: str = "default",
+) -> list[str]:
+    """Run the reaper claim script and return the claimed IDs."""
+    claimed = broker._reaper_script(
+        keys=[backend._segment_key(TaskResultStatus.RUNNING, queue_name)],
+        args=[
+            str(int(RedisBroker.CLAIM_TTL.total_seconds() * 1000)),
+            str(backend.batch_size),
+            f"{backend.key_prefix}:task:",
+        ],
+    )
+    return [item.decode() if isinstance(item, bytes) else item for item in claimed]
+
+
 class TestRedisBroker:
     def test_mover__moves_deferred_task_to_ready(self):
         """Mover promotes due deferred tasks to the ready queue."""
@@ -118,6 +158,152 @@ class TestRedisBroker:
                 broker.main()
         assert "Mover error for queue" in caplog.text
         assert "Running reaper error for queue" in caplog.text
+
+
+class TestRedisBrokerReap:
+    """Tests for reaping tasks whose processing lease expired."""
+
+    def test_reap__requeues_task_when_retry_callback_returns_delay(self):
+        """Reaping requeues the task due after the delay returned by the callback."""
+        backend = _make_backend(
+            "reap_retry_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _expire_lease(backend, task_result.id)
+
+            started_at_ms = _now_ms()
+            RedisBroker(backend).main()
+            finished_at_ms = _now_ms()
+
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            score = backend.client.zscore(deferred_key, task_result.id)
+            assert score is not None
+            assert started_at_ms + 1000 <= score <= finished_at_ms + 1000
+
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            stored = backend.deserialize_task_result(
+                backend.client.hget(task_key, "data")
+            )
+            assert (
+                stored.errors[-1].exception_class_path
+                == "threadmill.exceptions.AcknowledgementTimeout"
+            )
+        finally:
+            backend.close()
+
+    def test_reap_task__skips_when_task_data_is_missing(self, caplog):
+        """_reap_task logs and skips when the claimed task data is gone."""
+        backend = _make_backend("reap_missing_data_test")
+        try:
+            broker = RedisBroker(backend)
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                broker._reap_task("missing-task-id")
+            assert "has no task data" in caplog.text
+        finally:
+            backend.close()
+
+    def test_reap__claims_once_per_claim_ttl(self):
+        """Claiming renews the lease so a concurrent pass leaves the task alone."""
+        backend = _make_backend(
+            "reap_claim_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(boom_no_retry, args=[])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _expire_lease(backend, task_result.id)
+
+            broker = RedisBroker(backend)
+            claimed_ids = _claim_expired(backend, broker)
+
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert claimed_ids == [task_result.id]
+            assert backend.client.zscore(running_key, task_result.id) > _now_ms()
+
+            # A concurrent pass within the claim TTL leaves the task alone.
+            assert _claim_expired(backend, broker) == []
+
+            # Once the claim lapses the task is claimed again.
+            _expire_lease(backend, task_result.id)
+            assert _claim_expired(backend, broker) == [task_result.id]
+        finally:
+            backend.close()
+
+    def test_reap__removes_running_entry_without_task_data(self):
+        """A running entry without task data is unrecoverable and removed."""
+        backend = _make_backend(
+            "reap_orphan_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            backend.client.delete(
+                backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=task_result.id
+                )
+            )
+            _expire_lease(backend, task_result.id)
+
+            RedisBroker(backend).main()
+
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert backend.client.zscore(running_key, task_result.id) is None
+        finally:
+            backend.close()
+
+    def test_reap_running_queue__logs_and_continues_after_task_error(self, caplog):
+        """A failing reap decision is logged per cause and does not stop the batch."""
+        backend = _make_backend(
+            "reap_error_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_ids = []
+            for _index in range(3):
+                task_result = backend.enqueue(boom_no_retry, args=[])
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="worker-1"
+                )
+                assert acquired is not None
+                _expire_lease(backend, task_result.id)
+                task_ids.append(task_result.id)
+
+            unreadable_id, gone_id, recovered_id = task_ids
+            backend.client.hset(
+                backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=unreadable_id
+                ),
+                "data",
+                "{not json",
+            )
+            gone_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=gone_id
+            )
+            payload = json.loads(backend.client.hget(gone_key, "data"))
+            payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
+            backend.client.hset(gone_key, "data", json.dumps(payload))
+
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+                RedisBroker(backend)._reap_running_queue("default")
+
+            assert "has an unreadable payload" in caplog.text
+            assert "gone from the code base" in caplog.text
+            assert backend.get_result(recovered_id).status == TaskResultStatus.FAILED
+        finally:
+            backend.close()
 
 
 class TestRedisTaskBackend:

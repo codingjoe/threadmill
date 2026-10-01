@@ -28,6 +28,7 @@ from threadmill.backends.base import (
     TelemetryEvent,
     ThreadmillTaskBackend,
 )
+from threadmill.exceptions import AcknowledgementTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,10 @@ class RedisBroker(Broker):
     MOVER_SCRIPT = _load_lua("mover")
     """Move tasks whose scheduled time has passed from the deferred to the active queue."""
     REAPER_SCRIPT = _load_lua("reaper")
-    """Fail tasks whose processing lease has expired from the running set."""
+    """Claim tasks whose processing lease has expired for the broker to decide their fate."""
+
+    CLAIM_TTL = datetime.timedelta(seconds=60)
+    """How long a reaper claim is held before another broker pass may take it over."""
 
     def __init__(self, backend: RedisTaskBackend) -> None:
         interval = backend.options.get("broker_interval", datetime.timedelta(seconds=1))
@@ -89,25 +93,58 @@ class RedisBroker(Broker):
         )
 
     def _reap_running_queue(self, queue_name: str) -> None:
-        """Fail tasks whose processing lease has expired from the running set."""
-        now = timezone.now()
-        now_ms = now.timestamp() * 1000
-        finished_at_iso = now.isoformat()
+        """Claim tasks whose processing lease has expired from the running set."""
         running_key = self.backend._segment_key(TaskResultStatus.RUNNING, queue_name)
-        failed_results_key = self.backend._segment_key(
-            TaskResultStatus.FAILED, queue_name
-        )
-        self._reaper_script(
-            keys=[running_key, failed_results_key],
+        claimed_ids = self._reaper_script(
+            keys=[running_key],
             args=[
-                str(now_ms),
-                f"{self.backend.key_prefix}:task:",
-                f"{self.backend.key_prefix}:result:",
+                str(int(self.CLAIM_TTL.total_seconds() * 1000)),
                 str(self.backend.batch_size),
-                str(int(self.backend.result_ttl.total_seconds())),
-                finished_at_iso,
+                f"{self.backend.key_prefix}:task:",
             ],
         )
+        for member in claimed_ids:
+            task_id = member.decode() if isinstance(member, bytes) else member
+            try:
+                self._reap_task(task_id)
+            except ImportError:
+                logger.exception(
+                    "Task %r retry callback is gone from the code base; "
+                    "skipping the reap",
+                    task_id,
+                )
+            except TypeError, ValueError:
+                logger.exception(
+                    "Task %r has an unreadable payload; skipping the reap", task_id
+                )
+
+    def _reap_task(self, task_id: str) -> None:
+        """Requeue or fail a claimed task."""
+        if (task_result := self.backend.get_leased_task(task_id)) is None:
+            logger.warning("Claimed task %r has no task data; skipping", task_id)
+            return
+        now = timezone.now()
+        task_result = dataclasses.replace(
+            task_result,
+            status=TaskResultStatus.FAILED,
+            finished_at=now,
+            errors=[
+                *task_result.errors,
+                self.backend.create_task_error(
+                    AcknowledgementTimeout("Task processing lease expired.")
+                ),
+            ],
+        )
+        delay = self.backend.retry_delay(task_result)
+        logger.info(
+            "Task '%s@%s' lease expired",
+            task_result.id,
+            task_result.task.module_path,
+        )
+        if delay is None:
+            self.backend.acknowledge(task_result)
+        else:
+            self.backend.requeue(task_result, now + delay)
 
     def main(self) -> None:
         """Run mover and running reaper passes for all queues."""
@@ -160,6 +197,25 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             prefix=self.key_prefix,
             queue_name=queue_name,
             status=status.value.lower(),
+        )
+
+    def get_leased_task(self, task_id: str) -> TaskResult | None:
+        """Return a running task as its lease holds it, or None when its data is gone.
+
+        The task hash stores the payload as it was enqueued, so a task taken
+        from the running set is returned under the lease the acquire script
+        stamped beside it — the same view ``peek()`` gives for RUNNING tasks.
+        """
+        task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
+        data, lease_worker, lease_started_at = self.client.hmget(
+            task_key, "data", *self.LEASE_FIELDS
+        )
+        if not data:
+            return None
+        return self._apply_lease(
+            self.deserialize_task_result(data),
+            worker=_decode_text(lease_worker),
+            lease_started_at=_parse_lease_started_at(lease_started_at),
         )
 
     def __init__(self, alias: str, params: dict) -> None:

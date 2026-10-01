@@ -20,7 +20,7 @@ from traceback import format_exception
 import django
 from django.core.serializers.json import DjangoJSONEncoder
 from django.tasks import TaskResult, task_backends
-from django.tasks.base import TaskContext, TaskError, TaskResultStatus
+from django.tasks.base import TaskContext, TaskResultStatus
 from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
@@ -96,7 +96,6 @@ def configure_logging(formatter: logging.Formatter) -> None:
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
-    root_logger.setLevel(logging.INFO)
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -295,26 +294,13 @@ class WorkerThread(threading.Thread):
                 result = self.execute_task_result(task_result)
                 if (
                     result.status is TaskResultStatus.FAILED
-                    and (delay := self.retry_delay(result)) is not None
+                    and (delay := self.backend.retry_delay(result)) is not None
                 ):
                     self.backend.requeue(result, timezone.now() + delay)
                 else:
                     self.backend.acknowledge(result)
             finally:
                 self.worker.record_task()
-
-    @staticmethod
-    def retry_delay(task_result: TaskResult) -> datetime.timedelta | None:
-        """Return the retry delay for a failed task, or None to stop retrying."""
-        if task_result.task.retry:
-            try:
-                return task_result.task.retry(TaskContext(task_result=task_result))
-            except Exception:
-                logger.exception(
-                    "Retry callback failed for task '%s@%s'",
-                    task_result.id,
-                    task_result.task.module_path,
-                )
 
     def execute_task_result(self, task_result: TaskResult) -> TaskResult:
         """Execute task from task result and update result lifecycle state."""
@@ -338,7 +324,10 @@ class WorkerThread(threading.Thread):
             task_result = dataclasses.replace(
                 task_result,
                 status=TaskResultStatus.FAILED,
-                errors=[*task_result.errors, WorkerThread.create_task_error(exception)],
+                errors=[
+                    *task_result.errors,
+                    self.backend.create_task_error(exception),
+                ],
                 finished_at=timezone.now(),
             )
             logger.exception(
@@ -378,13 +367,4 @@ class WorkerThread(threading.Thread):
         return task.func(
             *args,
             **task_result.kwargs,
-        )
-
-    @staticmethod
-    def create_task_error(exception: BaseException) -> TaskError:
-        """Build a task error payload for failed execution."""
-        exception_type = type(exception)
-        return TaskError(
-            exception_class_path=f"{exception_type.__module__}.{exception_type.__qualname__}",
-            traceback="".join(format_exception(exception)),
         )

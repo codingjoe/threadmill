@@ -1,5 +1,6 @@
 import dataclasses
 import datetime
+import io
 import json
 import logging
 import multiprocessing
@@ -22,7 +23,6 @@ from tests.testapp.tasks import (
     boom,
     boom_no_retry,
     boom_retry_raises,
-    boom_retry_thrice,
     boom_with_retry,
     count_users,
     echo,
@@ -173,10 +173,11 @@ class TestConfigureLogging:
     def test_configure_logging__installs_handler_on_root(self):
         """Route the records of every logger through the shared handler."""
         formatter = logging.Formatter("%(levelname)s %(message)s")
-        configure_logging(formatter)
         root_logger = logging.getLogger()
+        root_logger.setLevel(logging.ERROR)
+        configure_logging(formatter)
         assert root_logger.handlers == [handler]
-        assert root_logger.level == logging.INFO
+        assert root_logger.level == logging.ERROR
         assert handler.formatter is formatter
 
     def test_configure_logging__replaces_foreign_handlers(self):
@@ -522,6 +523,35 @@ class TestWorkerThread:
         result = thread.execute_task_result(task_result)
         assert result.worker_ids == ["pre-set-worker"]
 
+    def test_execute_task_result__logs_info_records(self, monkeypatch):
+        """Log task start and success records at INFO level."""
+        stream = io.StringIO()
+        monkeypatch.setattr(handler, "stream", stream)
+        configure_logging(JsonFormatter())
+        logging.getLogger().setLevel(logging.INFO)
+        task_result = _task_result(log_message, "hello")
+        WorkerThread(
+            worker=_make_worker(), index=0, backend=default_task_backend
+        ).execute_task_result(task_result)
+
+        progress_levels = {
+            record["message"]: record["level"]
+            for record in map(json.loads, stream.getvalue().splitlines())
+            if record["logger"] == "multiprocessing"
+        }
+        assert (
+            progress_levels[
+                f"Executing task '{task_result.id}@{log_message.module_path}'"
+            ]
+            == "INFO"
+        )
+        assert (
+            progress_levels[
+                f"Task '{task_result.id}@{log_message.module_path}' succeeded"
+            ]
+            == "INFO"
+        )
+
     def test_call_task__calls_function_with_args(self):
         """call_task invokes the task function with args and kwargs."""
         result = WorkerThread.call_task(_task_result(_add, 1, y=2))
@@ -536,85 +566,6 @@ class TestWorkerThread:
         """call_task runs async task functions with asyncio.run."""
         result = WorkerThread.call_task(_task_result(_async_task))
         assert result == 99
-
-    def test_create_task_error__builds_task_error(self):
-        """create_task_error builds a TaskError with exception info."""
-        try:
-            raise RuntimeError("test error")
-        except RuntimeError:
-            error = WorkerThread.create_task_error(sys.exc_info()[1])
-        assert "RuntimeError" in error.exception_class_path
-        assert "test error" in error.traceback
-
-    def test_retry_delay__none_when_task_has_no_retry(self) -> None:
-        """Return None when the task has no retry callback."""
-        result = _task_result(boom)
-        assert WorkerThread.retry_delay(result) is None
-
-    def test_retry_delay__returns_timedelta_from_callback(self) -> None:
-        """Return the timedelta from the retry callback."""
-        result = _task_result(boom_with_retry)
-        result = dataclasses.replace(
-            result,
-            status=TaskResultStatus.FAILED,
-            errors=[WorkerThread.create_task_error(ValueError("boom"))],
-        )
-        delay = WorkerThread.retry_delay(result)
-        assert delay == datetime.timedelta(seconds=1)
-
-    def test_retry_delay__none_when_callback_returns_none(self) -> None:
-        """Return None when the retry callback returns None."""
-        result = _task_result(boom_no_retry)
-        result = dataclasses.replace(
-            result,
-            status=TaskResultStatus.FAILED,
-            errors=[WorkerThread.create_task_error(ValueError("boom"))],
-        )
-        assert WorkerThread.retry_delay(result) is None
-
-    def test_retry_delay__none_when_callback_raises(self, caplog) -> None:
-        """Return None and log when the retry callback raises an exception."""
-        mp_logger = multiprocessing.get_logger()
-        mp_logger.addHandler(caplog.handler)
-        mp_logger.setLevel(logging.ERROR)
-        result = _task_result(boom_retry_raises)
-        result = dataclasses.replace(
-            result,
-            status=TaskResultStatus.FAILED,
-            errors=[WorkerThread.create_task_error(ValueError("boom"))],
-        )
-        try:
-            assert WorkerThread.retry_delay(result) is None
-        finally:
-            mp_logger.removeHandler(caplog.handler)
-        assert "Retry callback failed" in caplog.text
-
-    def test_retry_delay__passes_task_context(self) -> None:
-        """Pass TaskContext with task_result to the retry callback."""
-        result = _task_result(boom_retry_thrice, worker_ids=["w1"])
-        result = dataclasses.replace(
-            result,
-            status=TaskResultStatus.FAILED,
-            errors=[WorkerThread.create_task_error(ValueError("boom"))],
-        )
-        delay = WorkerThread.retry_delay(result)
-        assert delay == datetime.timedelta(seconds=1)
-
-    def test_retry_delay__callback_receives_errors(self) -> None:
-        """Retry callback can access the latest error via context.task_result.errors."""
-        result = _task_result(boom_with_retry)
-        error = WorkerThread.create_task_error(ValueError("boom"))
-        result = dataclasses.replace(
-            result,
-            status=TaskResultStatus.FAILED,
-            errors=[error],
-        )
-        WorkerThread.retry_delay(result)
-        # The retry_always callback doesn't inspect errors, but the context
-        # must contain them. Verify via retry_thrice which checks attempt count.
-        result_with_workers = dataclasses.replace(result, worker_ids=["w1", "w2"])
-        delay = WorkerThread.retry_delay(result_with_workers)
-        assert delay == datetime.timedelta(seconds=1)
 
     def test_run__requeues_failed_task_with_retry(self) -> None:
         """run() requeues a FAILED task when retry_delay returns a timedelta."""
