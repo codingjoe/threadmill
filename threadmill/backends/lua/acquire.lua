@@ -1,9 +1,9 @@
--- Atomically pop the lowest-scored task from any of the given priority queues,
--- move it directly to the running set with a lease deadline, and stamp the task
--- hash with the lease that holds it. The stored payload is left as it was
--- enqueued; the caller applies the RUNNING state from the lease itself. Scans
--- the queues round-robin from ARGV[7] and returns the first available task, so
--- a backlogged queue cannot starve its neighbours.
+-- Lease the next ready task for the calling worker: returns the task ID and its
+-- stored payload, or nil when no queue has a task. Queues are tried round-robin
+-- from ARGV[7], so a backlogged queue cannot starve its neighbours.
+--
+-- The payload comes back as it was enqueued. Apply the lease stamped beside it
+-- (lease_worker, lease_started_at) to report the task as RUNNING.
 --
 -- KEYS[1..N]  -- interleaved running keys and queue keys, one pair per queue:
 --                KEYS[1] = running set, KEYS[2] = queue set, KEYS[3] = running,

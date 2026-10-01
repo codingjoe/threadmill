@@ -178,8 +178,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
 
     Uses sorted sets for priority ordering, a running set for in-flight
     tracking, and a deferred set for scheduled tasks. All multi-step operations
-    are atomic via Lua scripts. Each task is a hash holding the payload as it
-    was enqueued plus the lease of the worker processing it.
+    are atomic via Lua scripts.
     """
 
     supports_async_task = True
