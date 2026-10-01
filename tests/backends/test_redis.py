@@ -29,11 +29,7 @@ from threadmill.backends.base import (
     QueueRates,
     QueueStats,
 )
-from threadmill.backends.redis import (  # noqa: E402
-    RedisBroker,
-    RedisTaskBackend,
-    _to_epoch_ms,
-)
+from threadmill.backends.redis import RedisBroker, RedisTaskBackend  # noqa: E402
 
 TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
 
@@ -104,6 +100,11 @@ def _measure_wait_deltas(calls: list[float]) -> list[float]:
     return [calls[index + 1] - calls[index] for index in range(len(calls) - 1)]
 
 
+def _now_ms() -> int:
+    """Return the current time in milliseconds since the UNIX epoch."""
+    return round(timezone.now().timestamp() * 1000)
+
+
 def _expire_lease(
     backend: RedisTaskBackend, task_id: str, queue_name: str = "default"
 ) -> None:
@@ -117,23 +118,18 @@ def _claim_expired(
     backend: RedisTaskBackend,
     broker: RedisBroker,
     *,
-    now_at: datetime.datetime,
     queue_name: str = "default",
-) -> tuple[list[str], datetime.datetime]:
-    """Run the reaper claim script and return the claimed IDs and claim deadline."""
-    lease_deadline_at = now_at + RedisBroker.CLAIM_TTL
+) -> list[str]:
+    """Run the reaper claim script and return the claimed IDs."""
     claimed = broker._reaper_script(
         keys=[backend._segment_key(TaskResultStatus.RUNNING, queue_name)],
         args=[
-            str(_to_epoch_ms(now_at)),
-            str(_to_epoch_ms(lease_deadline_at)),
+            str(int(RedisBroker.CLAIM_TTL.total_seconds() * 1000)),
             str(backend.batch_size),
             f"{backend.key_prefix}:task:",
         ],
     )
-    return [
-        item.decode() if isinstance(item, bytes) else item for item in claimed
-    ], lease_deadline_at
+    return [item.decode() if isinstance(item, bytes) else item for item in claimed]
 
 
 class TestRedisBroker:
@@ -283,26 +279,18 @@ class TestRedisBrokerReap:
             _expire_lease(backend, task_result.id)
 
             broker = RedisBroker(backend)
-            now_at = timezone.now()
-            claimed_ids, lease_deadline_at = _claim_expired(
-                backend, broker, now_at=now_at
-            )
+            claimed_ids = _claim_expired(backend, broker)
 
             running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
             assert claimed_ids == [task_result.id]
-            assert backend.client.zscore(running_key, task_result.id) == (
-                _to_epoch_ms(lease_deadline_at)
-            )
+            assert backend.client.zscore(running_key, task_result.id) > _now_ms()
 
-            concurrent_ids, _ = _claim_expired(backend, broker, now_at=now_at)
-            assert concurrent_ids == []
+            # A concurrent pass within the claim TTL leaves the task alone.
+            assert _claim_expired(backend, broker) == []
 
-            reclaimed_ids, _ = _claim_expired(
-                backend,
-                broker,
-                now_at=lease_deadline_at + datetime.timedelta(milliseconds=1),
-            )
-            assert reclaimed_ids == [task_result.id]
+            # Once the claim lapses the task is claimed again.
+            _expire_lease(backend, task_result.id)
+            assert _claim_expired(backend, broker) == [task_result.id]
         finally:
             backend.close()
 
@@ -345,7 +333,7 @@ class TestRedisBrokerReap:
             _expire_lease(backend, task_result.id)
 
             broker = RedisBroker(backend)
-            claimed_ids, _ = _claim_expired(backend, broker, now_at=timezone.now())
+            claimed_ids = _claim_expired(backend, broker)
             assert claimed_ids == [task_result.id]
 
             # The worker finishes and acknowledges before the broker decides.

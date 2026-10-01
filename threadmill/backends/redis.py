@@ -40,11 +40,6 @@ def _load_lua(name: str) -> str:
     return (_LUA_DIR / f"{name}.lua").read_text()
 
 
-def _to_epoch_ms(deadline_at: datetime.datetime) -> int:
-    """Convert a timezone-aware datetime to milliseconds since the UNIX epoch."""
-    return round(deadline_at.timestamp() * 1000)
-
-
 class RedisBroker(Broker):
     """Background maintenance broker for the Redis backend."""
 
@@ -81,14 +76,11 @@ class RedisBroker(Broker):
 
     def _reap_running_queue(self, queue_name: str) -> None:
         """Claim tasks whose processing lease has expired from the running set."""
-        now_at = timezone.now()
-        lease_deadline_at = now_at + self.CLAIM_TTL
         running_key = self.backend._segment_key(TaskResultStatus.RUNNING, queue_name)
         claimed_ids = self._reaper_script(
             keys=[running_key],
             args=[
-                str(_to_epoch_ms(now_at)),
-                str(_to_epoch_ms(lease_deadline_at)),
+                str(int(self.CLAIM_TTL.total_seconds() * 1000)),
                 str(self.backend.batch_size),
                 f"{self.backend.key_prefix}:task:",
             ],
