@@ -124,16 +124,17 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 
 | Option              | Default                   | Description                                                             |
 | ------------------- | ------------------------- | ----------------------------------------------------------------------- |
-| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before a started task is marked FAILED.             |
+| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before the task is retried or marked FAILED.        |
 | `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.            |
 | `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                  |
 | `batch_size`        | `100`                     | Max tasks to move or reap per broker pass.                              |
 | `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll. |
 | `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                 |
 
-A task that is started but never acknowledged (lease expired) is marked FAILED
-with an `AcknowledgementTimeout` error. Set `lease_ttl` comfortably above your
-worst-case task runtime.
+A task whose lease expired reaches the `retry` callback as an
+`AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
+Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
+can still be running, so a retry may execute concurrently with it.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
@@ -147,8 +148,8 @@ The callback receives a `TaskContext` — use `context.attempt` for the current
 attempt count and `context.task_result.errors[-1]` for the latest error.
 Return a `timedelta` to schedule the next attempt, or `None` to stop retrying.
 
-The worker re-queues the failed task, preserving its ID and error history;
-the broker promotes it back to the ready queue once the delay elapses.
+Failed tasks are re-queued preserving their ID and error history; the broker
+promotes them back to the ready queue once the delay elapses.
 
 #### Built-in `ExponentialBackoff`
 
@@ -163,6 +164,7 @@ import datetime
 from django.tasks import task
 from requests import HTTPError
 
+from threadmill.exceptions import AcknowledgementTimeout
 from threadmill.retry import ExponentialBackoff
 
 
@@ -172,7 +174,7 @@ from threadmill.retry import ExponentialBackoff
         max_delay=datetime.timedelta(minutes=5),
         factor=2.0,
         max_retries=5,
-        expected_exceptions=(HTTPError,),
+        expected_exceptions=(HTTPError, AcknowledgementTimeout),
     )
 )
 def fetch_github_api(url: str): ...
