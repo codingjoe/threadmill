@@ -8,17 +8,21 @@ the numbers reflect queue and worker overhead instead of task work:
 - ``test_process_queue__benchmark``: time for a worker to process a full queue.
 
 The processing benchmark queues 20,000 tasks, except for dramatiq, which queues
-5,000: dramatiq reads one message at a time and backs off before polling again,
-about 9.5 ms per task, so the default depth would need minutes to drain. The
-fixed cost of a cold worker start and stop is quantized to about a second, so a
-deep queue is what makes the marginal drain per task — the number the chart
-plots — measurable.
+5,000: dramatiq's Redis consumer polls rather than blocks, so its default
+read-ahead of two backs off about 4.5 ms per task, and the default depth would
+need minutes to drain. The fixed cost of a cold worker start and stop is
+quantized to about a second, so a deep queue is what makes the marginal drain per
+task — the number the chart plots — measurable.
 
 Both worker benchmarks include the worker's fixed start cost, and the queues
 that exit on their own include their stop cost too. Subtract
 ``test_start_worker__benchmark`` from ``test_process_queue__benchmark`` and divide
 that queue's task count by the difference to get the marginal throughput of a
 busy queue.
+
+Every queue runs one worker process and one thread at its own default read-ahead,
+because a read-ahead pinned below a polling consumer's default measures the pin
+instead of the queue.
 
 Threadmill is measured twice, with its default prefetch buffer and with batching
 disabled, so the prefetch cost can be subtracted from both worker benchmarks. Its
@@ -34,7 +38,6 @@ because a graceful shutdown takes seconds and would dominate a short drain.
 import collections.abc
 import dataclasses
 import io
-import os
 import subprocess
 import sys
 import tempfile
@@ -76,16 +79,17 @@ CELERY_WORKER = (
     "benchmarks.celery_app:celery_app",
     "worker",
     "--pool=solo",
-    "--prefetch-multiplier=1",
     "--loglevel=WARNING",
     "--without-gossip",
     "--without-mingle",
     "--without-heartbeat",
 )
-"""Celery worker running as one process with one thread, reading one message at a time.
+"""Celery worker running as one process with one thread, at its default read-ahead.
 
 The default prefork pool crashes on CPython 3.14, where the pool child loses
-the task handler state it expects.
+the task handler state it expects, so the worker runs on the solo pool. Celery's
+Redis consumer blocks while its queue is empty, so its default prefetch
+multiplier adds no sleep per message.
 """
 
 DRAMATIQ_WORKER = (
@@ -98,11 +102,14 @@ DRAMATIQ_WORKER = (
     "--threads",
     "1",
 )
-"""dramatiq worker running as one process with one thread, reading one message at a time.
+"""dramatiq worker running as one process with one thread, at its default read-ahead.
 
-One thread alone still reads two messages ahead, and the CLI has no flag for it,
-so the worker environment carries ``dramatiq_queue_prefetch=1``; dramatiq reads
-that variable while it imports its worker module, before the CLI runs.
+The Redis broker polls rather than blocks: its consumer fetches only while fewer
+than its read-ahead of messages are unacked and, with that window full, sleeps a
+jittered 5-10 ms backoff before polling again. An unset
+``dramatiq_queue_prefetch`` gives two messages per thread, so that sleep lands
+between poll cycles; pinning it to one would land a sleep between every message
+and measure the backoff instead of the queue.
 """
 
 WORKER_STOP_TIMEOUT_SECONDS = 20
@@ -201,16 +208,10 @@ def drain_with_celery_worker() -> None:
 def drain_with_dramatiq_worker() -> None:
     """Process every queued task with a single-process, single-thread dramatiq worker."""
     dramatiq_mark_processed.send()
-    drain_with_subprocess_worker(
-        DRAMATIQ_WORKER,
-        env={**os.environ, "dramatiq_queue_prefetch": "1"},
-    )
+    drain_with_subprocess_worker(DRAMATIQ_WORKER)
 
 
-def drain_with_subprocess_worker(
-    argv: collections.abc.Sequence[str],
-    env: collections.abc.Mapping[str, str] | None = None,
-) -> None:
+def drain_with_subprocess_worker(argv: collections.abc.Sequence[str]) -> None:
     """Run a worker CLI until the sentinel task queued last was processed."""
     client = redis.Redis.from_url(REDIS_URL)
     client.delete(PROCESSED_KEY)
@@ -220,7 +221,6 @@ def drain_with_subprocess_worker(
         argv,
         stdout=log,
         stderr=subprocess.STDOUT,
-        env=env,
     )
     running_workers.append(WorkerProcess(process=process, log=log))
     wait_until_processed(client, process, log)
@@ -352,7 +352,7 @@ WORKER_QUEUES = (
         name="dramatiq",
         enqueue=enqueue_dramatiq_tasks,
         drain=drain_with_dramatiq_worker,
-        task_count=5_000,  # about 9.5 ms per task; see the module docstring
+        task_count=5_000,  # about 4.5 ms per task; see the module docstring
     ),
 )
 """Queues that ship a worker to process queued tasks."""
