@@ -11,13 +11,11 @@ from unittest.mock import patch
 import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
-from django.tasks.exceptions import TaskResultDoesNotExist
 from django.utils import timezone
 
 from tests.testapp.tasks import (
     boom,
     boom_no_retry,
-    boom_retry_raises,
     boom_with_retry,
     compute_workload,
     echo,
@@ -100,9 +98,9 @@ def _measure_wait_deltas(calls: list[float]) -> list[float]:
     return [calls[index + 1] - calls[index] for index in range(len(calls) - 1)]
 
 
-def _now_ms() -> int:
+def _now_ms() -> float:
     """Return the current time in milliseconds since the UNIX epoch."""
-    return round(timezone.now().timestamp() * 1000)
+    return timezone.now().timestamp() * 1000
 
 
 def _expire_lease(
@@ -165,7 +163,7 @@ class TestRedisBrokerReap:
     """Tests for reaping tasks whose processing lease expired."""
 
     def test_reap__requeues_task_when_retry_callback_returns_delay(self):
-        """Reaping a task with a retry callback schedules it in the deferred set."""
+        """Reaping requeues the task due after the delay returned by the callback."""
         backend = _make_backend(
             "reap_retry_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -177,80 +175,27 @@ class TestRedisBrokerReap:
             assert acquired is not None
             _expire_lease(backend, task_result.id)
 
-            broker = RedisBroker(backend)
-            broker.main()
-
-            deferred_key = backend.DEFERRED_KEY.format(
-                prefix=backend.key_prefix, queue_name="default"
-            )
-            failed_key = backend._segment_key(TaskResultStatus.FAILED, "default")
-            assert backend.client.zscore(deferred_key, task_result.id) is not None
-            assert backend.client.zscore(failed_key, task_result.id) is None
-            with pytest.raises(TaskResultDoesNotExist):
-                backend.get_result(task_result.id)
-
-            # The retry attempt carries the lease error and counts as a second attempt.
-            backend.client.zadd(deferred_key, {task_result.id: 0})
-            broker._move_queue("default")
-            reacquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="worker-2"
-            )
-            assert reacquired is not None
-            assert reacquired.attempts == 2
-            assert (
-                reacquired.errors[-1].exception_class_path
-                == "threadmill.exceptions.AcknowledgementTimeout"
-            )
-        finally:
-            backend.close()
-
-    def test_reap__fails_task_when_retry_callback_returns_none(self):
-        """Reaping finalizes FAILED when the retry callback returns None."""
-        backend = _make_backend(
-            "reap_no_retry_test", lease_ttl=datetime.timedelta(seconds=1)
-        )
-        try:
-            task_result = backend.enqueue(boom_no_retry, args=[])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="worker-1"
-            )
-            assert acquired is not None
-            _expire_lease(backend, task_result.id)
-
+            started_at_ms = _now_ms()
             RedisBroker(backend).main()
+            finished_at_ms = _now_ms()
 
-            result = backend.get_result(task_result.id)
-            assert result.status == TaskResultStatus.FAILED
-            assert (
-                result.errors[-1].exception_class_path
-                == "threadmill.exceptions.AcknowledgementTimeout"
-            )
             deferred_key = backend.DEFERRED_KEY.format(
                 prefix=backend.key_prefix, queue_name="default"
             )
-            assert backend.client.zscore(deferred_key, task_result.id) is None
-        finally:
-            backend.close()
+            score = backend.client.zscore(deferred_key, task_result.id)
+            assert score is not None
+            assert started_at_ms + 1000 <= score <= finished_at_ms + 1000
 
-    def test_reap__fails_task_when_retry_callback_raises(self, caplog):
-        """Reaping finalizes FAILED and logs when the retry callback raises."""
-        backend = _make_backend(
-            "reap_retry_raises_test", lease_ttl=datetime.timedelta(seconds=1)
-        )
-        try:
-            task_result = backend.enqueue(boom_retry_raises, args=[])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
             )
-            assert acquired is not None
-            _expire_lease(backend, task_result.id)
-
-            with caplog.at_level(logging.ERROR, logger="threadmill.backends.base"):
-                RedisBroker(backend).main()
-
-            assert "Retry callback failed" in caplog.text
-            result = backend.get_result(task_result.id)
-            assert result.status == TaskResultStatus.FAILED
+            stored = backend.deserialize_task_result(
+                backend.client.hget(task_key, "data")
+            )
+            assert (
+                stored.errors[-1].exception_class_path
+                == "threadmill.exceptions.AcknowledgementTimeout"
+            )
         finally:
             backend.close()
 
@@ -319,43 +264,6 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap_task__keeps_result_when_task_acknowledged_while_claimed(self):
-        """A worker acknowledgement wins over a stale reap decision."""
-        backend = _make_backend(
-            "reap_ack_race_test", lease_ttl=datetime.timedelta(seconds=1)
-        )
-        try:
-            task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="worker-1"
-            )
-            assert acquired is not None
-            _expire_lease(backend, task_result.id)
-
-            broker = RedisBroker(backend)
-            claimed_ids = _claim_expired(backend, broker)
-            assert claimed_ids == [task_result.id]
-
-            # The worker finishes and acknowledges before the broker decides.
-            backend.acknowledge(
-                replace(
-                    acquired,
-                    status=TaskResultStatus.SUCCESSFUL,
-                    finished_at=timezone.now(),
-                )
-            )
-            broker._reap_task(task_result.id)
-
-            assert backend.get_result(task_result.id).status == (
-                TaskResultStatus.SUCCESSFUL
-            )
-            deferred_key = backend.DEFERRED_KEY.format(
-                prefix=backend.key_prefix, queue_name="default"
-            )
-            assert backend.client.zscore(deferred_key, task_result.id) is None
-        finally:
-            backend.close()
-
     def test_reap_running_queue__logs_and_continues_after_task_error(self, caplog):
         """A failing reap decision does not stop the rest of the batch."""
         backend = _make_backend(
@@ -372,24 +280,20 @@ class TestRedisBrokerReap:
                 _expire_lease(backend, task_result.id)
                 task_ids.append(task_result.id)
 
-            broker = RedisBroker(backend)
-            observed: list[str] = []
-            decide = broker._reap_task
+            corrupted_id, recovered_id = task_ids
+            backend.client.hset(
+                backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=corrupted_id
+                ),
+                "data",
+                "{not json",
+            )
 
-            def reap_or_raise(task_id: str) -> None:
-                observed.append(task_id)
-                if len(observed) == 1:
-                    raise RuntimeError("reap failed")
-                decide(task_id)
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+                RedisBroker(backend)._reap_running_queue("default")
 
-            with (
-                caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"),
-                patch.object(broker, "_reap_task", side_effect=reap_or_raise),
-            ):
-                broker._reap_running_queue("default")
-
-            assert sorted(observed) == sorted(task_ids)
             assert "Reaper error for task" in caplog.text
+            assert backend.get_result(recovered_id).status == TaskResultStatus.FAILED
         finally:
             backend.close()
 

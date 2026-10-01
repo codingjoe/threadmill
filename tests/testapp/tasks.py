@@ -94,13 +94,6 @@ def retry_never(context: TaskContext) -> datetime.timedelta | None:
     return None
 
 
-def retry_thrice(context: TaskContext) -> datetime.timedelta | None:
-    """Retry up to 3 attempts, then stop."""
-    if context.attempt >= 3:
-        return None
-    return datetime.timedelta(seconds=1)
-
-
 def retry_raise(context: TaskContext) -> datetime.timedelta | None:
     """Raise an exception to test retry callback error handling."""
     raise RuntimeError("retry callback crashed")
@@ -121,12 +114,6 @@ def boom_with_retry():
 @task(retry=retry_never)
 def boom_no_retry():
     """Raise ValueError, retry callback returns None."""
-    raise ValueError("boom")
-
-
-@task(retry=retry_thrice)
-def boom_retry_thrice():
-    """Raise ValueError, retry up to 3 attempts."""
     raise ValueError("boom")
 
 

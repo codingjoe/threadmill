@@ -122,14 +122,14 @@ uv run manage.py threadmill inspector
 The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 `TASKS` configuration:
 
-| Option              | Default                   | Description                                                              |
-| ------------------- | ------------------------- | ------------------------------------------------------------------------ |
-| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before an expired lease is retried or marked FAILED. |
-| `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.             |
-| `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                   |
-| `batch_size`        | `100`                     | Max tasks to move or requeue per broker pass.                            |
-| `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll.  |
-| `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                  |
+| Option              | Default                   | Description                                                             |
+| ------------------- | ------------------------- | ----------------------------------------------------------------------- |
+| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before the task is retried or marked FAILED.        |
+| `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.            |
+| `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                  |
+| `batch_size`        | `100`                     | Max tasks to move or requeue per broker pass.                           |
+| `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll. |
+| `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                 |
 
 A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
@@ -148,10 +148,8 @@ The callback receives a `TaskContext` — use `context.attempt` for the current
 attempt count and `context.task_result.errors[-1]` for the latest error.
 Return a `timedelta` to schedule the next attempt, or `None` to stop retrying.
 
-Tasks whose processing lease expired reach the callback the same way, with an
-`AcknowledgementTimeout` error. Failed tasks are re-queued preserving their ID
-and error history; the broker promotes them back to the ready queue once the
-delay elapses.
+Failed tasks are re-queued preserving their ID and error history; the broker
+promotes them back to the ready queue once the delay elapses.
 
 #### Built-in `ExponentialBackoff`
 

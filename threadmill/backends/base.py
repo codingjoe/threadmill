@@ -214,7 +214,6 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
 
     @staticmethod
     def create_task_error(exception: BaseException) -> TaskError:
-        """Build a task error payload for a failed execution."""
         exception_type = type(exception)
         return TaskError(
             exception_class_path=f"{exception_type.__module__}.{exception_type.__qualname__}",
@@ -223,7 +222,6 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
 
     @staticmethod
     def retry_delay(task_result: TaskResult) -> datetime.timedelta | None:
-        """Return the retry delay for a failed task, or None to stop retrying."""
         if task_result.task.retry:
             try:
                 return task_result.task.retry(TaskContext(task_result=task_result))

@@ -85,21 +85,16 @@ class RedisBroker(Broker):
                 f"{self.backend.key_prefix}:task:",
             ],
         )
-        for claimed_id in claimed_ids:
-            task_id = (
-                claimed_id.decode() if isinstance(claimed_id, bytes) else claimed_id
-            )
+        for member in claimed_ids:
+            task_id = member.decode() if isinstance(member, bytes) else member
             try:
                 self._reap_task(task_id)
             except Exception:  # noqa: BLE001
                 logger.exception("Reaper error for task %r", task_id)
 
     def _reap_task(self, task_id: str) -> None:
-        """Requeue or fail a claimed task by consulting its retry callback."""
-        task_key = self.backend.TASK_KEY.format(
-            prefix=self.backend.key_prefix, task_id=task_id
-        )
-        data = self.backend.client.hget(task_key, "data")
+        """Requeue or fail a claimed task."""
+        data = self.backend._get_task_data(task_id)
         if data is None:
             logger.warning("Claimed task %r has no task data; skipping", task_id)
             return
@@ -174,6 +169,10 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             queue_name=queue_name,
             status=status.value.lower(),
         )
+
+    def _get_task_data(self, task_id: str) -> bytes | None:
+        task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
+        return self.client.hget(task_key, "data")
 
     def __init__(self, alias: str, params: dict) -> None:
         super().__init__(alias=alias, params=params)
