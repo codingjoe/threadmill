@@ -16,11 +16,15 @@ LIGHT_THEME_PATH = IMAGE_DIRECTORY / "backend-comparison-light.svg"
 DARK_THEME_PATH = IMAGE_DIRECTORY / "backend-comparison-dark.svg"
 
 WIDTH = 900
-HEIGHT = 332
 
 LABEL_X = 180
 PLOT_X0 = 200
 PLOT_WIDTH = 560
+
+FIRST_ROW_CENTER = 110
+ROW_HEIGHT = 40
+FOOTNOTE_GAP = 38
+BOTTOM_PADDING = 64
 
 FONT = (
     'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
@@ -73,6 +77,14 @@ DARK_THEME = Theme(
     accent_bar="#6366f1",
 )
 
+DIAGNOSTIC_QUEUES = frozenset({"threadmill (no prefetch)"})
+"""Queues the benchmark measures but the chart leaves out.
+
+The harness runs threadmill twice to bracket its prefetch buffer, and on a local
+broker the two land within a percent of each other, so plotting both would rank
+them on measurement noise.
+"""
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
 class QueueResult:
@@ -104,6 +116,8 @@ def read_results(json_path: pathlib.Path) -> list[QueueResult]:
     ]
     results = []
     for queue_name in queue_names:
+        if queue_name in DIAGNOSTIC_QUEUES:
+            continue
         process = means[("test_process_queue__benchmark", queue_name)]
         start = means[("test_start_worker__benchmark", queue_name)]
         enqueue = means[("test_enqueue__benchmark", queue_name)]
@@ -139,20 +153,30 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     """Return the chart as an SVG document drawn in the given theme."""
     fastest = results[0]
     scale = PLOT_WIDTH / fastest.throughput
-    row_centers = [110 + index * 40 for index in range(len(results))]
+    minimum_task_count = min(result.task_count for result in results)
+    maximum_task_count = max(result.task_count for result in results)
+    depth_label = (
+        f"{minimum_task_count:,}"
+        if minimum_task_count == maximum_task_count
+        else f"{minimum_task_count:,}–{maximum_task_count:,}"
+    )
+    row_centers = [
+        FIRST_ROW_CENTER + index * ROW_HEIGHT for index in range(len(results))
+    ]
+    height = row_centers[-1] + FOOTNOTE_GAP + BOTTOM_PADDING
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {HEIGHT}" '
-        f'width="{WIDTH}" height="{HEIGHT}" role="img" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
+        f'width="{WIDTH}" height="{height}" role="img" '
         f'aria-label="{describe(results)}.">',
         "<style>svg{max-width:100%;height:auto}</style>",
-        f'<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{HEIGHT - 1}" rx="14" '
+        f'<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="14" '
         f'fill="{theme.canvas}" stroke="{theme.border}"/>',
         text(28, 46, "Queue throughput", theme=theme, size=19, weight=700),
         text(
             28,
             68,
-            f"{fastest.task_count:,} trivial tasks per queue · one worker process, "
+            f"{depth_label} trivial tasks per queue · one worker process, "
             "one thread · higher is better",
             theme=theme,
             size=12.5,
@@ -195,8 +219,9 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     parts.append(
         text(
             28,
-            row_centers[-1] + 38,
-            "One message in flight per worker — no queue reads ahead.",
+            row_centers[-1] + FOOTNOTE_GAP,
+            "Threadmill reads a batch ahead; every other worker reads one message "
+            "at a time.",
             theme=theme,
             size=11.5,
             fill=theme.faint,
