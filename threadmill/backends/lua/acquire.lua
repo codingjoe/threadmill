@@ -1,6 +1,6 @@
--- Lease the next ready task for the calling worker: returns the task ID and its
--- stored payload, or nil when no queue has a task. Queues are tried round-robin
--- from ARGV[7], so a backlogged queue cannot starve its neighbours.
+-- Lease the next ready task for the calling worker: returns its stored payload,
+-- or nil when no queue has a task. Queues are tried round-robin from ARGV[7], so
+-- a backlogged queue cannot starve its neighbours.
 --
 -- The payload comes back as it was enqueued. Apply the lease stamped beside it
 -- (lease_worker, lease_started_at) to report the task as RUNNING.
@@ -16,8 +16,8 @@
 -- ARGV[6]     -- lease TTL in milliseconds
 -- ARGV[7]     -- start_index; 0-based index of the queue pair to scan first, so
 --                start_index 0 is the pair at KEYS[1] and KEYS[2]
--- Returns: the task ID and its stored data, or nil when no queue yields a task.
--- An entry whose hash holds no data returns nil too, leaving its queue unleased.
+-- Returns: the stored payload, or nil when no queue yields a task. An entry
+-- whose hash holds no data returns nil too, leaving its queue unleased.
 
 local num_queues = tonumber(ARGV[4])
 local lease_ttl_ms = tonumber(ARGV[6])
@@ -33,7 +33,7 @@ for offset = 0, num_queues - 1 do
       local deadline = tonumber(ARGV[1]) + lease_ttl_ms
       redis.call('ZADD', KEYS[queue_index * 2 - 1], deadline, task_id)
       redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'lease_started_at', ARGV[2])
-      return {task_id, data}
+      return data
     end
   end
 end

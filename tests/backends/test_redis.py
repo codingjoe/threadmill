@@ -13,7 +13,6 @@ from unittest.mock import patch
 import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
-from django.tasks.exceptions import InvalidTask, InvalidTaskBackend
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -84,15 +83,14 @@ class RecordingAcquireScript:
 def _make_backend(
     alias: str,
     queues: list[str] | None = None,
-    redis_url: str = "redis://localhost:6379/0",
     **options: datetime.timedelta,
 ) -> RedisTaskBackend:
-    """Build a backend with per-test options, queue names, and Redis URL."""
+    """Build a backend with per-test options and queue names."""
     return RedisTaskBackend(
         alias,
         {
             "QUEUES": queues or ["default"],
-            "REDIS_URL": redis_url,
+            "REDIS_URL": "redis://localhost:6379/0",
             "OPTIONS": {
                 "lease_ttl": datetime.timedelta(hours=1),
                 "result_ttl": datetime.timedelta(seconds=60),
@@ -208,14 +206,14 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap_claimed_task__skips_when_task_data_is_missing(self, caplog):
-        """Skip a claimed task whose stored payload is gone."""
+    def test_reap_task__skips_when_task_data_is_missing(self, caplog):
+        """_reap_task logs and skips when the claimed task data is gone."""
         backend = _make_backend("reap_missing_data_test")
         try:
             broker = RedisBroker(backend)
-            with caplog.at_level(logging.DEBUG, logger="threadmill.backends.redis"):
-                broker._reap_claimed_task(b"missing-task-id")
-            assert "has no stored payload; skipping" in caplog.text
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                broker._reap_task("missing-task-id")
+            assert "has no task data" in caplog.text
         finally:
             backend.close()
 
@@ -273,254 +271,32 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap_running_queue__logs_and_continues_after_task_error(self, caplog):
-        """Log an unreadable claim, leave it stored, and keep reaping the batch."""
+    def test_reap_running_queue__logs_and_continues_when_retry_callback_is_gone(
+        self, caplog
+    ):
+        """A batch keeps reaping when a task's retry callback is gone from the code base."""
         backend = _make_backend(
-            "reap_error_test", lease_ttl=datetime.timedelta(seconds=1)
+            "reap_gone_callback_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
-            task_ids = []
-            for _index in range(3):
+            for _index in range(2):
                 task_result = backend.enqueue(boom_no_retry, args=[])
                 acquired = backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="worker-1"
                 )
                 assert acquired is not None
                 _expire_lease(backend, task_result.id)
-                task_ids.append(task_result.id)
+                task_key = backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=task_result.id
+                )
+                payload = json.loads(backend.client.hget(task_key, "data"))
+                payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
+                backend.client.hset(task_key, "data", json.dumps(payload))
 
-            unreadable_id, gone_id, recovered_id = task_ids
-            backend.client.hset(
-                backend.TASK_KEY.format(
-                    prefix=backend.key_prefix, task_id=unreadable_id
-                ),
-                "data",
-                "{not json",
-            )
-            gone_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=gone_id
-            )
-            payload = json.loads(backend.client.hget(gone_key, "data"))
-            payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
-            backend.client.hset(gone_key, "data", json.dumps(payload))
-
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert caplog.text.count("has an unreadable payload") == 2
-            assert unreadable_id in caplog.text
-            assert gone_id in caplog.text
-            assert backend.get_result(recovered_id).status == TaskResultStatus.FAILED
-
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            for task_id in (unreadable_id, gone_id):
-                assert (
-                    backend.client.exists(
-                        backend.TASK_KEY.format(
-                            prefix=backend.key_prefix, task_id=task_id
-                        )
-                    )
-                    == 1
-                )
-                assert backend.client.zscore(running_key, task_id) is not None
-                assert (
-                    backend.client.exists(
-                        backend.RESULT_KEY.format(
-                            prefix=backend.key_prefix, result_id=task_id
-                        )
-                    )
-                    == 0
-                )
-        finally:
-            backend.close()
-
-    def test_reap_running_queue__reports_str_claim_and_continues(self, caplog):
-        """Report a str claim a decode_responses client yields and finish the batch."""
-        backend = _make_backend(
-            "reap_str_claim_test", lease_ttl=datetime.timedelta(seconds=1)
-        )
-        try:
-            task_ids = []
-            for _index in range(3):
-                task_result = backend.enqueue(echo, args=[1])
-                acquired = backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="worker-1"
-                )
-                assert acquired is not None
-                _expire_lease(backend, task_result.id)
-                task_ids.append(task_result.id)
-
-            str_backend = _make_backend(
-                "reap_str_claim_test",
-                redis_url="redis://localhost:6379/0?decode_responses=true",
-            )
-            try:
-                with caplog.at_level(
-                    logging.WARNING, logger="threadmill.backends.redis"
-                ):
-                    RedisBroker(str_backend)._reap_running_queue("default")
-            finally:
-                str_backend.close()
-
-            assert caplog.text.count("has an unreadable payload") == len(task_ids)
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            for task_id in task_ids:
-                assert task_id in caplog.text
-                assert backend.client.zscore(running_key, task_id) is not None
-                assert (
-                    backend.client.exists(
-                        backend.RESULT_KEY.format(
-                            prefix=backend.key_prefix, result_id=task_id
-                        )
-                    )
-                    == 0
-                )
-        finally:
-            backend.close()
-
-
-def _poison_to_unknown_result_field(payload: dict) -> str:
-    """Return a stored payload whose result carries a field TaskResult rejects."""
-    payload["bogus"] = 1
-    return json.dumps(payload)
-
-
-def _poison_to_missing_status(payload: dict) -> str:
-    """Return a stored payload whose result has no status."""
-    del payload["status"]
-    return json.dumps(payload)
-
-
-def _poison_to_unimportable_retry(payload: dict) -> str:
-    """Return a stored payload whose retry callback no longer imports."""
-    payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
-    return json.dumps(payload)
-
-
-def _poison_to_invalid_priority(payload: dict) -> str:
-    """Return a stored payload whose task priority is out of range."""
-    payload["task"]["priority"] = 999
-    return json.dumps(payload)
-
-
-def _poison_to_unknown_backend_alias(payload: dict) -> str:
-    """Return a stored payload whose task names a backend that does not exist."""
-    payload["task"]["backend"] = "no-such-backend"
-    return json.dumps(payload)
-
-
-def _poison_to_integer_run_after(payload: dict) -> str:
-    """Return a stored payload whose run_after is an integer, not an ISO string."""
-    payload["task"]["run_after"] = 123
-    return json.dumps(payload)
-
-
-def _apply_poison(
-    payload: dict, poison: str | collections.abc.Callable[[dict], str]
-) -> str:
-    """Return the stored payload a case calls for: a literal, or a transformer's result."""
-    if callable(poison):
-        return poison(payload)
-    return poison
-
-
-UNREADABLE_PAYLOAD_CASES = [
-    pytest.param("{not json", ValueError, id="value-error-unparseable-json"),
-    pytest.param("", ValueError, id="value-error-empty-payload"),
-    pytest.param(
-        _poison_to_unknown_result_field, TypeError, id="type-error-unexpected-field"
-    ),
-    pytest.param("[1, 2, 3]", AttributeError, id="attribute-error-json-list"),
-    pytest.param(
-        _poison_to_integer_run_after,
-        AttributeError,
-        id="attribute-error-integer-run-after",
-    ),
-    pytest.param(_poison_to_missing_status, KeyError, id="key-error-missing-status"),
-    pytest.param(
-        _poison_to_unimportable_retry, ImportError, id="import-error-unimportable-retry"
-    ),
-    pytest.param(_poison_to_invalid_priority, InvalidTask, id="invalid-task-priority"),
-    pytest.param(
-        _poison_to_unknown_backend_alias,
-        InvalidTaskBackend,
-        id="invalid-task-backend-unknown-alias",
-    ),
-]
-
-
-class TestUnreadablePayloadErrors:
-    """Verify each named unreadable-payload failure against a stored payload."""
-
-    @pytest.mark.parametrize(("poison", "expected_error"), UNREADABLE_PAYLOAD_CASES)
-    def test_reap_claimed_task__leaves_payload_as_stored(
-        self, caplog, poison, expected_error
-    ):
-        """Leave a payload whose read raises the named failure as stored."""
-        backend = _make_backend("reap_unreadable_case")
-        try:
-            task_result = backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="unreadable-case"
-            )
-            assert acquired is not None
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=task_result.id
-            )
-            poisoned = _apply_poison(
-                json.loads(backend.client.hget(task_key, "data")), poison
-            )
-            backend.client.hset(task_key, "data", poisoned)
-
-            with pytest.raises(expected_error):
-                backend.get_leased_task(task_result.id)
-
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                RedisBroker(backend)._reap_claimed_task(task_result.id.encode())
-
-            assert backend.client.hget(task_key, "data") == poisoned.encode()
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, task_result.id) is not None
-            assert (
-                backend.client.exists(
-                    backend.RESULT_KEY.format(
-                        prefix=backend.key_prefix, result_id=task_result.id
-                    )
-                )
-                == 0
-            )
-            assert "has an unreadable payload" in caplog.text
-        finally:
-            backend.close()
-
-    @pytest.mark.parametrize(("poison", "expected_error"), UNREADABLE_PAYLOAD_CASES)
-    def test_acquire__leaves_payload_as_stored(self, caplog, poison, expected_error):
-        """Keep scanning past a payload whose read raises the named failure."""
-        backend = _make_backend("acquire_unreadable_case")
-        try:
-            poisoned_task = backend.enqueue(echo, args=[1])
-            healthy_task = backend.enqueue(echo, args=[2])
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=poisoned_task.id
-            )
-            poisoned = _apply_poison(
-                json.loads(backend.client.hget(task_key, "data")), poison
-            )
-            backend.client.hset(task_key, "data", poisoned)
-
-            with pytest.raises(expected_error):
-                backend.get_leased_task(poisoned_task.id)
-
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                acquired = backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="unreadable-case"
-                )
-
-            assert acquired.id == healthy_task.id
-            assert backend.client.hget(task_key, "data") == poisoned.encode()
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, poisoned_task.id) is not None
-            assert "has an unreadable payload" in caplog.text
+            assert caplog.text.count("gone from the code base") == 2
         finally:
             backend.close()
 
@@ -654,96 +430,6 @@ class TestRedisTaskBackend:
                 backend.deserialize_task_result(enqueued_data).status
                 == TaskResultStatus.READY
             )
-        finally:
-            backend.close()
-
-    @pytest.mark.parametrize("payload", ["{not json", ""])
-    def test_acquire__leaves_unreadable_payload_as_stored(self, caplog, payload):
-        """Leave a payload acquire() cannot read as stored and keep scanning."""
-        backend = _make_backend("acquire_unreadable_test")
-        try:
-            poisoned = backend.enqueue(echo, args=[1])
-            healthy = backend.enqueue(echo, args=[2])
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=poisoned.id
-            )
-            backend.client.hset(task_key, "data", payload)
-
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                acquired = backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="unreadable-test"
-                )
-
-            assert acquired.id == healthy.id
-            assert backend.client.exists(task_key) == 1
-            assert (
-                backend.client.zscore(
-                    backend._segment_key(TaskResultStatus.RUNNING, "default"),
-                    poisoned.id,
-                )
-                is not None
-            )
-            assert "has an unreadable payload" in caplog.text
-            assert poisoned.id in caplog.text
-        finally:
-            backend.close()
-
-    def test_acquire__leaves_payload_with_gone_retry_callback_as_stored(self, caplog):
-        """Leave a payload whose retry callback no longer imports as stored."""
-        backend = _make_backend("acquire_gone_retry_test")
-        try:
-            poisoned = backend.enqueue(boom_no_retry, args=[])
-            healthy = backend.enqueue(echo, args=[2])
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=poisoned.id
-            )
-            payload = json.loads(backend.client.hget(task_key, "data"))
-            payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
-            backend.client.hset(task_key, "data", json.dumps(payload))
-
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                acquired = backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="gone-retry-test"
-                )
-
-            assert acquired.id == healthy.id
-            assert backend.client.exists(task_key) == 1
-            assert (
-                backend.client.zscore(
-                    backend._segment_key(TaskResultStatus.RUNNING, "default"),
-                    poisoned.id,
-                )
-                is not None
-            )
-            assert "has an unreadable payload" in caplog.text
-            assert poisoned.id in caplog.text
-        finally:
-            backend.close()
-
-    def test_acquire__leaves_str_reply_as_stored(self, caplog):
-        """Read the str payload a decode_responses=True client yields as unreadable."""
-        backend = _make_backend(
-            "acquire_str_reply_test",
-            redis_url="redis://localhost:6379/0?decode_responses=true",
-        )
-        backend._acquire_script = CountingAcquireScript(backend._acquire_script)
-        try:
-            task_result = backend.enqueue(echo, args=[1])
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=task_result.id
-            )
-            stored = backend.client.hget(task_key, "data")
-
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                with pytest.raises(TimeoutError):
-                    backend.acquire(
-                        timeout=datetime.timedelta(seconds=0.2),
-                        worker="str-reply-test",
-                    )
-
-            assert len(backend._acquire_script.calls) > 1
-            assert backend.client.hget(task_key, "data") == stored
-            assert task_result.id in caplog.text
         finally:
             backend.close()
 
@@ -1246,7 +932,7 @@ class TestRedisTaskBackend:
         assert result.started_at is None
 
     def test_peek__running_task_with_malformed_lease(self):
-        """Peek RUNNING ignores a lease start that is not a datetime."""
+        """Peek RUNNING raises on a lease start Redis data no longer carries."""
         task_result = default_task_backend.enqueue(echo, args=[1])
         default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="malformed-test"
@@ -1254,17 +940,14 @@ class TestRedisTaskBackend:
         task_key = default_task_backend.TASK_KEY.format(
             prefix=default_task_backend.key_prefix, task_id=task_result.id
         )
-        default_task_backend.client.hset(
-            task_key, "lease_started_at", "not-a-timestamp"
-        )
+        default_task_backend.client.hset(task_key, "lease_started_at", "not-a-time")
 
-        (result,) = default_task_backend.peek(
-            queue_name="default", status=TaskResultStatus.RUNNING, count=10
-        )
-
-        assert result.status == TaskResultStatus.RUNNING
-        assert result.worker_ids == ["malformed-test"]
-        assert result.started_at is None
+        with pytest.raises(ValueError):
+            list(
+                default_task_backend.peek(
+                    queue_name="default", status=TaskResultStatus.RUNNING, count=10
+                )
+            )
 
     def test_peek__running_tasks_skip_expired_task_data(self):
         """Peek RUNNING skips leased entries whose task data hash has expired."""
@@ -1285,32 +968,6 @@ class TestRedisTaskBackend:
         )
 
         assert results == []
-
-    def test_peek__running_tasks_skip_unreadable_payload_between_rows(self):
-        """Skip an unreadable row and still yield the readable rows around it."""
-        first_task = default_task_backend.enqueue(echo, args=[1])
-        poisoned_task = default_task_backend.enqueue(echo, args=[2])
-        last_task = default_task_backend.enqueue(echo, args=[3])
-        for _index in range(3):
-            acquired = default_task_backend.acquire(
-                timeout=datetime.timedelta(seconds=1), worker="poison-peek-test"
-            )
-            assert acquired is not None
-        default_task_backend.client.hset(
-            default_task_backend.TASK_KEY.format(
-                prefix=default_task_backend.key_prefix, task_id=poisoned_task.id
-            ),
-            "data",
-            "{not json",
-        )
-
-        results = list(
-            default_task_backend.peek(
-                queue_name="default", status=TaskResultStatus.RUNNING, count=10
-            )
-        )
-
-        assert [result.id for result in results] == [first_task.id, last_task.id]
 
     def test_peek__successful_and_failed_history(self):
         """Peek SUCCESSFUL/FAILED filter acknowledged results by status."""

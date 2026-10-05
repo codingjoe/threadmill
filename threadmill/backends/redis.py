@@ -14,11 +14,7 @@ from pathlib import Path
 import redis
 import redis.asyncio
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
-from django.tasks.exceptions import (
-    InvalidTask,
-    InvalidTaskBackend,
-    TaskResultDoesNotExist,
-)
+from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
 from django.utils import timezone
 
@@ -45,25 +41,10 @@ def _load_lua(name: str) -> str:
 
 
 def _parse_lease_started_at(value: bytes | None) -> datetime.datetime | None:
-    """Return the lease start stored on a task hash, if it parses as a datetime."""
+    """Return the lease start stored on a task hash, or None when it holds none."""
     if not value:
         return None
-    try:
-        return datetime.datetime.fromisoformat(value.decode())
-    except ValueError:
-        return None
-
-
-# Failures a stored payload raises when this code cannot read it as a task.
-UNREADABLE_PAYLOAD_ERRORS = (
-    ValueError,
-    TypeError,
-    AttributeError,
-    KeyError,
-    ImportError,
-    InvalidTask,
-    InvalidTaskBackend,
-)
+    return datetime.datetime.fromisoformat(value.decode())
 
 
 class RedisBroker(Broker):
@@ -112,25 +93,21 @@ class RedisBroker(Broker):
             ],
         )
         for member in claimed_ids:
-            self._reap_claimed_task(member)
-
-    def _reap_claimed_task(self, member: bytes) -> None:
-        """Requeue or fail one claimed task, or leave an unreadable payload as stored."""
-        try:
             task_id = member.decode()
-            task_result = self.backend.get_leased_task(task_id)
-        except UNREADABLE_PAYLOAD_ERRORS:
-            logger.warning(
-                "Task %r has an unreadable payload; leaving it as stored", member
-            )
-            return
-        if task_result is None:
-            logger.debug("Task %r has no stored payload; skipping", task_id)
-            return
-        self._reap_task(task_result)
+            try:
+                self._reap_task(task_id)
+            except ImportError:
+                logger.exception(
+                    "Task %r retry callback is gone from the code base; "
+                    "skipping the reap",
+                    task_id,
+                )
 
-    def _reap_task(self, task_result: TaskResult) -> None:
+    def _reap_task(self, task_id: str) -> None:
         """Requeue or fail a claimed task."""
+        if (task_result := self.backend.get_leased_task(task_id)) is None:
+            logger.warning("Claimed task %r has no task data; skipping", task_id)
+            return
         now = timezone.now()
         task_result = dataclasses.replace(
             task_result,
@@ -304,7 +281,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             mapping={
                 "data": serialized,
                 "score": str(score),
-                "queue_name": task.queue_name,
             },
         )
         pipe.expire(task_key, task_data_ttl)
@@ -347,7 +323,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             now_ms = now.timestamp() * 1000
             now_iso = now.isoformat()
 
-            if reply := self._acquire_script(
+            if data := self._acquire_script(
                 keys=keys,
                 args=[
                     str(now_ms),
@@ -359,22 +335,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     str(self._rotation_offset),
                 ],
             ):
-                try:
-                    task_result = self._apply_lease(
-                        self.deserialize_task_result(reply[1].decode()),
-                        worker=worker,
-                        lease_started_at=now,
-                    )
-                except UNREADABLE_PAYLOAD_ERRORS:
-                    logger.warning(
-                        "Task %r has an unreadable payload; leaving it as stored",
-                        reply[0],
-                    )
-                    continue
-
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
-                return task_result
+                return self._apply_lease(
+                    self.deserialize_task_result(data.decode()),
+                    worker=worker,
+                    lease_started_at=now,
+                )
 
             try:
                 remaining = deadline - time.monotonic()
@@ -535,8 +502,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     ) -> Generator[TaskResult]:
         """Yield up to `count` stored tasks in queue order.
 
-        Leased tasks are yielded as their lease reports them; an entry whose
-        payload will not read is skipped.
+        Leased tasks are yielded as their lease reports them.
         """
         pipe = self.client.pipeline()
         for member in self.client.zrange(zset_key, 0, count - 1):
@@ -550,22 +516,17 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         for stored in pipe.execute():
             if not stored:
                 continue
-            try:
-                if leased:
-                    data, lease_worker, lease_started_at = stored
-                    if not data:
-                        continue
-                    task_result = self._apply_lease(
-                        self.deserialize_task_result(data.decode()),
-                        worker=lease_worker.decode() if lease_worker else None,
-                        lease_started_at=_parse_lease_started_at(lease_started_at),
-                    )
-                else:
-                    task_result = self.deserialize_task_result(stored.decode())
-            except UNREADABLE_PAYLOAD_ERRORS:
-                task_result = None
-            if task_result is not None:
-                yield task_result
+            if leased:
+                data, lease_worker, lease_started_at = stored
+                if not data:
+                    continue
+                yield self._apply_lease(
+                    self.deserialize_task_result(data.decode()),
+                    worker=lease_worker.decode() if lease_worker else None,
+                    lease_started_at=_parse_lease_started_at(lease_started_at),
+                )
+            else:
+                yield self.deserialize_task_result(stored.decode())
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
         """Yield up to `count` finished results in finish order."""
@@ -626,8 +587,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         try:
             async for message in pubsub.listen():
                 if (data := message.get("data")) is not None:
-                    payload = data.decode()
-                    direction, _, queue_name = payload.partition(":")
+                    direction, _, queue_name = data.decode().partition(":")
                     try:
                         event = TelemetryEvent(
                             direction=TelemetryDirection(direction),
