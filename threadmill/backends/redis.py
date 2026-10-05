@@ -86,7 +86,7 @@ class RedisBroker(Broker):
             ],
         )
         for member in claimed_ids:
-            task_id = member.decode() if isinstance(member, bytes) else member
+            task_id = member.decode()
             try:
                 self._reap_task(task_id)
             except ImportError:
@@ -94,10 +94,6 @@ class RedisBroker(Broker):
                     "Task %r retry callback is gone from the code base; "
                     "skipping the reap",
                     task_id,
-                )
-            except TypeError, ValueError:
-                logger.exception(
-                    "Task %r has an unreadable payload; skipping the reap", task_id
                 )
 
     def _reap_task(self, task_id: str) -> None:
@@ -460,7 +456,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     ) -> Generator[TaskResult]:
         pipe = self.client.pipeline()
         for member in self.client.zrange(zset_key, 0, count - 1):
-            member_id = member.decode() if isinstance(member, bytes) else member
+            member_id = member.decode()
             data_key = data_key_template.format(
                 prefix=self.key_prefix,
                 task_id=member_id,
@@ -472,9 +468,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 pipe.hget(data_key, field)
         for data in pipe.execute():
             if data:
-                yield self.deserialize_task_result(
-                    data.decode() if isinstance(data, bytes) else data
-                )
+                yield self.deserialize_task_result(data.decode())
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
@@ -523,8 +517,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         try:
             async for message in pubsub.listen():
                 if (data := message.get("data")) is not None:
-                    payload = data.decode() if isinstance(data, bytes) else data
-                    direction, _, queue_name = payload.partition(":")
+                    direction, _, queue_name = data.decode().partition(":")
                     try:
                         event = TelemetryEvent(
                             direction=TelemetryDirection(direction),

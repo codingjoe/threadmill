@@ -128,7 +128,7 @@ def _claim_expired(
             f"{backend.key_prefix}:task:",
         ],
     )
-    return [item.decode() if isinstance(item, bytes) else item for item in claimed]
+    return [item.decode() for item in claimed]
 
 
 class TestRedisBroker:
@@ -265,43 +265,32 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap_running_queue__logs_and_continues_after_task_error(self, caplog):
-        """A failing reap decision is logged per cause and does not stop the batch."""
+    def test_reap_running_queue__logs_and_continues_when_retry_callback_is_gone(
+        self, caplog
+    ):
+        """A batch keeps reaping when a task's retry callback is gone from the code base."""
         backend = _make_backend(
-            "reap_error_test", lease_ttl=datetime.timedelta(seconds=1)
+            "reap_gone_callback_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
-            task_ids = []
-            for _index in range(3):
+            for _index in range(2):
                 task_result = backend.enqueue(boom_no_retry, args=[])
                 acquired = backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="worker-1"
                 )
                 assert acquired is not None
                 _expire_lease(backend, task_result.id)
-                task_ids.append(task_result.id)
-
-            unreadable_id, gone_id, recovered_id = task_ids
-            backend.client.hset(
-                backend.TASK_KEY.format(
-                    prefix=backend.key_prefix, task_id=unreadable_id
-                ),
-                "data",
-                "{not json",
-            )
-            gone_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=gone_id
-            )
-            payload = json.loads(backend.client.hget(gone_key, "data"))
-            payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
-            backend.client.hset(gone_key, "data", json.dumps(payload))
+                task_key = backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=task_result.id
+                )
+                payload = json.loads(backend.client.hget(task_key, "data"))
+                payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
+                backend.client.hset(task_key, "data", json.dumps(payload))
 
             with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert "has an unreadable payload" in caplog.text
-            assert "gone from the code base" in caplog.text
-            assert backend.get_result(recovered_id).status == TaskResultStatus.FAILED
+            assert caplog.text.count("gone from the code base") == 2
         finally:
             backend.close()
 

@@ -119,6 +119,9 @@ uv run manage.py threadmill inspector
 
 ### Redis Backend Options
 
+> [!IMPORTANT]
+> Threadmill requires a persistent Redis without eviction.
+
 The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 `TASKS` configuration:
 
