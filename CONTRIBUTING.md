@@ -13,6 +13,13 @@ curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/m
 - Consistency – We never lose data, even if someone unplugs the power or network.
 - Utilization – We keep the CPU saturated with tasks, not with idle time or waiting for locks.
 
+We require a persistent Redis without eviction.
+
+Redis connections use the redis-py default `decode_responses=False`, so all
+values read from Redis are bytes. We do not guard against misconfiguration.
+We fail loudly instead. The same goes for Redis data altered mid-flight.
+These are deliberate design decisions.
+
 ## Testing
 
 We have unit tests, integration tests, and benchmarks. Avoid mocking if possible.
