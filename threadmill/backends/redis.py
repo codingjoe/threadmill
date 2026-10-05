@@ -267,7 +267,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             mapping={
                 "data": serialized,
                 "score": str(score),
-                "queue_name": task.queue_name,
             },
         )
         pipe.expire(task_key, task_data_ttl)
