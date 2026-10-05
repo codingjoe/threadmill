@@ -44,12 +44,12 @@ def _load_lua(name: str) -> str:
     return (_LUA_DIR / f"{name}.lua").read_text()
 
 
-def _decode_text(value: bytes | str | None) -> str:
+def _decode_text(value: bytes | None) -> str:
     """Return a Redis reply as text, or an empty string when it is missing."""
-    return value.decode() if isinstance(value, bytes) else value or ""
+    return value.decode() if value is not None else ""
 
 
-def _parse_lease_started_at(value: bytes | str | None) -> datetime.datetime | None:
+def _parse_lease_started_at(value: bytes | None) -> datetime.datetime | None:
     """Return the lease start stored on a task hash, if it parses as a datetime."""
     text = _decode_text(value)
     if not text:
@@ -118,15 +118,16 @@ class RedisBroker(Broker):
             ],
         )
         for member in claimed_ids:
-            self._reap_claimed_task(_decode_text(member))
+            self._reap_claimed_task(member)
 
-    def _reap_claimed_task(self, task_id: str) -> None:
+    def _reap_claimed_task(self, member: bytes) -> None:
         """Requeue or fail one claimed task, or leave an unreadable payload as stored."""
         try:
+            task_id = _decode_text(member)
             task_result = self.backend.get_leased_task(task_id)
         except UNREADABLE_PAYLOAD_ERRORS:
             logger.warning(
-                "Task %r has an unreadable payload; leaving it as stored", task_id
+                "Task %r has an unreadable payload; leaving it as stored", member
             )
             return
         if task_result is None:
@@ -218,7 +219,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         if data is None:
             return None
         return self._apply_lease(
-            self.deserialize_task_result(data),
+            self.deserialize_task_result(_decode_text(data)),
             worker=_decode_text(lease_worker) or None,
             lease_started_at=_parse_lease_started_at(lease_started_at),
         )
@@ -364,17 +365,16 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     str(self._rotation_offset),
                 ],
             ):
-                task_id, data = _decode_text(reply[0]), reply[1]
                 try:
                     task_result = self._apply_lease(
-                        self.deserialize_task_result(data),
+                        self.deserialize_task_result(_decode_text(reply[1])),
                         worker=worker,
                         lease_started_at=now,
                     )
                 except UNREADABLE_PAYLOAD_ERRORS:
                     logger.warning(
                         "Task %r has an unreadable payload; leaving it as stored",
-                        task_id,
+                        reply[0],
                     )
                     continue
 
@@ -562,12 +562,12 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     if not data:
                         continue
                     task_result = self._apply_lease(
-                        self.deserialize_task_result(data),
+                        self.deserialize_task_result(_decode_text(data)),
                         worker=_decode_text(lease_worker) or None,
                         lease_started_at=_parse_lease_started_at(lease_started_at),
                     )
                 else:
-                    task_result = self.deserialize_task_result(stored)
+                    task_result = self.deserialize_task_result(_decode_text(stored))
             except UNREADABLE_PAYLOAD_ERRORS:
                 task_result = None
             if task_result is not None:
@@ -583,13 +583,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             pipe.get(result_key)
         for stored in pipe.execute():
             if stored:
-                yield self.deserialize_task_result(stored)
+                yield self.deserialize_task_result(_decode_text(stored))
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
             self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
         ):
-            return self.deserialize_task_result(data)
+            return self.deserialize_task_result(_decode_text(data))
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
 
     async def queue_stats(

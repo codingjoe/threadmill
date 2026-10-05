@@ -82,14 +82,15 @@ class RecordingAcquireScript:
 def _make_backend(
     alias: str,
     queues: list[str] | None = None,
+    redis_url: str = "redis://localhost:6379/0",
     **options: datetime.timedelta,
 ) -> RedisTaskBackend:
-    """Build a backend with per-test options and queue names."""
+    """Build a backend with per-test options, queue names, and Redis URL."""
     return RedisTaskBackend(
         alias,
         {
             "QUEUES": queues or ["default"],
-            "REDIS_URL": "redis://localhost:6379/0",
+            "REDIS_URL": redis_url,
             "OPTIONS": {
                 "lease_ttl": datetime.timedelta(hours=1),
                 "result_ttl": datetime.timedelta(seconds=60),
@@ -141,11 +142,11 @@ class TestDecodeText:
 
     @pytest.mark.parametrize(
         ("reply", "expected"),
-        [(b"stored", "stored"), ("stored", "stored"), (None, "")],
-        ids=["bytes", "str", "missing"],
+        [(b"stored", "stored"), (None, "")],
+        ids=["bytes", "missing"],
     )
     def test_decode_text__returns_text(self, reply, expected):
-        """Return both reply types as text; a missing reply as empty text."""
+        """Return a bytes reply as text; a missing reply as empty text."""
         assert _decode_text(reply) == expected
 
 
@@ -224,7 +225,7 @@ class TestRedisBrokerReap:
         try:
             broker = RedisBroker(backend)
             with caplog.at_level(logging.DEBUG, logger="threadmill.backends.redis"):
-                broker._reap_claimed_task("missing-task-id")
+                broker._reap_claimed_task(b"missing-task-id")
             assert "has no stored payload; skipping" in caplog.text
         finally:
             backend.close()
@@ -344,6 +345,50 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
+    def test_reap_running_queue__reports_str_claim_and_continues(self, caplog):
+        """Report a str claim a decode_responses client yields and finish the batch."""
+        backend = _make_backend(
+            "reap_str_claim_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_ids = []
+            for _index in range(3):
+                task_result = backend.enqueue(echo, args=[1])
+                acquired = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="worker-1"
+                )
+                assert acquired is not None
+                _expire_lease(backend, task_result.id)
+                task_ids.append(task_result.id)
+
+            str_backend = _make_backend(
+                "reap_str_claim_test",
+                redis_url="redis://localhost:6379/0?decode_responses=true",
+            )
+            try:
+                with caplog.at_level(
+                    logging.WARNING, logger="threadmill.backends.redis"
+                ):
+                    RedisBroker(str_backend)._reap_running_queue("default")
+            finally:
+                str_backend.close()
+
+            assert caplog.text.count("has an unreadable payload") == len(task_ids)
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            for task_id in task_ids:
+                assert task_id in caplog.text
+                assert backend.client.zscore(running_key, task_id) is not None
+                assert (
+                    backend.client.exists(
+                        backend.RESULT_KEY.format(
+                            prefix=backend.key_prefix, result_id=task_id
+                        )
+                    )
+                    == 0
+                )
+        finally:
+            backend.close()
+
 
 def _poison_to_unparseable_json(payload: dict) -> str:
     """Return a stored payload that is not JSON at all."""
@@ -448,7 +493,7 @@ class TestUnreadablePayloadErrors:
                 backend.get_leased_task(task_result.id)
 
             with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                RedisBroker(backend)._reap_claimed_task(task_result.id)
+                RedisBroker(backend)._reap_claimed_task(task_result.id.encode())
 
             assert backend.client.hget(task_key, "data") == poisoned.encode()
             running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
@@ -687,6 +732,33 @@ class TestRedisTaskBackend:
             )
             assert "has an unreadable payload" in caplog.text
             assert poisoned.id in caplog.text
+        finally:
+            backend.close()
+
+    def test_acquire__leaves_str_reply_as_stored(self, caplog):
+        """Read the str payload a decode_responses=True client yields as unreadable."""
+        backend = _make_backend(
+            "acquire_str_reply_test",
+            redis_url="redis://localhost:6379/0?decode_responses=true",
+        )
+        backend._acquire_script = CountingAcquireScript(backend._acquire_script)
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            stored = backend.client.hget(task_key, "data")
+
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                with pytest.raises(TimeoutError):
+                    backend.acquire(
+                        timeout=datetime.timedelta(seconds=0.2),
+                        worker="str-reply-test",
+                    )
+
+            assert len(backend._acquire_script.calls) > 1
+            assert backend.client.hget(task_key, "data") == stored
+            assert task_result.id in caplog.text
         finally:
             backend.close()
 
