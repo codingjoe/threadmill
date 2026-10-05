@@ -63,6 +63,18 @@ class TestExponentialBackoff:
         delay = backoff(context)
         assert delay == backoff.max_delay
 
+    def test_call__returns_max_delay_for_large_attempt(self) -> None:
+        """Return max_delay instead of raising OverflowError above attempt 46."""
+        backoff = retry.ExponentialBackoff(
+            base_delay=datetime.timedelta(seconds=1),
+            max_delay=datetime.timedelta(hours=1),
+            factor=2.0,
+            max_retries=720,
+            expected_exceptions=(ValueError,),
+        )
+        context = _context(attempt=47, exception_class=ValueError)
+        assert backoff(context) == backoff.max_delay
+
     def test_call__returns_none_after_max_retries(self) -> None:
         """Return None when the attempt count reaches max_retries."""
         backoff = retry.ExponentialBackoff(
