@@ -1,3 +1,4 @@
+import asyncio
 import collections.abc
 import dataclasses
 import datetime
@@ -28,11 +29,12 @@ from threadmill.backends.base import (
     QueueCounts,
     QueueRates,
     QueueStats,
+    TelemetryDirection,
+    TelemetryEvent,
 )
 from threadmill.backends.redis import (  # noqa: E402
     RedisBroker,
     RedisTaskBackend,
-    _decode_text,
 )
 
 TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
@@ -134,20 +136,7 @@ def _claim_expired(
             f"{backend.key_prefix}:task:",
         ],
     )
-    return [item.decode() if isinstance(item, bytes) else item for item in claimed]
-
-
-class TestDecodeText:
-    """Tests for the Redis string reply decoder."""
-
-    @pytest.mark.parametrize(
-        ("reply", "expected"),
-        [(b"stored", "stored"), (None, "")],
-        ids=["bytes", "missing"],
-    )
-    def test_decode_text__returns_text(self, reply, expected):
-        """Return a bytes reply as text; a missing reply as empty text."""
-        assert _decode_text(reply) == expected
+    return [item.decode() for item in claimed]
 
 
 class TestRedisBroker:
@@ -390,16 +379,6 @@ class TestRedisBrokerReap:
             backend.close()
 
 
-def _poison_to_unparseable_json(payload: dict) -> str:
-    """Return a stored payload that is not JSON at all."""
-    return "{not json"
-
-
-def _poison_to_empty_payload(payload: dict) -> str:
-    """Return an empty stored payload."""
-    return ""
-
-
 def _poison_to_unknown_result_field(payload: dict) -> str:
     """Return a stored payload whose result carries a field TaskResult rejects."""
     payload["bogus"] = 1
@@ -430,26 +409,28 @@ def _poison_to_unknown_backend_alias(payload: dict) -> str:
     return json.dumps(payload)
 
 
-def _poison_to_json_list(payload: dict) -> str:
-    """Return a stored payload that is a JSON list, not a task mapping."""
-    return json.dumps([1, 2, 3])
-
-
 def _poison_to_integer_run_after(payload: dict) -> str:
     """Return a stored payload whose run_after is an integer, not an ISO string."""
     payload["task"]["run_after"] = 123
     return json.dumps(payload)
 
 
+def _apply_poison(
+    payload: dict, poison: str | collections.abc.Callable[[dict], str]
+) -> str:
+    """Return the stored payload a case calls for: a literal, or a transformer's result."""
+    if callable(poison):
+        return poison(payload)
+    return poison
+
+
 UNREADABLE_PAYLOAD_CASES = [
-    pytest.param(
-        _poison_to_unparseable_json, ValueError, id="value-error-unparseable-json"
-    ),
-    pytest.param(_poison_to_empty_payload, ValueError, id="value-error-empty-payload"),
+    pytest.param("{not json", ValueError, id="value-error-unparseable-json"),
+    pytest.param("", ValueError, id="value-error-empty-payload"),
     pytest.param(
         _poison_to_unknown_result_field, TypeError, id="type-error-unexpected-field"
     ),
-    pytest.param(_poison_to_json_list, AttributeError, id="attribute-error-json-list"),
+    pytest.param("[1, 2, 3]", AttributeError, id="attribute-error-json-list"),
     pytest.param(
         _poison_to_integer_run_after,
         AttributeError,
@@ -486,7 +467,9 @@ class TestUnreadablePayloadErrors:
             task_key = backend.TASK_KEY.format(
                 prefix=backend.key_prefix, task_id=task_result.id
             )
-            poisoned = poison(json.loads(backend.client.hget(task_key, "data")))
+            poisoned = _apply_poison(
+                json.loads(backend.client.hget(task_key, "data")), poison
+            )
             backend.client.hset(task_key, "data", poisoned)
 
             with pytest.raises(expected_error):
@@ -520,7 +503,9 @@ class TestUnreadablePayloadErrors:
             task_key = backend.TASK_KEY.format(
                 prefix=backend.key_prefix, task_id=poisoned_task.id
             )
-            poisoned = poison(json.loads(backend.client.hget(task_key, "data")))
+            poisoned = _apply_poison(
+                json.loads(backend.client.hget(task_key, "data")), poison
+            )
             backend.client.hset(task_key, "data", poisoned)
 
             with pytest.raises(expected_error):
@@ -1176,6 +1161,28 @@ class TestRedisTaskBackend:
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
+            backend.close()
+
+    async def test_worker_telemetry__yields_bytes_reply_as_event(self):
+        """worker_telemetry() decodes the bytes pub/sub reply and yields the event."""
+        backend = _make_backend("worker_telemetry_test")
+        try:
+            stream = backend.worker_telemetry()
+            pending = asyncio.ensure_future(anext(stream))
+            try:
+                for _attempt in range(50):
+                    if backend.client.pubsub_numsub(backend.telemetry_channel)[0][1]:
+                        break
+                    await asyncio.sleep(0.05)
+                backend.client.publish(backend.telemetry_channel, "ingress:default")
+                event = await asyncio.wait_for(pending, timeout=2)
+            finally:
+                await stream.aclose()
+
+            assert event == TelemetryEvent(
+                direction=TelemetryDirection.INGRESS, queue_name="default"
+            )
+        finally:
             backend.close()
 
     def _acknowledge(self, status: TaskResultStatus) -> str:

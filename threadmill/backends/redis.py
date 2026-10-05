@@ -44,18 +44,12 @@ def _load_lua(name: str) -> str:
     return (_LUA_DIR / f"{name}.lua").read_text()
 
 
-def _decode_text(value: bytes | None) -> str:
-    """Return a Redis reply as text, or an empty string when it is missing."""
-    return value.decode() if value is not None else ""
-
-
 def _parse_lease_started_at(value: bytes | None) -> datetime.datetime | None:
     """Return the lease start stored on a task hash, if it parses as a datetime."""
-    text = _decode_text(value)
-    if not text:
+    if not value:
         return None
     try:
-        return datetime.datetime.fromisoformat(text)
+        return datetime.datetime.fromisoformat(value.decode())
     except ValueError:
         return None
 
@@ -123,7 +117,7 @@ class RedisBroker(Broker):
     def _reap_claimed_task(self, member: bytes) -> None:
         """Requeue or fail one claimed task, or leave an unreadable payload as stored."""
         try:
-            task_id = _decode_text(member)
+            task_id = member.decode()
             task_result = self.backend.get_leased_task(task_id)
         except UNREADABLE_PAYLOAD_ERRORS:
             logger.warning(
@@ -219,8 +213,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         if data is None:
             return None
         return self._apply_lease(
-            self.deserialize_task_result(_decode_text(data)),
-            worker=_decode_text(lease_worker) or None,
+            self.deserialize_task_result(data.decode()),
+            worker=lease_worker.decode() if lease_worker else None,
             lease_started_at=_parse_lease_started_at(lease_started_at),
         )
 
@@ -367,7 +361,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             ):
                 try:
                     task_result = self._apply_lease(
-                        self.deserialize_task_result(_decode_text(reply[1])),
+                        self.deserialize_task_result(reply[1].decode()),
                         worker=worker,
                         lease_started_at=now,
                     )
@@ -547,7 +541,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe = self.client.pipeline()
         for member in self.client.zrange(zset_key, 0, count - 1):
             task_key = self.TASK_KEY.format(
-                prefix=self.key_prefix, task_id=_decode_text(member)
+                prefix=self.key_prefix, task_id=member.decode()
             )
             if leased:
                 pipe.hmget(task_key, "data", *self.LEASE_FIELDS)
@@ -562,12 +556,12 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     if not data:
                         continue
                     task_result = self._apply_lease(
-                        self.deserialize_task_result(_decode_text(data)),
-                        worker=_decode_text(lease_worker) or None,
+                        self.deserialize_task_result(data.decode()),
+                        worker=lease_worker.decode() if lease_worker else None,
                         lease_started_at=_parse_lease_started_at(lease_started_at),
                     )
                 else:
-                    task_result = self.deserialize_task_result(_decode_text(stored))
+                    task_result = self.deserialize_task_result(stored.decode())
             except UNREADABLE_PAYLOAD_ERRORS:
                 task_result = None
             if task_result is not None:
@@ -578,18 +572,18 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe = self.client.pipeline()
         for member in self.client.zrange(zset_key, 0, count - 1):
             result_key = self.RESULT_KEY.format(
-                prefix=self.key_prefix, result_id=_decode_text(member)
+                prefix=self.key_prefix, result_id=member.decode()
             )
             pipe.get(result_key)
         for stored in pipe.execute():
             if stored:
-                yield self.deserialize_task_result(_decode_text(stored))
+                yield self.deserialize_task_result(stored.decode())
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
             self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
         ):
-            return self.deserialize_task_result(_decode_text(data))
+            return self.deserialize_task_result(data.decode())
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
 
     async def queue_stats(
@@ -632,7 +626,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         try:
             async for message in pubsub.listen():
                 if (data := message.get("data")) is not None:
-                    payload = data.decode() if isinstance(data, bytes) else data
+                    payload = data.decode()
                     direction, _, queue_name = payload.partition(":")
                     try:
                         event = TelemetryEvent(
