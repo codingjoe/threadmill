@@ -41,10 +41,11 @@ def _load_lua(name: str) -> str:
 
 
 def _parse_lease_started_at(value: bytes | None) -> datetime.datetime | None:
-    """Return the lease start stored on a task hash, or None when it holds none."""
-    if not value:
+    """Return the lease start stamped beside a task, or None when the hash holds no timestamp."""
+    try:
+        return datetime.datetime.fromisoformat(value.decode())
+    except AttributeError, ValueError:
         return None
-    return datetime.datetime.fromisoformat(value.decode())
 
 
 class RedisBroker(Broker):

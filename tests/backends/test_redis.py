@@ -931,8 +931,8 @@ class TestRedisTaskBackend:
         assert result.last_attempted_at is None
         assert result.started_at is None
 
-    def test_peek__running_task_with_malformed_lease(self):
-        """Peek RUNNING raises on a lease start Redis data no longer carries."""
+    def test_peek__running_task_with_unparseable_lease_start(self):
+        """Read a lease start that is not a timestamp as no start time."""
         task_result = default_task_backend.enqueue(echo, args=[1])
         default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="malformed-test"
@@ -942,12 +942,13 @@ class TestRedisTaskBackend:
         )
         default_task_backend.client.hset(task_key, "lease_started_at", "not-a-time")
 
-        with pytest.raises(ValueError):
-            list(
-                default_task_backend.peek(
-                    queue_name="default", status=TaskResultStatus.RUNNING, count=10
-                )
-            )
+        (result,) = default_task_backend.peek(
+            queue_name="default", status=TaskResultStatus.RUNNING, count=10
+        )
+
+        assert result.status == TaskResultStatus.RUNNING
+        assert result.worker_ids == ["malformed-test"]
+        assert result.started_at is None
 
     def test_peek__running_tasks_skip_expired_task_data(self):
         """Peek RUNNING skips leased entries whose task data hash has expired."""
