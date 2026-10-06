@@ -40,6 +40,14 @@ def _load_lua(name: str) -> str:
     return (_LUA_DIR / f"{name}.lua").read_text()
 
 
+def _parse_lease_started_at(value: bytes | None) -> datetime.datetime | None:
+    """Return the lease start stamped beside a task, or None when the hash holds no timestamp."""
+    try:
+        return datetime.datetime.fromisoformat(value.decode())
+    except AttributeError, ValueError:
+        return None
+
+
 class RedisBroker(Broker):
     """Background maintenance broker for the Redis backend."""
 
@@ -98,32 +106,31 @@ class RedisBroker(Broker):
 
     def _reap_task(self, task_id: str) -> None:
         """Requeue or fail a claimed task."""
-        if data := self.backend._get_task_data(task_id):
-            task_result = self.backend.deserialize_task_result(data)
-            now = timezone.now()
-            task_result = dataclasses.replace(
-                task_result,
-                status=TaskResultStatus.FAILED,
-                finished_at=now,
-                errors=[
-                    *task_result.errors,
-                    self.backend.create_task_error(
-                        AcknowledgementTimeout("Task processing lease expired.")
-                    ),
-                ],
-            )
-            delay = self.backend.retry_delay(task_result)
-            logger.info(
-                "Task '%s@%s' lease expired",
-                task_result.id,
-                task_result.task.module_path,
-            )
-            if delay is None:
-                self.backend.acknowledge(task_result)
-            else:
-                self.backend.requeue(task_result, now + delay)
-        else:
+        if (task_result := self.backend.get_leased_task(task_id)) is None:
             logger.warning("Claimed task %r has no task data; skipping", task_id)
+            return
+        now = timezone.now()
+        task_result = dataclasses.replace(
+            task_result,
+            status=TaskResultStatus.FAILED,
+            finished_at=now,
+            errors=[
+                *task_result.errors,
+                self.backend.create_task_error(
+                    AcknowledgementTimeout("Task processing lease expired.")
+                ),
+            ],
+        )
+        delay = self.backend.retry_delay(task_result)
+        logger.info(
+            "Task '%s@%s' lease expired",
+            task_result.id,
+            task_result.task.module_path,
+        )
+        if delay is None:
+            self.backend.acknowledge(task_result)
+        else:
+            self.backend.requeue(task_result, now + delay)
 
     def main(self) -> None:
         """Run mover and running reaper passes for all queues."""
@@ -159,10 +166,12 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     SEGMENT_KEY = "{prefix}:{queue_name}:{status}"
     DEFERRED_KEY = "{prefix}:{queue_name}:deferred"
 
+    LEASE_FIELDS = ("lease_worker", "lease_started_at")
+
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
-    """Pop the next task from a priority queue and move it directly to the running set."""
+    """Pop the next task from a priority queue, lease it to the worker, and move it to the running set."""
     ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
     """Remove from running, persist the result, and clean up."""
 
@@ -173,9 +182,19 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             status=status.value.lower(),
         )
 
-    def _get_task_data(self, task_id: str) -> bytes | None:
+    def get_leased_task(self, task_id: str) -> TaskResult | None:
+        """Return a running task as its lease holds it, or None when its hash is gone."""
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
-        return self.client.hget(task_key, "data")
+        data, lease_worker, lease_started_at = self.client.hmget(
+            task_key, "data", *self.LEASE_FIELDS
+        )
+        if data is None:
+            return None
+        return self._apply_lease(
+            self.deserialize_task_result(data.decode()),
+            worker=lease_worker.decode() if lease_worker else None,
+            lease_started_at=_parse_lease_started_at(lease_started_at),
+        )
 
     def __init__(self, alias: str, params: dict) -> None:
         super().__init__(alias=alias, params=params)
@@ -319,7 +338,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             ):
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
-                return self.deserialize_task_result(data)
+                return self._apply_lease(
+                    self.deserialize_task_result(data.decode()),
+                    worker=worker,
+                    lease_started_at=now,
+                )
 
             try:
                 remaining = deadline - time.monotonic()
@@ -337,6 +360,30 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             )
             self._miss_count += 1
             time.sleep(interval_secs)
+
+    @staticmethod
+    def _apply_lease(
+        task_result: TaskResult,
+        *,
+        worker: str | None,
+        lease_started_at: datetime.datetime | None,
+    ) -> TaskResult:
+        """Return a stored task result as a running attempt.
+
+        `worker=None` means the lease records no worker; an empty string still
+        counts as an attempt, and a task that already records a start keeps it.
+        """
+        return dataclasses.replace(
+            task_result,
+            status=TaskResultStatus.RUNNING,
+            started_at=task_result.started_at or lease_started_at,
+            last_attempted_at=lease_started_at or task_result.last_attempted_at,
+            worker_ids=(
+                [*task_result.worker_ids, worker]
+                if worker is not None
+                else task_result.worker_ids
+            ),
+        )
 
     def acknowledge(self, task_result: TaskResult) -> None:
         serialized = self.serialize_task_result(task_result)
@@ -406,7 +453,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe.zrem(running_key, task_result.id)
         pipe.zrem(failed_key, task_result.id)
         pipe.delete(result_key)
-        pipe.hset(task_key, mapping={"data": serialized, "score": str(score)})
+        pipe.hset(
+            task_key,
+            mapping={
+                "data": serialized,
+                "score": str(score),
+                **dict.fromkeys(self.LEASE_FIELDS, ""),
+            },
+        )
         pipe.expire(task_key, task_data_ttl)
         pipe.zadd(deferred_key, {task_result.id: run_after_ms})
         pipe.publish(self.telemetry_channel, f"ingress:{task_result.task.queue_name}")
@@ -434,47 +488,64 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     ) -> Generator[TaskResult]:
         match status:
             case TaskResultStatus.READY | TaskResultStatus.RUNNING:
-                yield from self._peek(
+                yield from self._peek_tasks(
                     self._segment_key(status, queue_name),
-                    self.TASK_KEY,
                     count,
-                    "data",
+                    leased=status is TaskResultStatus.RUNNING,
                 )
             case TaskResultStatus.SUCCESSFUL | TaskResultStatus.FAILED:
-                yield from self._peek(
-                    self._segment_key(status, queue_name),
-                    self.RESULT_KEY,
-                    count,
+                yield from self._peek_results(
+                    self._segment_key(status, queue_name), count
                 )
 
-    def _peek(
-        self,
-        zset_key: str,
-        data_key_template: str,
-        count: int,
-        field: str | None = None,
+    def _peek_tasks(
+        self, zset_key: str, count: int, *, leased: bool
     ) -> Generator[TaskResult]:
+        """Yield up to `count` stored tasks in queue order.
+
+        Leased tasks are yielded as their lease reports them.
+        """
         pipe = self.client.pipeline()
         for member in self.client.zrange(zset_key, 0, count - 1):
-            member_id = member.decode()
-            data_key = data_key_template.format(
-                prefix=self.key_prefix,
-                task_id=member_id,
-                result_id=member_id,
+            task_key = self.TASK_KEY.format(
+                prefix=self.key_prefix, task_id=member.decode()
             )
-            if field is None:
-                pipe.get(data_key)
+            if leased:
+                pipe.hmget(task_key, "data", *self.LEASE_FIELDS)
             else:
-                pipe.hget(data_key, field)
-        for data in pipe.execute():
-            if data:
-                yield self.deserialize_task_result(data.decode())
+                pipe.hget(task_key, "data")
+        for stored in pipe.execute():
+            if not stored:
+                continue
+            if leased:
+                data, lease_worker, lease_started_at = stored
+                if not data:
+                    continue
+                yield self._apply_lease(
+                    self.deserialize_task_result(data.decode()),
+                    worker=lease_worker.decode() if lease_worker else None,
+                    lease_started_at=_parse_lease_started_at(lease_started_at),
+                )
+            else:
+                yield self.deserialize_task_result(stored.decode())
+
+    def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
+        """Yield up to `count` finished results in finish order."""
+        pipe = self.client.pipeline()
+        for member in self.client.zrange(zset_key, 0, count - 1):
+            result_key = self.RESULT_KEY.format(
+                prefix=self.key_prefix, result_id=member.decode()
+            )
+            pipe.get(result_key)
+        for stored in pipe.execute():
+            if stored:
+                yield self.deserialize_task_result(stored.decode())
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
             self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
         ):
-            return self.deserialize_task_result(data)
+            return self.deserialize_task_result(data.decode())
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
 
     async def queue_stats(
