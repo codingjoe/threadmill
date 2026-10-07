@@ -3,6 +3,7 @@
 import collections.abc
 import dataclasses
 import datetime
+import json
 import logging
 import queue
 import random
@@ -98,11 +99,44 @@ class RedisBroker(Broker):
             task_id = member.decode()
             try:
                 self._reap_task(task_id)
-            except ImportError:
-                logger.exception(
+            except ImportError as read_error:
+                task_key = self.backend.TASK_KEY.format(
+                    prefix=self.backend.key_prefix, task_id=task_id
+                )
+                data, lease_worker, lease_started_at, lease_token = (
+                    self.backend.client.hmget(
+                        task_key, "data", *self.backend.LEASE_FIELDS
+                    )
+                )
+                payload = json.loads(data)
+                payload["task"].pop("retry", None)
+                logger.error(
                     "Task %r retry callback is gone from the code base; "
-                    "skipping the reap",
+                    "failing the task: %s",
                     task_id,
+                    read_error,
+                )
+                task_result = self.backend._apply_lease(
+                    self.backend.deserialize_task_result(json.dumps(payload)),
+                    worker=lease_worker.decode() if lease_worker else None,
+                    lease_started_at=_parse_lease_started_at(lease_started_at),
+                    lease_token=(
+                        lease_token.decode() if lease_token is not None else None
+                    ),
+                )
+                self.backend.acknowledge(
+                    dataclasses.replace(
+                        task_result,
+                        status=TaskResultStatus.FAILED,
+                        finished_at=timezone.now(),
+                        errors=[
+                            *task_result.errors,
+                            self.backend.create_task_error(
+                                AcknowledgementTimeout("Task processing lease expired.")
+                            ),
+                            self.backend.create_task_error(read_error),
+                        ],
+                    )
                 )
 
     def _reap_task(self, task_id: str) -> None:

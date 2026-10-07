@@ -272,20 +272,20 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap_running_queue__logs_and_continues_when_retry_callback_is_gone(
-        self, caplog
-    ):
-        """A batch keeps reaping when a task's retry callback is gone from the code base."""
+    def test_reap__fails_tasks_when_retry_callback_is_gone(self, caplog):
+        """A batch fails each task whose stored retry callback is gone from the code base."""
         backend = _make_backend(
             "reap_gone_callback_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
+            task_ids = []
             for _index in range(2):
                 task_result = backend.enqueue(boom_no_retry, args=[])
                 acquired = backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="worker-1"
                 )
                 assert acquired is not None
+                task_ids.append(task_result.id)
                 _expire_lease(backend, task_result.id)
                 task_key = backend.TASK_KEY.format(
                     prefix=backend.key_prefix, task_id=task_result.id
@@ -298,6 +298,39 @@ class TestRedisBrokerReap:
                 RedisBroker(backend)._reap_running_queue("default")
 
             assert caplog.text.count("gone from the code base") == 2
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert backend.client.zcard(running_key) == 0
+            assert (
+                backend.client.exists(
+                    backend.TASK_KEY.format(
+                        prefix=backend.key_prefix, task_id=task_ids[0]
+                    )
+                )
+                == 0
+            )
+            failed = {
+                result.id: result
+                for result in backend.peek(
+                    "default", status=TaskResultStatus.FAILED, count=0
+                )
+            }
+            assert set(failed) == set(task_ids)
+            for result in failed.values():
+                assert result.status is TaskResultStatus.FAILED
+                assert result.worker_ids == ["worker-1"]
+                assert result.task.retry is None
+                assert result.errors[-1].exception_class_path == "builtins.ImportError"
+            assert (
+                failed[task_ids[0]].errors[-2].exception_class_path
+                == "threadmill.exceptions.AcknowledgementTimeout"
+            )
+
+            # The stored failure is a regular result, so the inspector can requeue it.
+            backend.requeue(failed[task_ids[0]], timezone.now())
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            assert backend.client.zscore(deferred_key, task_ids[0]) is not None
         finally:
             backend.close()
 

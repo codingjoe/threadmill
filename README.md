@@ -136,6 +136,9 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 
 A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
+A stored retry callback that is gone from the code base fails the task the same
+way, recording an `ImportError` beside the timeout error. The failure is stored
+as a regular result, so it can be requeued or dropped from the inspector.
 Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
 can still be running, so a retry may execute concurrently with it. The
 acknowledgement of the lease holder wins: the late result of an expired attempt
