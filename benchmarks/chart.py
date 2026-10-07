@@ -77,6 +77,14 @@ DARK_THEME = Theme(
     accent_bar="#6366f1",
 )
 
+DIAGNOSTIC_QUEUES = frozenset({"threadmill (no prefetch)"})
+"""Queues that the benchmark measures and the chart leaves out.
+
+The harness runs threadmill twice to compare its prefetch buffer with a single
+task. Against a local broker the two results differ by less than one percent. A
+chart with both rows ranks them on measurement noise.
+"""
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
 class QueueResult:
@@ -108,6 +116,8 @@ def read_results(json_path: pathlib.Path) -> list[QueueResult]:
     ]
     results = []
     for queue_name in queue_names:
+        if queue_name in DIAGNOSTIC_QUEUES:
+            continue
         process = means[("test_process_queue__benchmark", queue_name)]
         start = means[("test_start_worker__benchmark", queue_name)]
         enqueue = means[("test_enqueue__benchmark", queue_name)]
@@ -143,6 +153,13 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     """Return the chart as an SVG document drawn in the given theme."""
     fastest = results[0]
     scale = PLOT_WIDTH / fastest.throughput
+    minimum_task_count = min(result.task_count for result in results)
+    maximum_task_count = max(result.task_count for result in results)
+    depth_label = (
+        f"{minimum_task_count:,}"
+        if minimum_task_count == maximum_task_count
+        else f"{minimum_task_count:,}–{maximum_task_count:,}"
+    )
     row_centers = [
         FIRST_ROW_CENTER + index * ROW_HEIGHT for index in range(len(results))
     ]
@@ -160,7 +177,7 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
         text(
             28,
             68,
-            f"{fastest.task_count:,} trivial tasks per queue · one worker process, "
+            f"{depth_label} trivial tasks per queue · one worker process, "
             "one thread · higher is better",
             theme=theme,
             size=12.5,
@@ -204,8 +221,10 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
         text(
             28,
             footnote_y,
-            "threadmill, django-tasks-db and django-tasks-rq read one message at a "
-            "time; celery and dramatiq four.",
+            # joe: width checked by hand (right edge 856.1 of 900 at 11.5px); add a
+            # width guard if the canvas width or the font stack changes.
+            "One process and one thread each. Threadmill, celery and dramatiq read "
+            "128 ahead; django-tasks-db and -rq read one message at a time.",
             theme=theme,
             size=11.5,
             fill=theme.faint,

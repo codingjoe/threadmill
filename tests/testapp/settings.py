@@ -115,6 +115,10 @@ TASKS = {
     "dummy": {
         "BACKEND": "django.tasks.backends.dummy.DummyBackend",
     },
+    "stub": {
+        "BACKEND": "tests.testapp.backends.StubTaskBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
+    },
 }
 
 # django-rq resolves every queue named in TASKS from this mapping.

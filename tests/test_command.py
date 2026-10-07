@@ -9,7 +9,11 @@ import pytest
 from django.core.management import CommandError, call_command
 from django.tasks import default_task_backend
 
-from tests.testapp.tasks import compute_workload, io_workload, memory_workload
+from tests.testapp.tasks import (
+    compute_workload,
+    io_workload,
+    memory_workload,
+)
 from threadmill.executor import JsonFormatter, handler
 from threadmill.management.commands import threadmill
 
@@ -43,6 +47,7 @@ class TestCommand:
         assert parsed_arguments.max_tasks_jitter == 0
         assert parsed_arguments.poll_interval == 0.01
         assert parsed_arguments.poll_max_interval == 1
+        assert parsed_arguments.prefetch_count is None
         assert parsed_arguments.log_format is None
 
     def test_add_arguments__parse_poll_intervals_as_floats(self):
@@ -54,6 +59,13 @@ class TestCommand:
         )
         assert parsed_arguments.poll_interval == 0.05
         assert parsed_arguments.poll_max_interval == 0.2
+
+    def test_add_arguments__parse_prefetch_count(self):
+        """Parse the prefetch count option as an int."""
+        parser = argparse.ArgumentParser()
+        threadmill.WorkerCommand().add_arguments(parser)
+        parsed_arguments = parser.parse_args(["--prefetch-count", "8"])
+        assert parsed_arguments.prefetch_count == 8
 
     def test_call_command__log_format(self):
         """Run the worker with the given log format string."""
@@ -112,6 +124,27 @@ class TestCommand:
             "threadmill", logging.INFO, __file__, 1, "Hello %s", ("world",), None
         )
         assert handler.formatter.format(record) == "Hello world"
+
+    def test_call_command__prefetch_count(self):
+        """Pass the prefetch count through to the running task executor."""
+        with patch.object(threadmill.TaskExecutor, "run", autospec=True) as run:
+            call_command(
+                "threadmill",
+                "worker",
+                verbosity=0,
+                prefetch_count=7,
+            )
+        assert run.call_args.args[0].prefetch_count == 7
+
+    def test_call_command__prefetch_count__raise_command_error(self):
+        """Reject a negative prefetch count with a CommandError."""
+        with pytest.raises(CommandError, match=re.escape("Invalid prefetch count: -1")):
+            call_command(
+                "threadmill",
+                "worker",
+                verbosity=0,
+                prefetch_count=-1,
+            )
 
     def test_call_command__poll_intervals(self):
         """Convert poll options to timedeltas for the task executor."""

@@ -19,7 +19,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
-    <img alt="Tasks per second with one worker: threadmill 5,023, celery 1,951, django-tasks-db 1,942, dramatiq 669, django-tasks-rq 80." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
+    <img alt="Tasks per second with one worker: threadmill 11,977, dramatiq 7,168, celery 2,183, django-tasks-db 2,154, django-tasks-rq 87." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
   </picture>
 </p>
 
@@ -95,12 +95,15 @@ uv run manage.py threadmill worker --max-tasks 1000 --max-tasks-jitter 100
 
 This will restart the workers after 1000 tasks have been processed, with a random jitter of up to 100 tasks to avoid all workers restarting at the same time.
 
+The limit is soft. A worker drains its buffer and the batch in hand before it stops. It can then run about twice `--prefetch-count` tasks more than the configured maximum.
+
 Should a worker crash or be killed, the pool will automatically restart it.
 
 #### Shutdown
 
 A graceful shutdown is possible with `SIGTERM` or a keyboard interrupt.
-All workers will finish the tasks they acquired and acknowledge them.
+All workers finish the tasks they acquired and acknowledge them. This includes the tasks in their prefetch buffer.
+A hard kill cannot be intercepted, so the lease reaper collects the buffered tasks after the lease expires.
 
 You can use `--exit-empty` to exit immediately after all tasks have been processed,
 which might be useful for draining a one-off queue.
@@ -125,24 +128,24 @@ uv run manage.py threadmill inspector
 The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 `TASKS` configuration:
 
-| Option              | Default                   | Description                                                             |
-| ------------------- | ------------------------- | ----------------------------------------------------------------------- |
-| `lease_ttl`         | `timedelta(hours=1)`      | Max processing time before the task is retried or marked FAILED.        |
-| `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.            |
-| `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                  |
-| `batch_size`        | `100`                     | Max tasks to move or reap per broker pass.                              |
-| `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll. |
-| `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                 |
+| Option              | Default                   | Description                                                                               |
+| ------------------- | ------------------------- | ----------------------------------------------------------------------------------------- |
+| `lease_ttl`         | `timedelta(hours=1)`      | Max time from acquisition to acknowledgement before the task is retried or marked FAILED. |
+| `result_ttl`        | `timedelta(days=1)`       | How long task results are retained before automatic removal.                              |
+| `broker_interval`   | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                                    |
+| `batch_size`        | `100`                     | Max tasks to move or reap per broker pass.                                                |
+| `poll_interval`     | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll.                   |
+| `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                                   |
 
 A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
 A claimed task whose stored payload cannot be read any more is dropped with the
 read error logged. A dropped task records no result, so it leaves the inspector
 and cannot be requeued.
-Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
-can still be running, so a retry may execute concurrently with it. The
-acknowledgement of the lease holder wins: the late result of an expired attempt
-is discarded.
+Keep `lease_ttl` above your worst-case runtime and above the time a task waits in a
+prefetch buffer. A task that outlives its lease can still run, so a retry can run
+at the same time. The acknowledgement of the lease holder wins. The late result
+of an expired attempt is discarded.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single

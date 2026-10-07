@@ -1,30 +1,48 @@
 """Benchmarks comparing threadmill against other Django task queues.
 
-Every backend is measured on the same trivial echo task and the same queue, so
-the numbers reflect queue and worker overhead instead of task work:
+Every backend is measured on the same trivial echo task and the same queue. The
+numbers therefore show queue and worker overhead and not task work.
 
-- ``test_enqueue__benchmark``: time for a queue to accept a single task.
-- ``test_start_worker__benchmark``: time for a worker to start and process one queued task.
-- ``test_process_queue__benchmark``: time for a worker to process a full queue.
+- ``test_enqueue__benchmark`` measures the time for a queue to accept one task.
+- ``test_start_worker__benchmark`` measures the time for a worker to start and process one queued task.
+- ``test_process_queue__benchmark`` measures the time for a worker to process a full queue.
 
-Both worker benchmarks include the worker's fixed start cost, and the queues
-that exit on their own include their stop cost too. Subtract
+The processing benchmark queues 20,000 tasks per queue. The fixed cost of a cold
+worker start and stop is quantized to about a second. A deep queue is therefore
+necessary to measure the marginal drain per task, which is the number that the
+chart plots.
+
+Both worker benchmarks include the fixed start cost of the worker. Queues that
+exit on their own include their stop cost too. Subtract
 ``test_start_worker__benchmark`` from ``test_process_queue__benchmark`` and divide
-the queue depth by the difference to get the marginal throughput of a busy queue.
+the task count of the queue by the difference. The result is the marginal
+throughput of a busy queue.
 
-Threadmill, django-tasks-db and django-tasks-rq run one worker process that
-drains a queue and exits. Celery and dramatiq have no such mode, so the benchmark
-queues a sentinel task last and waits for it to be processed. That wait is what
-proves the queue was drained. Their workers are stopped after the measurement,
-because a graceful shutdown takes seconds and would dominate a short drain.
+Every queue runs one worker process and one thread. Each queue reads ``READ_AHEAD``
+messages ahead where the queue has such a setting. The numbers therefore rank the
+queues and not their polling strategies. The consumer of Celery blocks on an empty
+queue, so its window costs no sleep for each message. Dramatiq polls instead and
+sleeps a jittered backoff of 5 to 10 ms when its window is full. A shallow window
+therefore measures that backoff and not the queue.
 
-Celery and dramatiq read four messages per worker thread ahead. Dramatiq polls
-instead of blocking and sleeps a jittered backoff once its window is full, so at
-four messages its drain still measures that backoff more than its queue: the same
-worker reaches thousands of tasks per second at a window deep enough to stay out
-of the sleep. Threadmill, django-tasks-db and django-tasks-rq read one task at a
-time, because their workers block on an empty queue and gain nothing from a
-window. RQ's worker forks a work horse per job, so its drain includes that fork.
+The same worker drains about 451 tasks per second at two messages, 1,983 at 16 and
+5,658 at 64. At 64 the sleep stops to set the rate. Threadmill reads the same rate
+into its prefetch buffer.
+
+django-tasks-db reads one task at a time, because its shipped worker does not
+expose a read-ahead setting. django-tasks-rq forks a work horse for each job, so
+its drain includes that fork and it reads one task at a time too.
+
+Threadmill is measured twice, with 128 messages ahead and with one message at a
+time. The read-ahead cost can therefore be subtracted from both worker benchmarks.
+Its queues are deeper than the others, because its marginal drain is only seconds
+long. A shallow queue sits inside the one-second quantization of the fixed cost.
+
+Threadmill, django-tasks-db and django-tasks-rq run one worker process that drains
+a queue and exits. Celery and dramatiq have no such mode, so the benchmark queues a
+sentinel task last and waits for it. That wait proves that the queue was drained.
+Their workers are stopped after the measurement. A graceful shutdown takes seconds.
+It dominates a short drain.
 """
 
 import collections.abc
@@ -61,17 +79,24 @@ from tests.testapp.tasks import echo
 ENQUEUE_ITERATIONS = 500
 """Tasks enqueued within one enqueue benchmark round."""
 
-QUEUE_DEPTH = 5000
-"""Tasks queued before one processing benchmark round."""
+QUEUE_DEPTH = 20_000
+"""Default tasks queued before one processing benchmark round."""
 
-READ_AHEAD = 4
+READ_AHEAD = 128
 """Messages each worker reads ahead, where its queue has such a setting.
 
-Celery ships a prefetch multiplier of four. Dramatiq's own default is two per
-worker thread, and neither is deep enough for a single-threaded dramatiq to stop
-measuring its poll backoff: the same worker drains 451 tasks/s at two messages,
-1,983 at 16 and 5,658 at 64, where the backoff it sleeps once the window is full
-stops setting the rate.
+This window is deep enough that the wait mechanism of each consumer stops to
+decide the ranking. The consumer of Celery blocks on an empty queue, so its
+window costs no sleep. Dramatiq polls instead and sleeps a jittered backoff of
+5 to 10 ms when its window is full. A shallow window therefore measures that
+backoff and not the queue.
+
+The same worker drains about 451 tasks per second at two messages, 1,983 at 16
+and 5,658 at 64. At 64 the sleep stops to set the rate. At 128 the backoff costs
+about 0.06 ms for each task.
+
+django-tasks-db reads one task at a time. django-tasks-rq forks a work horse for
+each job. Neither queue can be told to read ahead.
 """
 
 CELERY_WORKER = (
@@ -90,11 +115,12 @@ CELERY_WORKER = (
 )
 """Celery worker running as one process with one thread, ``READ_AHEAD`` messages ahead.
 
-The default prefork pool crashes on CPython 3.14, where the pool child loses
-the task handler state it expects, so the worker runs on the solo pool. With one
-concurrent task, ``--prefetch-multiplier`` sets the prefetch count to
-``READ_AHEAD``, the benchmark rate. Its consumer blocks while the queue is empty,
-so the window costs no sleep per message.
+The default prefork pool crashes on CPython 3.14. The pool child loses the task
+handler state that it expects. The worker therefore runs on the solo pool. With
+one concurrent task, ``--prefetch-multiplier={READ_AHEAD}`` sets the prefetch
+count to ``READ_AHEAD``, which is the benchmark rate. The Redis consumer of
+Celery blocks while its queue is empty, so the prefetch adds no sleep for each
+message.
 """
 
 DRAMATIQ_WORKER = (
@@ -109,10 +135,11 @@ DRAMATIQ_WORKER = (
 )
 """dramatiq worker running as one process with one thread, ``READ_AHEAD`` messages ahead.
 
-The CLI has no read-ahead flag, so the worker environment carries
-``dramatiq_queue_prefetch``. Its Redis consumer polls rather than blocks and
-sleeps a jittered backoff once its window fills, so ``READ_AHEAD`` still bounds
-this drain; see that constant for what a deeper window measures.
+The Redis broker polls and does not block. Its consumer fetches only while fewer
+messages than its read-ahead are unacked. When that window is full, the consumer
+sleeps a jittered backoff of 5 to 10 ms and then polls again. The command line
+has no read-ahead flag, so the worker environment carries
+``dramatiq_queue_prefetch``. The benchmark sets this variable to ``READ_AHEAD``.
 """
 
 WORKER_STOP_TIMEOUT_SECONDS = 20
@@ -146,6 +173,9 @@ class QueueUnderTest:
     verify: collections.abc.Callable[[TaskResult | None], None] | None = None
     """Assert that the drained queue was processed."""
 
+    task_count: int = QUEUE_DEPTH
+    """Tasks enqueued before one processing round; slow queues queue fewer."""
+
 
 def drain_with_threadmill_worker() -> None:
     """Process every queued task with a single threadmill worker process."""
@@ -155,6 +185,25 @@ def drain_with_threadmill_worker() -> None:
         backend=DEFAULT_TASK_BACKEND_ALIAS,
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
+        prefetch_count=READ_AHEAD,
+        exit_empty=True,
+        verbosity=0,
+    )
+
+
+def drain_with_threadmill_worker_no_prefetch() -> None:
+    """Process every queued task with one threadmill worker reading one at a time.
+
+    The no-prefetch ablation of the entry above, so the read-ahead cost can be
+    subtracted.
+    """
+    call_command(
+        "threadmill",
+        "worker",
+        backend=DEFAULT_TASK_BACKEND_ALIAS,
+        queues=[DEFAULT_TASK_QUEUE_NAME],
+        workers=1,
+        prefetch_count=1,
         exit_empty=True,
         verbosity=0,
     )
@@ -307,21 +356,44 @@ def django_task_backend(
     name: str,
     alias: str,
     drain: collections.abc.Callable[[], None] | None = None,
+    task_count: int = QUEUE_DEPTH,
 ) -> QueueUnderTest:
     """Build a comparison entry for a Django task backend."""
     enqueue, verify = django_task_enqueuer(alias)
-    return QueueUnderTest(name=name, enqueue=enqueue, drain=drain, verify=verify)
+    return QueueUnderTest(
+        name=name, enqueue=enqueue, drain=drain, verify=verify, task_count=task_count
+    )
 
+
+THREADMILL_TASK_COUNT = 60_000
+"""Tasks threadmill queues, so its marginal drain outruns the one-second fixed cost.
+
+Threadmill drains a queue in about 3 seconds for each 20,000 tasks. The fixed cost
+of a cold worker start and stop is quantized to about a second. A shallower queue
+therefore keeps the prefetch comparison inside that step.
+"""
 
 WORKER_QUEUES = (
     django_task_backend(
-        "threadmill", DEFAULT_TASK_BACKEND_ALIAS, drain_with_threadmill_worker
+        "threadmill",
+        DEFAULT_TASK_BACKEND_ALIAS,
+        drain_with_threadmill_worker,
+        task_count=THREADMILL_TASK_COUNT,
+    ),
+    django_task_backend(
+        "threadmill (no prefetch)",
+        DEFAULT_TASK_BACKEND_ALIAS,
+        drain_with_threadmill_worker_no_prefetch,
+        task_count=THREADMILL_TASK_COUNT,
     ),
     django_task_backend(
         "django-tasks-db", "django-tasks-db", drain_with_django_tasks_db_worker
     ),
     django_task_backend(
-        "django-tasks-rq", "django-tasks-rq", drain_with_django_tasks_rq_worker
+        "django-tasks-rq",
+        "django-tasks-rq",
+        drain_with_django_tasks_rq_worker,
+        task_count=5_000,  # about 80 tasks/s; see the module docstring
     ),
     QueueUnderTest(
         name="celery",
@@ -352,6 +424,13 @@ def identify_backend(queue: QueueUnderTest) -> str:
 running_workers: list[WorkerProcess] = []
 """Workers started by the running benchmark, stopped once it is measured."""
 
+start_seconds: dict[str, float] = {}
+"""Mean seconds each queue needs to start a worker and drain one task.
+
+``TestWorkerStart`` records it and ``TestQueueProcessing`` compares its own drain
+against it, because a drain shorter than the start cost is not measurable.
+"""
+
 
 @pytest.fixture(autouse=True)
 def stop_workers(empty_queues):
@@ -377,7 +456,7 @@ def empty_queues():
             "threadmill:*",
             "django_tasks:*",
             "celery*",
-            "dramatiq:*",
+            "dramatiq:*",  # broker keys and the dramatiq:results:* results
             "rq:*",
             "_kombu*",
         ):
@@ -428,6 +507,7 @@ class TestWorkerStart:
             iterations=1,
             warmup_rounds=0,
         )
+        start_seconds[queue_under_test.name] = benchmark.stats["mean"]
 
 
 class TestQueueProcessing:
@@ -437,9 +517,9 @@ class TestQueueProcessing:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.parametrize("queue_under_test", WORKER_QUEUES, ids=identify_backend)
     def test_process_queue__benchmark(self, benchmark, queue_under_test, empty_queues):
-        """Benchmark the time to process QUEUE_DEPTH queued tasks."""
-        enqueued_task_result = queue_under_test.enqueue(QUEUE_DEPTH)
-        benchmark.extra_info["tasks"] = QUEUE_DEPTH
+        """Benchmark the time to process a queue at its own depth."""
+        enqueued_task_result = queue_under_test.enqueue(queue_under_test.task_count)
+        benchmark.extra_info["tasks"] = queue_under_test.task_count
 
         benchmark.pedantic(
             queue_under_test.drain,
@@ -447,6 +527,13 @@ class TestQueueProcessing:
             iterations=1,
             warmup_rounds=0,
         )
+
+        process_mean = benchmark.stats["mean"]
+        if process_mean <= (start_mean := start_seconds[queue_under_test.name]):
+            pytest.fail(
+                f"{queue_under_test.name}: drain mean {process_mean:.4f}s does not "
+                f"exceed start mean {start_mean:.4f}s; the run is not measurable"
+            )
 
         if queue_under_test.verify:
             queue_under_test.verify(enqueued_task_result)
