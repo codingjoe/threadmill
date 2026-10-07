@@ -16,11 +16,15 @@ LIGHT_THEME_PATH = IMAGE_DIRECTORY / "backend-comparison-light.svg"
 DARK_THEME_PATH = IMAGE_DIRECTORY / "backend-comparison-dark.svg"
 
 WIDTH = 900
-HEIGHT = 332
 
 LABEL_X = 180
 PLOT_X0 = 200
 PLOT_WIDTH = 560
+
+FIRST_ROW_CENTER = 110
+ROW_HEIGHT = 40
+FOOTNOTE_GAP = 38
+BOTTOM_PADDING = 64
 
 FONT = (
     'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
@@ -139,14 +143,18 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     """Return the chart as an SVG document drawn in the given theme."""
     fastest = results[0]
     scale = PLOT_WIDTH / fastest.throughput
-    row_centers = [110 + index * 40 for index in range(len(results))]
+    row_centers = [
+        FIRST_ROW_CENTER + index * ROW_HEIGHT for index in range(len(results))
+    ]
+    footnote_y = row_centers[-1] + FOOTNOTE_GAP
+    height = footnote_y + BOTTOM_PADDING
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {HEIGHT}" '
-        f'width="{WIDTH}" height="{HEIGHT}" role="img" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
+        f'width="{WIDTH}" height="{height}" role="img" '
         f'aria-label="{describe(results)}.">',
         "<style>svg{max-width:100%;height:auto}</style>",
-        f'<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{HEIGHT - 1}" rx="14" '
+        f'<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="14" '
         f'fill="{theme.canvas}" stroke="{theme.border}"/>',
         text(28, 46, "Queue throughput", theme=theme, size=19, weight=700),
         text(
@@ -195,8 +203,9 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     parts.append(
         text(
             28,
-            row_centers[-1] + 38,
-            "One message in flight per worker — no queue reads ahead.",
+            footnote_y,
+            "threadmill, django-tasks-db and django-tasks-rq read one message at a "
+            "time; celery and dramatiq four.",
             theme=theme,
             size=11.5,
             fill=theme.faint,
