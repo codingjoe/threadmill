@@ -357,8 +357,6 @@ class TaskPrefetcher(threading.Thread):
                     ):
                         break
                 else:
-                    # joe: buffered tasks are leased at fetch time, so buffer dwell
-                    # counts against lease_ttl; renew leases if dwell ever matters
                     for task_result in batch:
                         if not self.buffer(task_result):
                             break
