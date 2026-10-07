@@ -75,10 +75,6 @@ class WorkerCommand(DjangoBaseCommand):
             help=(
                 "Number of tasks to prefetch per worker process."
                 " Defaults to 4 × the number of threads. Use 1 to disable batching."
-                " Buffered tasks hold their lease while they wait, so a deep buffer"
-                " needs a matching lease_ttl."
-                " Buffered tasks and the batch in hand still run after a worker reaches"
-                " its max-tasks limit."
             ),
         )
         parser.add_argument(
