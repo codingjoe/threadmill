@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
+from django.tasks.exceptions import TaskResultDoesNotExist
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -103,6 +104,11 @@ def _make_backend(
 def _measure_wait_deltas(calls: list[float]) -> list[float]:
     """Return the seconds elapsed between consecutive recorded script calls."""
     return [calls[index + 1] - calls[index] for index in range(len(calls) - 1)]
+
+
+def _rotation_offset(sent_args: list[str]) -> str:
+    """Return the rotation offset from recorded acquire script arguments."""
+    return sent_args[-2]
 
 
 def _now_ms() -> float:
@@ -335,7 +341,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     def test_acquire__stamps_lease_on_task_hash(self):
-        """Record the acquiring worker and lease start on the task hash."""
+        """Record the acquiring worker, lease issue time, and token on the task hash."""
         backend = RedisTaskBackend(
             "acquire_lease_test",
             {
@@ -356,6 +362,7 @@ class TestRedisTaskBackend:
             assert acquired.last_attempted_at is not None
             assert acquired.started_at == acquired.last_attempted_at
             assert acquired.worker_ids == ["test-worker"]
+            assert acquired.lease_token is not None
 
             # Verify the lease is persisted, not only applied in memory.
             restored = backend.get_leased_task(task_result.id)
@@ -363,6 +370,7 @@ class TestRedisTaskBackend:
             assert restored.worker_ids == acquired.worker_ids
             assert restored.started_at == acquired.started_at
             assert restored.last_attempted_at == acquired.last_attempted_at
+            assert restored.lease_token == acquired.lease_token
         finally:
             backend.close()
 
@@ -478,6 +486,32 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    def test_acknowledge__keeps_lease_token_out_of_the_result(self):
+        """Persist no lease token: it is attempt state, not result state."""
+        backend = _make_backend("acknowledge_token_test")
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="token-test"
+            )
+            assert acquired is not None
+            assert acquired.lease_token is not None
+
+            backend.acknowledge(
+                dataclasses.replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            result_key = backend.RESULT_KEY.format(
+                prefix=backend.key_prefix, result_id=task_result.id
+            )
+            assert "lease_token" not in json.loads(backend.client.get(result_key))
+        finally:
+            backend.close()
+
     async def test_running_reaper__fails_expired_tasks(self):
         """Running reaper creates FAILED results for tasks with expired lease."""
         backend = RedisTaskBackend(
@@ -562,6 +596,63 @@ class TestRedisTaskBackend:
             # The result should still be the FAILED one from the reaper
             result = backend.get_result(task_result.id)
             assert result.status == TaskResultStatus.FAILED
+        finally:
+            backend.close()
+
+    def test_stale_acknowledge__keeps_retry_attempt_after_requeue(self):
+        """Discard a late acknowledgement while a retry attempt holds the lease."""
+        backend = _make_backend(
+            "stale_ack_retry_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
+            expired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="expired-worker"
+            )
+            assert expired is not None
+            _expire_lease(backend, task_result.id)
+            RedisBroker(backend).main()
+
+            # Make the scheduled retry due and lease it to the next attempt.
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            backend.client.zadd(deferred_key, {task_result.id: 0})
+            RedisBroker(backend).main()
+            retry = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="retry-worker"
+            )
+            assert retry is not None
+            assert retry.id == task_result.id
+
+            backend.acknowledge(
+                dataclasses.replace(
+                    expired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.zscore(running_key, task_result.id) is not None
+            assert backend.client.exists(task_key)
+
+            backend.acknowledge(
+                dataclasses.replace(
+                    retry,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+            assert backend.get_result(task_result.id).worker_ids == [
+                "expired-worker",
+                "retry-worker",
+            ]
         finally:
             backend.close()
 
@@ -910,6 +1001,7 @@ class TestRedisTaskBackend:
         assert results[0].worker_ids == ["peek-test"]
         assert results[0].last_attempted_at == acquired.last_attempted_at
         assert results[0].started_at == acquired.started_at
+        assert results[0].lease_token == acquired.lease_token
 
     def test_peek__running_task_without_lease(self):
         """Peek RUNNING marks a task whose hash carries no lease as RUNNING."""
@@ -931,8 +1023,8 @@ class TestRedisTaskBackend:
         assert result.last_attempted_at is None
         assert result.started_at is None
 
-    def test_peek__running_task_with_unparseable_lease_start(self):
-        """Read a lease start that is not a timestamp as no start time."""
+    def test_peek__running_task_with_unparseable_lease_issued_at(self):
+        """Read a lease issue time that is not a timestamp as no start time."""
         task_result = default_task_backend.enqueue(echo, args=[1])
         default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="malformed-test"
@@ -940,7 +1032,7 @@ class TestRedisTaskBackend:
         task_key = default_task_backend.TASK_KEY.format(
             prefix=default_task_backend.key_prefix, task_id=task_result.id
         )
-        default_task_backend.client.hset(task_key, "lease_started_at", "not-a-time")
+        default_task_backend.client.hset(task_key, "lease_issued_at", "not-a-time")
 
         (result,) = default_task_backend.peek(
             queue_name="default", status=TaskResultStatus.RUNNING, count=10
@@ -1593,7 +1685,9 @@ class TestRedisTaskBackend:
                 "default",
                 "compute",
             ] * 2
-            assert [sent_args[-1] for sent_args in recorder.sent_args] == [
+            assert [
+                _rotation_offset(sent_args) for sent_args in recorder.sent_args
+            ] == [
                 "2",
                 "0",
                 "1",
@@ -1618,7 +1712,9 @@ class TestRedisTaskBackend:
                     timeout=datetime.timedelta(seconds=0.3),
                 )
             assert len(recorder.sent_args) > 1
-            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"5"}
+            assert {
+                _rotation_offset(sent_args) for sent_args in recorder.sent_args
+            } == {"5"}
             assert backend._rotation_offset == 5
         finally:
             backend.close()

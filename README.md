@@ -137,7 +137,9 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
 Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
-can still be running, so a retry may execute concurrently with it.
+can still be running, so a retry may execute concurrently with it. The
+acknowledgement of the lease holder wins: the late result of an expired attempt
+is discarded.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single

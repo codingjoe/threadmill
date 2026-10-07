@@ -18,7 +18,19 @@
 -- ARGV[5]  -- status (SUCCESSFUL or FAILED)
 -- ARGV[6]  -- telemetry pub/sub channel
 -- ARGV[7]  -- queue name
--- Returns: 1 on success, 0 if task was not in the running set
+-- ARGV[8]  -- lease token of the acknowledging attempt (empty when the attempt
+--              holds no lease)
+-- Returns: 1 on success, 0 when the attempt no longer holds the lease or the
+--          task is not in the running set
+
+-- Fence off a late acknowledgement: once a lease expires the reaper requeues
+-- the task, and the retry attempt stamps a fresh lease token. Only the attempt
+-- holding the stored token may remove the lease, publish its result, and drop
+-- the task data. A hash without a token predates leases and is acknowledged.
+local lease_token = redis.call('HGET', KEYS[3], 'lease_token')
+if lease_token and lease_token ~= ARGV[8] then
+  return 0  -- Leased to a retry attempt, skip
+end
 
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 if removed == 0 then
