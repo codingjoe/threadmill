@@ -3,7 +3,6 @@
 import collections.abc
 import dataclasses
 import datetime
-import json
 import logging
 import queue
 import random
@@ -96,49 +95,25 @@ class RedisBroker(Broker):
             ],
         )
         for task_id in claimed_ids:
-            try:
-                self._reap_task(task_id)
-            except ImportError as read_error:
-                task_key = self.backend.TASK_KEY.format(
-                    prefix=self.backend.key_prefix, task_id=task_id
-                )
-                data, lease_worker, lease_started_at, lease_token = (
-                    self.backend.client.hmget(
-                        task_key, "data", *self.backend.LEASE_FIELDS
-                    )
-                )
-                payload = json.loads(data)
-                payload["task"].pop("retry", None)
-                logger.error(
-                    "Task %r retry callback is gone from the code base; "
-                    "failing the task: %s",
-                    task_id,
-                    read_error,
-                )
-                task_result = self.backend._apply_lease(
-                    self.backend.deserialize_task_result(json.dumps(payload)),
-                    worker=lease_worker or None,
-                    lease_started_at=_parse_lease_started_at(lease_started_at),
-                    lease_token=lease_token,
-                )
-                self.backend.acknowledge(
-                    dataclasses.replace(
-                        task_result,
-                        status=TaskResultStatus.FAILED,
-                        finished_at=timezone.now(),
-                        errors=[
-                            *task_result.errors,
-                            self.backend.create_task_error(
-                                AcknowledgementTimeout("Task processing lease expired.")
-                            ),
-                            self.backend.create_task_error(read_error),
-                        ],
-                    )
-                )
+            self._reap_task(task_id)
 
     def _reap_task(self, task_id: str) -> None:
-        """Requeue or fail a claimed task."""
-        if (task_result := self.backend.get_leased_task(task_id)) is None:
+        """Requeue or fail it, and drop it when the payload cannot be read."""
+        try:
+            task_result = self.backend.get_leased_task(task_id)
+        except ImportError, ValueError, KeyError, TypeError, AttributeError:
+            logger.exception(
+                "Task %r payload cannot be read; dropping the task", task_id
+            )
+            # Drop only the payload: the running entry stays for a lease holder's
+            # late acknowledge, and the reaper script sweeps it once the hash is gone.
+            self.backend.client.delete(
+                self.backend.TASK_KEY.format(
+                    prefix=self.backend.key_prefix, task_id=task_id
+                )
+            )
+            return
+        if task_result is None:
             logger.warning("Claimed task %r has no task data; skipping", task_id)
             return
         now = timezone.now()

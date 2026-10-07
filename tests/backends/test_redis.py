@@ -120,6 +120,38 @@ def _expire_lease(
     )
 
 
+def _assert_dropped(backend: RedisTaskBackend, task_id: str) -> None:
+    """Assert a dropped task keeps its running entry without its payload."""
+    assert (
+        backend.client.exists(
+            backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=task_id)
+        )
+        == 0
+    )
+    running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+    assert backend.client.zscore(running_key, task_id) is not None
+
+
+_GONE_CALLBACK = "tests.testapp.tasks.gone_from_the_code_base"
+
+
+def _corrupt_payload(
+    backend: RedisTaskBackend,
+    task_id: str,
+    data: str | None = None,
+    task: dict | None = None,
+    **fields: object,
+) -> None:
+    """Overwrite a leased task's stored payload with raw data or patched fields."""
+    task_key = backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=task_id)
+    if task or fields:
+        payload = json.loads(backend.client.hget(task_key, "data"))
+        payload["task"].update(task or {})
+        payload.update(fields)
+        data = json.dumps(payload)
+    backend.client.hset(task_key, "data", data)
+
+
 def _claim_expired(
     backend: RedisTaskBackend,
     broker: RedisBroker,
@@ -272,65 +304,36 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap__fails_tasks_when_retry_callback_is_gone(self, caplog):
-        """A batch fails each task whose stored retry callback is gone from the code base."""
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            {"data": "{not json"},
+            {"data": "{}"},
+            {"task": {"func": _GONE_CALLBACK}},
+            {"task": {"retry": _GONE_CALLBACK}},
+            {"status": "CANCELLED"},
+        ],
+        ids=["malformed", "not-a-result", "gone-func", "gone-retry", "unknown-status"],
+    )
+    def test_reap__drops_task_when_payload_cannot_be_read(self, corruption, caplog):
+        """A payload the reaper cannot read drops the claimed task."""
         backend = _make_backend(
-            "reap_gone_callback_test", lease_ttl=datetime.timedelta(seconds=1)
+            "reap_drop_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
-            task_ids = []
-            for _index in range(2):
-                task_result = backend.enqueue(boom_no_retry, args=[])
-                acquired = backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="worker-1"
-                )
-                assert acquired is not None
-                task_ids.append(task_result.id)
-                _expire_lease(backend, task_result.id)
-                task_key = backend.TASK_KEY.format(
-                    prefix=backend.key_prefix, task_id=task_result.id
-                )
-                payload = json.loads(backend.client.hget(task_key, "data"))
-                payload["task"]["retry"] = "tests.testapp.tasks.gone_from_the_code_base"
-                backend.client.hset(task_key, "data", json.dumps(payload))
+            task_result = backend.enqueue(echo, args=[42])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _corrupt_payload(backend, task_result.id, **corruption)
+            _expire_lease(backend, task_result.id)
 
             with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert caplog.text.count("gone from the code base") == 2
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zcard(running_key) == 0
-            assert (
-                backend.client.exists(
-                    backend.TASK_KEY.format(
-                        prefix=backend.key_prefix, task_id=task_ids[0]
-                    )
-                )
-                == 0
-            )
-            failed = {
-                result.id: result
-                for result in backend.peek(
-                    "default", status=TaskResultStatus.FAILED, count=0
-                )
-            }
-            assert set(failed) == set(task_ids)
-            for result in failed.values():
-                assert result.status is TaskResultStatus.FAILED
-                assert result.worker_ids == ["worker-1"]
-                assert result.task.retry is None
-                assert result.errors[-1].exception_class_path == "builtins.ImportError"
-            assert (
-                failed[task_ids[0]].errors[-2].exception_class_path
-                == "threadmill.exceptions.AcknowledgementTimeout"
-            )
-
-            # The stored failure is a regular result, so the inspector can requeue it.
-            backend.requeue(failed[task_ids[0]], timezone.now())
-            deferred_key = backend.DEFERRED_KEY.format(
-                prefix=backend.key_prefix, queue_name="default"
-            )
-            assert backend.client.zscore(deferred_key, task_ids[0]) is not None
+            assert "payload cannot be read; dropping the task" in caplog.text
+            _assert_dropped(backend, task_result.id)
         finally:
             backend.close()
 
