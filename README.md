@@ -98,7 +98,7 @@ A value of `1` disables batching.
 Prefetching has soft limits:
 
 - Tasks are marked `RUNNING` when they are fetched, so the time they spend in the buffer counts against `lease_ttl`.
-- The priority lookahead widens to the buffer size, so ordering is no longer strictly global.
+- A task enqueued after a fetch waits for the buffer to drain before a worker picks it up, though the buffer itself dispatches the highest priority task first and keeps queue order within a priority.
 - `--max-tasks` may overshoot by up to the buffer size, because a prefetched task always runs.
 - `worker_ids` records the fetcher of the process, not the thread that runs the task.
 

@@ -109,7 +109,7 @@ def _prefetched_thread(
     worker.lock = threading.Lock()
     worker.expired = threading.Event()
     prefetcher = TaskPrefetcher(worker=worker, backend=backend, prefetch_count=1)
-    prefetcher.task_buffer.put(task_result)
+    prefetcher.buffer(task_result)
     prefetcher.finished.set()
     worker.prefetcher = prefetcher
     return WorkerThread(worker=worker, index=0, backend=backend)
@@ -880,10 +880,9 @@ class TestTaskPrefetcher:
         assert not thread.is_alive()
         assert prefetcher.finished.is_set()
         assert prefetcher.failure is None
-        assert [prefetcher.task_buffer.get_nowait().id for _ in range(2)] == [
-            first.id,
-            second.id,
-        ]
+        assert [
+            prefetcher.task_buffer.get_nowait().task_result.id for _ in range(2)
+        ] == [first.id, second.id]
         assert all(call["count"] == 4 for call in backend.calls)
 
     def test_run__stops_on_expired(self):
@@ -929,7 +928,7 @@ class TestTaskPrefetcher:
         prefetcher.run()
 
         assert backend.calls[0]["count"] == 2
-        assert prefetcher.task_buffer.get_nowait().id == task_result.id
+        assert prefetcher.task_buffer.get_nowait().task_result.id == task_result.id
         assert len(backend.calls) == 1
         assert prefetcher.finished.is_set()
 
@@ -943,10 +942,9 @@ class TestTaskPrefetcher:
         prefetcher.worker.shutdown_requested.set()
         prefetcher.run()
 
-        assert [prefetcher.task_buffer.get_nowait().id for _ in range(2)] == [
-            first.id,
-            second.id,
-        ]
+        assert [
+            prefetcher.task_buffer.get_nowait().task_result.id for _ in range(2)
+        ] == [first.id, second.id]
         assert len(backend.calls) == 1
         assert prefetcher.finished.is_set()
 
@@ -989,7 +987,7 @@ class TestTaskPrefetcher:
         overflow = _task_result(echo, 2)
         backend = StubPrefetchBackend([overflow])
         prefetcher = _make_prefetcher(backend, prefetch_count=1)
-        prefetcher.task_buffer.put(buffered)
+        prefetcher.buffer(buffered)
 
         thread = threading.Thread(target=prefetcher.run)
         thread.start()
@@ -1003,7 +1001,7 @@ class TestTaskPrefetcher:
         assert prefetcher.finished.is_set()
         assert prefetcher.failure is None
         assert prefetcher.task_buffer.qsize() == 1
-        assert prefetcher.task_buffer.get_nowait().id == buffered.id
+        assert prefetcher.task_buffer.get_nowait().task_result.id == buffered.id
 
     def test_buffer__returns_true_when_space_available(self):
         """Buffer a task result when the queue has room."""
@@ -1011,4 +1009,19 @@ class TestTaskPrefetcher:
         prefetcher = _make_prefetcher(StubPrefetchBackend())
 
         assert prefetcher.buffer(task_result) is True
-        assert prefetcher.task_buffer.get_nowait().id == task_result.id
+        assert prefetcher.task_buffer.get_nowait().task_result.id == task_result.id
+
+    def test_buffer__dispatches_highest_priority_first(self):
+        """Hand out the highest priority task first and keep fetch order on ties."""
+        low = _task_result(dataclasses.replace(echo, priority=1), 1)
+        high = _task_result(dataclasses.replace(echo, priority=5), 2)
+        middle = _task_result(dataclasses.replace(echo, priority=3), 3)
+        later_high = _task_result(dataclasses.replace(echo, priority=5), 4)
+        prefetcher = _make_prefetcher(StubPrefetchBackend())
+
+        for task_result in (low, high, middle, later_high):
+            assert prefetcher.buffer(task_result) is True
+
+        assert [
+            prefetcher.task_buffer.get_nowait().task_result.id for _ in range(4)
+        ] == [high.id, later_high.id, middle.id, low.id]

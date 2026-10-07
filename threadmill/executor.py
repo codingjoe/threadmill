@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import datetime
+import itertools
 import json
 import logging
 import multiprocessing
@@ -295,6 +296,20 @@ class WorkerProcess(multiprocessing.Process):
         self.join()
 
 
+@dataclasses.dataclass(order=True, slots=True)
+class PrefetchedTask:
+    """A buffered task result, awaiting dispatch to a worker thread.
+
+    The buffer holds these rather than bare task results so it can hand out the
+    highest priority task first, and preserve fetch order within a priority.
+    """
+
+    sort_key: tuple[int, int]
+    """Negated task priority, then fetch order; the heap compares on this."""
+
+    task_result: TaskResult = dataclasses.field(compare=False)
+
+
 class TaskPrefetcher(threading.Thread):
     """Single prefetcher thread filling the task buffer of one worker process."""
 
@@ -309,7 +324,10 @@ class TaskPrefetcher(threading.Thread):
         self.worker = worker
         self.backend = backend
         self.prefetch_count = prefetch_count
-        self.task_buffer: queue.Queue[TaskResult] = queue.Queue(maxsize=prefetch_count)
+        self.task_buffer: queue.PriorityQueue[PrefetchedTask] = queue.PriorityQueue(
+            maxsize=prefetch_count
+        )
+        self.fetch_sequence = itertools.count()
         self.finished = threading.Event()
         self.stop_requested = threading.Event()
         self.failure: Exception | None = None
@@ -355,11 +373,12 @@ class TaskPrefetcher(threading.Thread):
 
     def buffer(self, task_result: TaskResult) -> bool:
         """Buffer one task result; return False when the prefetcher must stop."""
+        item = PrefetchedTask(
+            (-task_result.task.priority, next(self.fetch_sequence)), task_result
+        )
         while not self.stop_requested.is_set():
             try:
-                self.task_buffer.put(
-                    task_result, timeout=TASK_WAIT_TIMEOUT.total_seconds()
-                )
+                self.task_buffer.put(item, timeout=TASK_WAIT_TIMEOUT.total_seconds())
             except Full:
                 continue
             return True
@@ -387,7 +406,7 @@ class WorkerThread(threading.Thread):
             try:
                 task_result = prefetcher.task_buffer.get(
                     timeout=TASK_WAIT_TIMEOUT.total_seconds()
-                )
+                ).task_result
             except Empty:
                 if prefetcher.finished.is_set():
                     return
