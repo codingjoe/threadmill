@@ -309,8 +309,11 @@ class TaskPrefetcher(threading.Thread):
             self.fill_buffer()
         except Exception as exception:
             self.completion.set_exception(exception)
-        else:
-            self.completion.set_result(None)
+        finally:
+            # A BaseException would leave the consumers waiting for a result
+            # that never comes.
+            if not self.completion.done():
+                self.completion.set_result(None)
 
     def fill_buffer(self) -> None:
         """Fill the task buffer until the worker stops or the queue is drained."""

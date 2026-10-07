@@ -123,7 +123,7 @@ def _prefetched_thread(
 class StubPrefetchBackend:
     """Scripted backend stub for prefetcher tests without broker round-trips."""
 
-    def __init__(self, *responses: list[TaskResult] | Exception) -> None:
+    def __init__(self, *responses: list[TaskResult] | BaseException) -> None:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
@@ -138,7 +138,7 @@ class StubPrefetchBackend:
             }
         )
         response = self.responses.pop(0) if self.responses else TimeoutError("drained")
-        if isinstance(response, Exception):
+        if isinstance(response, BaseException):
             raise response
         return response
 
@@ -981,6 +981,16 @@ class TestTaskPrefetcher:
 
         assert prefetcher.completion.done()
         assert prefetcher.completion.exception() is failure
+
+    def test_run__resolves_completion_on_base_exception(self):
+        """Resolve the completion future when a BaseException escapes the fetch."""
+        prefetcher = _make_prefetcher(StubPrefetchBackend(KeyboardInterrupt("stop")))
+
+        with pytest.raises(KeyboardInterrupt):
+            prefetcher.run()
+
+        assert prefetcher.completion.done()
+        assert prefetcher.completion.exception() is None
 
     def test_buffer__returns_false_when_full_and_stop_requested(self):
         """Abandon a full buffer as soon as the prefetcher must stop."""
