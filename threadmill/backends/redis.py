@@ -103,12 +103,7 @@ class RedisBroker(Broker):
                 self._fail_unreadable_task(task_id, read_error)
 
     def _fail_unreadable_task(self, task_id: str, read_error: ImportError) -> None:
-        """Fail a claimed task whose stored retry callback is gone from the code base.
-
-        The unimportable callback is dropped from the payload, so the payload
-        stays readable and the failure is stored as a regular result. The
-        inspector can then requeue or drop the task.
-        """
+        """Fail a claimed task whose stored retry callback is gone from the code base."""
         task_key = self.backend.TASK_KEY.format(
             prefix=self.backend.key_prefix, task_id=task_id
         )
