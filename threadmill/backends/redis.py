@@ -378,16 +378,18 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         `worker=None` means the lease records no worker; an empty string still
         counts as an attempt, and a task that already records a start keeps it.
         """
-        leased = ThreadmillTaskResult.from_result(task_result, lease_token=lease_token)
+        task_result = ThreadmillTaskResult.from_result(
+            task_result, lease_token=lease_token
+        )
         return dataclasses.replace(
-            leased,
+            task_result,
             status=TaskResultStatus.RUNNING,
-            started_at=leased.started_at or lease_started_at,
-            last_attempted_at=lease_started_at or leased.last_attempted_at,
+            started_at=task_result.started_at or lease_started_at,
+            last_attempted_at=lease_started_at or task_result.last_attempted_at,
             worker_ids=(
-                [*leased.worker_ids, worker]
+                [*task_result.worker_ids, worker]
                 if worker is not None
-                else leased.worker_ids
+                else task_result.worker_ids
             ),
         )
 
