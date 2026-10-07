@@ -141,6 +141,11 @@ class StubPrefetchBackend:
 class StubPrefetchWorker:
     """Minimal worker stub exposing the state the prefetcher reads."""
 
+    @property
+    def task_wait_timeout(self) -> datetime.timedelta:
+        """Follow the worker's timeout, so patching it reaches this stub too."""
+        return WorkerProcess.task_wait_timeout
+
     def __init__(
         self, *, remaining: int | None = None, exit_empty: bool = False
     ) -> None:
@@ -316,10 +321,14 @@ class TestTaskExecutor:
         )
         assert executor.thread_count == 1
 
-    def test_post_init__derives_prefetch_count_from_threads(self):
+    @pytest.mark.parametrize("prefetch_count", [None, 0])
+    def test_post_init__derives_prefetch_count_from_threads(self, prefetch_count):
         """__post_init__ defaults the prefetch count to four tasks per thread."""
         executor = TaskExecutor(
-            backend=default_task_backend, threads=3, queues=("default",)
+            backend=default_task_backend,
+            prefetch_count=prefetch_count,
+            threads=3,
+            queues=("default",),
         )
         assert executor.prefetch_count == 12
 
@@ -330,17 +339,15 @@ class TestTaskExecutor:
         )
         assert executor.prefetch_count == 7
 
-    @pytest.mark.parametrize("prefetch_count", [0, -1])
-    def test_post_init__raise_value_error_for_prefetch_count_below_one(
-        self, prefetch_count
-    ):
-        """__post_init__ rejects a prefetch count below one."""
-        with pytest.raises(ValueError, match="prefetch_count must be at least 1"):
-            TaskExecutor(
-                backend=default_task_backend,
-                prefetch_count=prefetch_count,
-                queues=("default",),
-            )
+    @pytest.mark.parametrize("prefetch_count", [-1, -5])
+    def test_post_init__floors_prefetch_count_at_one(self, prefetch_count):
+        """__post_init__ floors a negative count, which would fetch nothing at all."""
+        executor = TaskExecutor(
+            backend=default_task_backend,
+            prefetch_count=prefetch_count,
+            queues=("default",),
+        )
+        assert executor.prefetch_count == 1
 
     def test_get_maximum_tasks_per_child__returns_none_when_max_tasks_is_zero(self):
         """get_maximum_tasks_per_child returns None when max_tasks is 0."""
@@ -635,7 +642,8 @@ class TestWorkerProcess:
         thread_failures = []
         monkeypatch.setattr(threading, "excepthook", thread_failures.append)
         monkeypatch.setattr(
-            "threadmill.executor.TASK_WAIT_TIMEOUT", datetime.timedelta(seconds=0.01)
+            "threadmill.executor.WorkerProcess.task_wait_timeout",
+            datetime.timedelta(seconds=0.01),
         )
         worker = WorkerProcess(
             thread_count=1,
@@ -680,7 +688,8 @@ class TestWorkerThread:
     def fast_task_wait(self, monkeypatch):
         """Shorten the buffer wait so drained run() tests return quickly."""
         monkeypatch.setattr(
-            "threadmill.executor.TASK_WAIT_TIMEOUT", datetime.timedelta(seconds=0.01)
+            "threadmill.executor.WorkerProcess.task_wait_timeout",
+            datetime.timedelta(seconds=0.01),
         )
 
     def test_execute_task_result__successful_execution(self):

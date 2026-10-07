@@ -100,10 +100,6 @@ def configure_logging(formatter: logging.Formatter) -> None:
     root_logger.addHandler(handler)
 
 
-# Maximum wait for a task from the backend or the prefetch buffer.
-TASK_WAIT_TIMEOUT = datetime.timedelta(seconds=1)
-
-
 @dataclasses.dataclass(kw_only=True, slots=True)
 class TaskExecutor:
     """Tasks consumed from shared joinable queues via process and thread pools."""
@@ -131,10 +127,7 @@ class TaskExecutor:
         """Initialize derived orchestration fields and queues."""
         self.process_count = self.workers or max(multiprocessing.cpu_count() - 1, 1)
         self.thread_count = max(self.threads, 1)
-        if self.prefetch_count is None:
-            self.prefetch_count = self.thread_count * 4
-        if self.prefetch_count < 1:
-            raise ValueError("prefetch_count must be at least 1")
+        self.prefetch_count = max(self.prefetch_count or self.thread_count * 4, 1)
 
     def get_maximum_tasks_per_child(self) -> int | None:
         """Return worker recycling limit based on config and thread count."""
@@ -211,6 +204,9 @@ class TaskExecutor:
 
 class WorkerProcess(multiprocessing.Process):
     """Single worker process running a prefetcher and thread_count consumer threads."""
+
+    task_wait_timeout: datetime.timedelta = datetime.timedelta(seconds=1)
+    """How long a thread waits on the broker or the buffer before it re-checks its stop condition."""
 
     def __init__(
         self,
@@ -347,7 +343,7 @@ class TaskPrefetcher(threading.Thread):
                     batch = self.backend.acquire(
                         *self.worker.queues,
                         count=count,
-                        timeout=TASK_WAIT_TIMEOUT,
+                        timeout=self.worker.task_wait_timeout,
                         worker=self.name,
                     )
                 except Empty, TimeoutError:
@@ -376,7 +372,9 @@ class TaskPrefetcher(threading.Thread):
         )
         while not self.stop_requested.is_set():
             try:
-                self.task_buffer.put(item, timeout=TASK_WAIT_TIMEOUT.total_seconds())
+                self.task_buffer.put(
+                    item, timeout=self.worker.task_wait_timeout.total_seconds()
+                )
             except Full:
                 continue
             return True
@@ -403,7 +401,7 @@ class WorkerThread(threading.Thread):
         while True:
             try:
                 task_result = prefetcher.task_buffer.get(
-                    timeout=TASK_WAIT_TIMEOUT.total_seconds()
+                    timeout=self.worker.task_wait_timeout.total_seconds()
                 ).task_result
             except Empty:
                 if prefetcher.finished.is_set():

@@ -160,18 +160,14 @@ class TestCommand:
             is TaskResultStatus.SUCCESSFUL
         )
 
-    @pytest.mark.parametrize("prefetch_count", [0, -1])
-    def test_call_command__prefetch_count__raise_command_error(self, prefetch_count):
-        """Reject a prefetch count below one with a CommandError."""
-        with pytest.raises(
-            CommandError,
-            match=re.escape(f"Invalid prefetch count: {prefetch_count!r}"),
-        ):
+    def test_call_command__prefetch_count__raise_command_error(self):
+        """Reject a negative prefetch count with a CommandError."""
+        with pytest.raises(CommandError, match=re.escape("Invalid prefetch count: -1")):
             call_command(
                 "threadmill",
                 "worker",
                 verbosity=0,
-                prefetch_count=prefetch_count,
+                prefetch_count=-1,
             )
 
     def test_call_command__poll_intervals(self):

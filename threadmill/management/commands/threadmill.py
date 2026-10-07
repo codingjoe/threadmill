@@ -149,7 +149,7 @@ class WorkerCommand(DjangoBaseCommand):
             )
         except (TypeError, ValueError) as e:
             raise CommandError(f"Invalid log format: {log_format!r}") from e
-        if prefetch_count is not None and prefetch_count < 1:
+        if prefetch_count is not None and prefetch_count < 0:
             raise CommandError(f"Invalid prefetch count: {prefetch_count!r}")
         exe = TaskExecutor(
             backend=backend,
