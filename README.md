@@ -99,7 +99,7 @@ Prefetching has soft limits:
 
 - Tasks are leased when they are fetched, so the time a task waits in the buffer counts against `lease_ttl`. Size `--prefetch-count` for your workload: the buffer holds at most that many tasks, and each of them is waiting.
 - A task enqueued after a fetch waits for the buffer to drain before a worker picks it up, though the buffer itself dispatches the highest priority task first and keeps queue order within a priority.
-- `--max-tasks` may overshoot by up to the buffer size, because a prefetched task always runs.
+- `--max-tasks` recycles a worker, it does not cap how many tasks run: a full buffer and the batch in hand both still run, so expect roughly twice the buffer size plus the thread count beyond the budget.
 - `worker_ids` records the fetcher of the process, not the thread that runs the task.
 
 #### Health
@@ -112,7 +112,7 @@ uv run manage.py threadmill worker --max-tasks 1000 --max-tasks-jitter 100
 
 This will restart the workers after 1000 tasks have been processed, with a random jitter of up to 100 tasks to avoid all workers restarting at the same time.
 
-The limit is soft: a worker still drains its prefetch buffer, so it may process up to `--prefetch-count` tasks beyond the configured maximum.
+The limit is soft: a worker drains its buffer and the batch already fetched before it stops, so it may process roughly twice `--prefetch-count` tasks beyond the configured maximum, plus whatever its threads were already running.
 
 Should a worker crash or be killed, the pool will automatically restart it.
 

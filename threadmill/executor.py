@@ -262,12 +262,6 @@ class WorkerProcess(multiprocessing.Process):
             logger.error("Worker process %s exits after a fetch failure", self.name)
             raise failure
 
-    def remaining_tasks(self) -> int | None:
-        """Return how many more tasks this process may run, or None when unlimited."""
-        if self.max_tasks is None:
-            return None
-        return max(self.max_tasks - self.task_count, 0)
-
     def record_task(self) -> None:
         """Record one processed task and stop when max_tasks is reached."""
         if self.max_tasks is None:
@@ -325,18 +319,10 @@ class TaskPrefetcher(threading.Thread):
     def run(self) -> None:
         try:
             while not self.stop_requested.is_set() and not self.worker.expired.is_set():
-                remaining = self.worker.remaining_tasks()
-                count = (
-                    self.prefetch_count
-                    if remaining is None
-                    else min(self.prefetch_count, remaining)
-                )
-                if count < 1:
-                    break
                 try:
                     batch = self.backend.acquire(
                         *self.worker.queues,
-                        count=count,
+                        count=self.prefetch_count,
                         timeout=self.worker.task_wait_timeout,
                         worker=self.name,
                     )

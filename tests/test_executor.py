@@ -146,19 +146,12 @@ class StubPrefetchWorker:
         """Follow the worker's timeout, so patching it reaches this stub too."""
         return WorkerProcess.task_wait_timeout
 
-    def __init__(
-        self, *, remaining: int | None = None, exit_empty: bool = False
-    ) -> None:
+    def __init__(self, *, exit_empty: bool = False) -> None:
         self.pid = 4242
         self.queues = ("default",)
-        self.remaining = remaining
         self.exit_empty = exit_empty
         self.expired = threading.Event()
         self.shutdown_requested = threading.Event()
-
-    def remaining_tasks(self) -> int | None:
-        """Return the scripted task budget."""
-        return self.remaining
 
 
 class CountingEvent(threading.Event):
@@ -177,12 +170,11 @@ def _make_prefetcher(
     backend: StubPrefetchBackend,
     *,
     prefetch_count: int = 4,
-    remaining: int | None = None,
     exit_empty: bool = False,
 ) -> TaskPrefetcher:
     """Build a prefetcher over a scripted stub backend and worker."""
     return TaskPrefetcher(
-        worker=StubPrefetchWorker(remaining=remaining, exit_empty=exit_empty),
+        worker=StubPrefetchWorker(exit_empty=exit_empty),
         backend=backend,
         prefetch_count=prefetch_count,
     )
@@ -605,22 +597,6 @@ class TestWorkerProcess:
         worker.record_task()
         assert worker.task_count == 0
 
-    def test_remaining_tasks__none_when_unlimited(self):
-        """remaining_tasks reports no budget when max_tasks is disabled."""
-        assert _make_worker(max_tasks=None).remaining_tasks() is None
-
-    def test_remaining_tasks__subtracts_task_count(self):
-        """remaining_tasks reports the unreached part of the worker budget."""
-        worker = _make_worker(max_tasks=5)
-        worker.task_count = 2
-        assert worker.remaining_tasks() == 3
-
-    def test_remaining_tasks__floors_at_zero(self):
-        """remaining_tasks never reports a negative budget."""
-        worker = _make_worker(max_tasks=2)
-        worker.task_count = 5
-        assert worker.remaining_tasks() == 0
-
     def test_shutdown_requested__is_settable(self):
         """shutdown_requested event can be set on an unstarted worker."""
         worker = _make_worker()
@@ -917,26 +893,16 @@ class TestTaskPrefetcher:
         assert prefetcher.finished.is_set()
         assert backend.calls == []
 
-    def test_run__breaks_when_no_budget_remains(self):
-        """Stop without acquiring once the worker budget is exhausted."""
-        backend = StubPrefetchBackend()
-        prefetcher = _make_prefetcher(backend, remaining=0)
-
-        prefetcher.run()
-
-        assert backend.calls == []
-        assert prefetcher.finished.is_set()
-
-    def test_run__caps_count_at_remaining_budget(self):
-        """Acquire no more tasks than the remaining worker budget allows."""
+    def test_run__acquires_a_full_buffer(self):
+        """Acquire a full buffer; the worker budget only stops the loop."""
         task_result = _task_result(echo, 1)
         backend = StubPrefetchBackend([task_result])
-        prefetcher = _make_prefetcher(backend, prefetch_count=5, remaining=2)
+        prefetcher = _make_prefetcher(backend, prefetch_count=5)
 
         prefetcher.worker.shutdown_requested.set()
         prefetcher.run()
 
-        assert backend.calls[0]["count"] == 2
+        assert backend.calls[0]["count"] == 5
         assert prefetcher.task_buffer.get_nowait().task_result.id == task_result.id
         assert len(backend.calls) == 1
         assert prefetcher.finished.is_set()
