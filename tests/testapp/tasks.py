@@ -7,6 +7,8 @@ import uuid
 from django.tasks import task
 from django.tasks.base import TaskContext
 
+from threadmill.exceptions import AcknowledgementTimeout
+
 logger = logging.getLogger(__name__)
 
 
@@ -99,16 +101,15 @@ def retry_never(context: TaskContext) -> datetime.timedelta | None:
     return None
 
 
-def retry_thrice(context: TaskContext) -> datetime.timedelta | None:
-    """Retry up to 3 attempts, then stop."""
-    if context.attempt >= 3:
-        return None
-    return datetime.timedelta(seconds=1)
-
-
 def retry_raise(context: TaskContext) -> datetime.timedelta | None:
     """Raise an exception to test retry callback error handling."""
     raise RuntimeError("retry callback crashed")
+
+
+def retry_on_lease_expiry(context: TaskContext) -> datetime.timedelta | None:
+    """Retry with a fixed 1-second delay only when the lease expired."""
+    if context.task_result.errors[-1].exception_class is AcknowledgementTimeout:
+        return datetime.timedelta(seconds=1)
 
 
 @task(retry=retry_always)
@@ -123,13 +124,13 @@ def boom_no_retry():
     raise ValueError("boom")
 
 
-@task(retry=retry_thrice)
-def boom_retry_thrice():
-    """Raise ValueError, retry up to 3 attempts."""
-    raise ValueError("boom")
-
-
 @task(retry=retry_raise)
 def boom_retry_raises():
     """Raise ValueError, retry callback itself raises."""
     raise ValueError("boom")
+
+
+@task(retry=retry_on_lease_expiry)
+def echo_retry_on_lease_expiry(value):
+    """Return the given value, retrying only when the lease expired."""
+    return value

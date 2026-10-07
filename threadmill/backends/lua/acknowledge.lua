@@ -20,6 +20,11 @@
 -- ARGV[7]  -- queue name
 -- Returns: 1 on success, 0 if task was not in the running set
 
+local lease_token = redis.call('HGET', KEYS[3], 'lease_token')
+if lease_token and lease_token ~= ARGV[8] then
+  return 0
+end
+
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 if removed == 0 then
   return 0  -- Task already reaped, skip

@@ -325,7 +325,7 @@ class TestInspectorApp:
             task_list.selected_task = next(
                 r for r in task_list._current_results if r.id == first.id
             )
-            acquired = default_task_backend.acquire(
+            (acquired,) = default_task_backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="inspector-test"
             )
             assert acquired.id == first.id
@@ -433,10 +433,9 @@ class TestInspectorApp:
     async def test_successful_tab_lists_finished_task(self):
         """The successful tab renders acknowledged tasks with the finished column."""
         default_task_backend.enqueue(echo, args=[1])
-        acquired = default_task_backend.acquire(
+        (acquired,) = default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="succ-test"
         )
-        assert acquired is not None
         default_task_backend.acknowledge(
             dataclasses.replace(
                 acquired,
@@ -530,10 +529,9 @@ class TestInspectorApp:
 def _acknowledge_failed() -> str:
     """Enqueue, acquire, and acknowledge a task as FAILED. Return its ID."""
     task_result = default_task_backend.enqueue(echo, args=[1])
-    acquired = default_task_backend.acquire(
+    (acquired,) = default_task_backend.acquire(
         timeout=datetime.timedelta(seconds=1), worker="inspector-test"
     )
-    assert acquired is not None
     default_task_backend.acknowledge(
         dataclasses.replace(
             acquired, status=TaskResultStatus.FAILED, finished_at=timezone.now()
@@ -545,10 +543,9 @@ def _acknowledge_failed() -> str:
 def _acknowledge_successful() -> str:
     """Enqueue, acquire, and acknowledge a task as SUCCESSFUL. Return its ID."""
     task_result = default_task_backend.enqueue(echo, args=[1])
-    acquired = default_task_backend.acquire(
+    (acquired,) = default_task_backend.acquire(
         timeout=datetime.timedelta(seconds=1), worker="inspector-test"
     )
-    assert acquired is not None
     default_task_backend.acknowledge(
         dataclasses.replace(
             acquired, status=TaskResultStatus.SUCCESSFUL, finished_at=timezone.now()

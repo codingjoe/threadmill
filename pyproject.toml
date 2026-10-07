@@ -53,7 +53,8 @@ dev = [
 test = [
   "celery",
   "django-tasks-db",
-  "django-tasks-redis",
+  "django-tasks-rq",
+  "dramatiq[redis]>=2.2.1",
   "pytest",
   "pytest-asyncio",
   "pytest-benchmark",

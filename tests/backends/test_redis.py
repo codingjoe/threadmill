@@ -1,6 +1,8 @@
+import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import json
 import logging
 import queue
 import threading
@@ -12,14 +14,24 @@ from unittest.mock import patch
 import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
+from django.tasks.exceptions import TaskResultDoesNotExist
 from django.utils import timezone
 
-from tests.testapp.tasks import boom, boom_with_retry, compute_workload, echo
+from tests.testapp.tasks import (
+    boom,
+    boom_no_retry,
+    boom_with_retry,
+    compute_workload,
+    echo,
+    echo_retry_on_lease_expiry,
+)
 from threadmill.backends.base import (
     BackendTelemetry,
     QueueCounts,
     QueueRates,
     QueueStats,
+    TelemetryDirection,
+    TelemetryEvent,
 )
 from threadmill.backends.redis import (  # noqa: E402
     IdleBackoff,
@@ -96,6 +108,70 @@ def _measure_wait_deltas(calls: list[float]) -> list[float]:
     return [calls[index + 1] - calls[index] for index in range(len(calls) - 1)]
 
 
+def _now_ms() -> float:
+    """Return the current time in milliseconds since the UNIX epoch."""
+    return timezone.now().timestamp() * 1000
+
+
+def _expire_lease(
+    backend: RedisTaskBackend, task_id: str, queue_name: str = "default"
+) -> None:
+    """Backdate a running task's lease so the next reaper pass claims it."""
+    backend.client.zadd(
+        backend._segment_key(TaskResultStatus.RUNNING, queue_name), {task_id: 0}
+    )
+
+
+def _assert_dropped(backend: RedisTaskBackend, task_id: str) -> None:
+    """Assert a dropped task keeps its running entry without its payload."""
+    assert (
+        backend.client.exists(
+            backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=task_id)
+        )
+        == 0
+    )
+    running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+    assert backend.client.zscore(running_key, task_id) is not None
+
+
+_GONE_CALLBACK = "tests.testapp.tasks.gone_from_the_code_base"
+
+
+def _corrupt_payload(
+    backend: RedisTaskBackend,
+    task_id: str,
+    data: str | None = None,
+    task: dict | None = None,
+    **fields: object,
+) -> None:
+    """Overwrite a leased task's stored payload with raw data or patched fields."""
+    task_key = backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=task_id)
+    if task or fields:
+        payload = json.loads(backend.client.hget(task_key, "data"))
+        payload["task"].update(task or {})
+        payload.update(fields)
+        data = json.dumps(payload)
+    backend.client.hset(task_key, "data", data)
+
+
+def _claim_expired(
+    backend: RedisTaskBackend,
+    broker: RedisBroker,
+    *,
+    queue_name: str = "default",
+) -> list[str]:
+    """Run the reaper claim script and return the claimed IDs."""
+    claimed = broker._reaper_script(
+        keys=[backend._segment_key(TaskResultStatus.RUNNING, queue_name)],
+        args=[
+            str(int(RedisBroker.CLAIM_TTL.total_seconds() * 1000)),
+            str(backend.batch_size),
+            f"{backend.key_prefix}:task:",
+        ],
+    )
+    return list(claimed)
+
+
 class TestRedisBroker:
     def test_mover__moves_deferred_task_to_ready(self):
         """Mover promotes due deferred tasks to the ready queue."""
@@ -106,8 +182,9 @@ class TestRedisBroker:
         task_result = default_task_backend.enqueue(deferred_task, args=[])
         broker = RedisBroker(default_task_backend)
         broker.main()
-        acquired = default_task_backend.acquire(timeout=datetime.timedelta(seconds=1))
-        assert acquired is not None
+        (acquired,) = default_task_backend.acquire(
+            timeout=datetime.timedelta(seconds=1)
+        )
         assert acquired.id == task_result.id
 
     def test_error_path__maintain_continues_after_exception(self, caplog):
@@ -123,6 +200,145 @@ class TestRedisBroker:
                 broker.main()
         assert "Mover error for queue" in caplog.text
         assert "Running reaper error for queue" in caplog.text
+
+
+class TestRedisBrokerReap:
+    """Tests for reaping tasks whose processing lease expired."""
+
+    def test_reap__requeues_task_when_retry_callback_returns_delay(self):
+        """Reaping requeues the task due after the delay returned by the callback."""
+        backend = _make_backend(
+            "reap_retry_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _expire_lease(backend, task_result.id)
+
+            started_at_ms = _now_ms()
+            RedisBroker(backend).main()
+            finished_at_ms = _now_ms()
+
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            score = backend.client.zscore(deferred_key, task_result.id)
+            assert score is not None
+            assert started_at_ms + 1000 <= score <= finished_at_ms + 1000
+
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            stored = backend.deserialize_task_result(
+                backend.client.hget(task_key, "data")
+            )
+            assert (
+                stored.errors[-1].exception_class_path
+                == "threadmill.exceptions.AcknowledgementTimeout"
+            )
+        finally:
+            backend.close()
+
+    def test_reap_task__skips_when_task_data_is_missing(self, caplog):
+        """_reap_task logs and skips when the claimed task data is gone."""
+        backend = _make_backend("reap_missing_data_test")
+        try:
+            broker = RedisBroker(backend)
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                broker._reap_task("missing-task-id")
+            assert "has no task data" in caplog.text
+        finally:
+            backend.close()
+
+    def test_reap__claims_once_per_claim_ttl(self):
+        """Claiming renews the lease so a concurrent pass leaves the task alone."""
+        backend = _make_backend(
+            "reap_claim_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(boom_no_retry, args=[])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _expire_lease(backend, task_result.id)
+
+            broker = RedisBroker(backend)
+            claimed_ids = _claim_expired(backend, broker)
+
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert claimed_ids == [task_result.id]
+            assert backend.client.zscore(running_key, task_result.id) > _now_ms()
+
+            # A concurrent pass within the claim TTL leaves the task alone.
+            assert _claim_expired(backend, broker) == []
+
+            # Once the claim lapses the task is claimed again.
+            _expire_lease(backend, task_result.id)
+            assert _claim_expired(backend, broker) == [task_result.id]
+        finally:
+            backend.close()
+
+    def test_reap__removes_running_entry_without_task_data(self):
+        """A running entry without task data is unrecoverable and removed."""
+        backend = _make_backend(
+            "reap_orphan_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            backend.client.delete(
+                backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=task_result.id
+                )
+            )
+            _expire_lease(backend, task_result.id)
+
+            RedisBroker(backend).main()
+
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            assert backend.client.zscore(running_key, task_result.id) is None
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            {"data": "{not json"},
+            {"data": "{}"},
+            {"task": {"func": _GONE_CALLBACK}},
+            {"task": {"retry": _GONE_CALLBACK}},
+            {"status": "CANCELLED"},
+        ],
+        ids=["malformed", "not-a-result", "gone-func", "gone-retry", "unknown-status"],
+    )
+    def test_reap__drops_task_when_payload_cannot_be_read(self, corruption, caplog):
+        """A payload the reaper cannot read drops the claimed task."""
+        backend = _make_backend(
+            "reap_drop_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _corrupt_payload(backend, task_result.id, **corruption)
+            _expire_lease(backend, task_result.id)
+
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+                RedisBroker(backend)._reap_running_queue("default")
+
+            assert "payload cannot be read; dropping the task" in caplog.text
+            _assert_dropped(backend, task_result.id)
+        finally:
+            backend.close()
 
 
 class TestRedisTaskBackend:
@@ -143,32 +359,24 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="worker-1"
             )
-            assert acquired is not None
             assert acquired.id == task_result.id
 
             # Verify task is in running set, not in any processing set
             running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
             assert backend.client.zscore(running_key, task_result.id) is not None
 
-            # Verify task data was updated with worker info
-            task_key = backend.TASK_KEY.format(
-                prefix=backend.key_prefix, task_id=task_result.id
-            )
-            stored_data = backend.client.hget(task_key, "data")
-            deserialized = backend.deserialize_task_result(stored_data)
-            assert deserialized.status == TaskResultStatus.RUNNING
-            assert deserialized.worker_ids == ["worker-1"]
-            assert deserialized.last_attempted_at is not None
+            assert acquired.status == TaskResultStatus.RUNNING
+            assert acquired.worker_ids == ["worker-1"]
         finally:
             backend.close()
 
-    def test_acquire__sets_last_attempted_at(self):
-        """acquire() sets last_attempted_at and worker_ids in the stored task data."""
+    def test_acquire__stamps_lease_on_task_hash(self):
+        """Record the acquiring worker and lease start on the task hash."""
         backend = RedisTaskBackend(
-            "last_attempted_test",
+            "acquire_lease_test",
             {
                 "QUEUES": ["default"],
                 "REDIS_URL": "redis://localhost:6379/0",
@@ -180,21 +388,160 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="test-worker"
             )
-            assert acquired is not None
             assert acquired.last_attempted_at is not None
+            assert acquired.started_at == acquired.last_attempted_at
             assert acquired.worker_ids == ["test-worker"]
+            assert acquired.lease_token is not None
 
-            # Verify it's persisted in Redis
+            # Verify the lease is persisted, not only applied in memory.
+            restored = backend.get_leased_task(task_result.id)
+            assert restored is not None
+            assert restored.worker_ids == acquired.worker_ids
+            assert restored.started_at == acquired.started_at
+            assert restored.last_attempted_at == acquired.last_attempted_at
+            assert restored.lease_token == acquired.lease_token
+        finally:
+            backend.close()
+
+    def test_get_leased_task__keeps_stored_attempt_when_lease_fields_are_missing(self):
+        """Read a running payload without lease fields as its stored attempt."""
+        backend = _make_backend("upgrade_lease_test")
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            attempted_at = (timezone.now() - datetime.timedelta(minutes=5)).replace(
+                microsecond=0
+            )
+            stored = replace(
+                task_result,
+                status=TaskResultStatus.RUNNING,
+                started_at=attempted_at,
+                last_attempted_at=attempted_at,
+                worker_ids=["upgrade-worker"],
+            )
             task_key = backend.TASK_KEY.format(
                 prefix=backend.key_prefix, task_id=task_result.id
             )
-            stored_data = backend.client.hget(task_key, "data")
-            deserialized = backend.deserialize_task_result(stored_data)
-            assert deserialized.last_attempted_at is not None
-            assert deserialized.worker_ids == ["test-worker"]
+            backend.client.hset(task_key, "data", backend.serialize_task_result(stored))
+            backend.client.zadd(
+                backend._segment_key(TaskResultStatus.RUNNING, "default"),
+                {task_result.id: _now_ms()},
+            )
+
+            restored = backend.get_leased_task(task_result.id)
+
+            assert restored is not None
+            assert restored.status == TaskResultStatus.RUNNING
+            assert restored.started_at == attempted_at
+            assert restored.last_attempted_at == attempted_at
+            assert restored.worker_ids == ["upgrade-worker"]
+        finally:
+            backend.close()
+
+    def test_acquire__leaves_stored_payload_untouched(self):
+        """acquire() stamps the lease beside the enqueued payload, not into it."""
+        backend = RedisTaskBackend(
+            "payload_untouched_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "lease_ttl": datetime.timedelta(hours=1),
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            enqueued_data = backend.client.hget(task_key, "data")
+
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="untouched-test"
+            )
+
+            assert acquired is not None
+            assert backend.client.hget(task_key, "data") == enqueued_data
+            assert (
+                backend.deserialize_task_result(enqueued_data).status
+                == TaskResultStatus.READY
+            )
+        finally:
+            backend.close()
+
+    def test_acquire__records_attempt_for_empty_worker_name(self):
+        """acquire() counts an attempt even when the worker name is empty."""
+        backend = _make_backend("acquire_empty_worker_test")
+        try:
+            backend.enqueue(echo, args=[1])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker=""
+            )
+
+            assert acquired.worker_ids == [""]
+        finally:
+            backend.close()
+
+    def test_acknowledge__stores_the_leased_attempt(self):
+        """acknowledge() persists the worker and start the lease gave the task."""
+        backend = RedisTaskBackend(
+            "acknowledge_lease_test",
+            {
+                "QUEUES": ["default"],
+                "REDIS_URL": "redis://localhost:6379/0",
+                "OPTIONS": {
+                    "lease_ttl": datetime.timedelta(hours=1),
+                    "result_ttl": datetime.timedelta(seconds=60),
+                },
+            },
+        )
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="ack-worker"
+            )
+            assert acquired is not None
+            backend.acknowledge(
+                dataclasses.replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            result = backend.get_result(task_result.id)
+            assert result.worker_ids == ["ack-worker"]
+            assert result.started_at is not None
+            assert result.started_at == result.last_attempted_at
+        finally:
+            backend.close()
+
+    def test_acknowledge__keeps_lease_token_out_of_the_result(self):
+        """Persist no lease token: it is attempt state, not result state."""
+        backend = _make_backend("acknowledge_token_test")
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="token-test"
+            )
+            assert acquired is not None
+
+            backend.acknowledge(
+                replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            result_key = backend.RESULT_KEY.format(
+                prefix=backend.key_prefix, result_id=task_result.id
+            )
+            assert "lease_token" not in json.loads(backend.client.get(result_key))
         finally:
             backend.close()
 
@@ -213,10 +560,9 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="reaper-test"
             )
-            assert acquired is not None
 
             # Wait for lease to expire
             time.sleep(1.1)
@@ -230,6 +576,9 @@ class TestRedisTaskBackend:
             assert result.status == TaskResultStatus.FAILED
             assert len(result.errors) == 1
             assert "AcknowledgementTimeout" in result.errors[0].exception_class_path
+            assert result.worker_ids == ["reaper-test"]
+            assert result.started_at == result.last_attempted_at
+            assert result.started_at is not None
 
             # Reaping an expired task records a failed result. Live egress
             # now arrives via pub/sub, so backend.queue_stats() rates are zero.
@@ -255,10 +604,9 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="stale-ack-test"
             )
-            assert acquired is not None
 
             # Wait for lease to expire
             time.sleep(1.1)
@@ -279,6 +627,62 @@ class TestRedisTaskBackend:
             # The result should still be the FAILED one from the reaper
             result = backend.get_result(task_result.id)
             assert result.status == TaskResultStatus.FAILED
+        finally:
+            backend.close()
+
+    def test_stale_acknowledge__keeps_retry_attempt_after_requeue(self):
+        """Discard a late acknowledgement while a retry attempt holds the lease."""
+        backend = _make_backend(
+            "stale_ack_retry_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
+            (expired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="expired-worker"
+            )
+            assert expired is not None
+            _expire_lease(backend, task_result.id)
+            RedisBroker(backend).main()
+
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            backend.client.zadd(deferred_key, {task_result.id: 0})
+            RedisBroker(backend).main()
+            (retry,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="retry-worker"
+            )
+            assert retry is not None
+            assert retry.id == task_result.id
+
+            backend.acknowledge(
+                replace(
+                    expired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.zscore(running_key, task_result.id) is not None
+            assert backend.client.exists(task_key)
+
+            backend.acknowledge(
+                replace(
+                    retry,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+            assert backend.get_result(task_result.id).worker_ids == [
+                "expired-worker",
+                "retry-worker",
+            ]
         finally:
             backend.close()
 
@@ -316,10 +720,9 @@ class TestRedisTaskBackend:
             backend.enqueue(echo, args=[42])
             backend.enqueue(boom, args=[])
 
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="telemetry-test"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -328,10 +731,9 @@ class TestRedisTaskBackend:
                 )
             )
 
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="telemetry-test"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -366,10 +768,9 @@ class TestRedisTaskBackend:
             backend.enqueue(echo, args=[3])
 
             for _ in range(2):
-                acquired = backend.acquire(
+                (acquired,) = backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="egress-test"
                 )
-                assert acquired is not None
                 backend.acknowledge(
                     dataclasses.replace(
                         acquired,
@@ -377,10 +778,9 @@ class TestRedisTaskBackend:
                         finished_at=timezone.now(),
                     )
                 )
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="egress-test"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -418,10 +818,9 @@ class TestRedisTaskBackend:
 
             def _ack(status: TaskResultStatus) -> str:
                 enqueued = backend.enqueue(echo, args=[1])
-                acquired = backend.acquire(
+                (acquired,) = backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="eviction-test"
                 )
-                assert acquired is not None
                 backend.acknowledge(
                     dataclasses.replace(
                         acquired, status=status, finished_at=timezone.now()
@@ -452,7 +851,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     @staticmethod
-    def _await_message(pubsub, expected: bytes, *, timeout: float = 2.0):
+    def _await_message(pubsub, expected: str, *, timeout: float = 2.0):
         """Drain pubsub until a user message with the expected payload arrives."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -489,8 +888,8 @@ class TestRedisTaskBackend:
             pubsub.subscribe(backend.telemetry_channel)
             self._drain_subscription(pubsub)
             backend.enqueue(echo, args=[1])
-            message = self._await_message(pubsub, b"ingress:default")
-            assert message["channel"] == backend.telemetry_channel.encode()
+            message = self._await_message(pubsub, "ingress:default")
+            assert message["channel"] == backend.telemetry_channel
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
@@ -512,7 +911,7 @@ class TestRedisTaskBackend:
         pubsub = backend.client.pubsub()
         try:
             backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="publish-test"
             )
             pubsub.subscribe(backend.telemetry_channel)
@@ -524,8 +923,8 @@ class TestRedisTaskBackend:
                     finished_at=timezone.now(),
                 )
             )
-            message = self._await_message(pubsub, b"egress:default")
-            assert message["channel"] == backend.telemetry_channel.encode()
+            message = self._await_message(pubsub, "egress:default")
+            assert message["channel"] == backend.telemetry_channel
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
@@ -547,10 +946,9 @@ class TestRedisTaskBackend:
         pubsub = backend.client.pubsub()
         try:
             backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="requeue-publish-test"
             )
-            assert acquired is not None
             failed = dataclasses.replace(
                 acquired,
                 status=TaskResultStatus.FAILED,
@@ -559,17 +957,39 @@ class TestRedisTaskBackend:
             pubsub.subscribe(backend.telemetry_channel)
             self._drain_subscription(pubsub)
             backend.requeue(failed, timezone.now() + datetime.timedelta(seconds=10))
-            message = self._await_message(pubsub, b"ingress:default")
-            assert message["channel"] == backend.telemetry_channel.encode()
+            message = self._await_message(pubsub, "ingress:default")
+            assert message["channel"] == backend.telemetry_channel
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
             backend.close()
 
+    async def test_worker_telemetry__yields_reply_as_event(self):
+        """worker_telemetry() yields the pub/sub reply as an event."""
+        backend = _make_backend("worker_telemetry_test")
+        try:
+            stream = backend.worker_telemetry()
+            pending = asyncio.ensure_future(anext(stream))
+            try:
+                for _attempt in range(50):
+                    if backend.client.pubsub_numsub(backend.telemetry_channel)[0][1]:
+                        break
+                    await asyncio.sleep(0.05)
+                backend.client.publish(backend.telemetry_channel, "ingress:default")
+                event = await asyncio.wait_for(pending, timeout=2)
+            finally:
+                await stream.aclose()
+
+            assert event == TelemetryEvent(
+                direction=TelemetryDirection.INGRESS, queue_name="default"
+            )
+        finally:
+            backend.close()
+
     def _acknowledge(self, status: TaskResultStatus) -> str:
         """Enqueue, acquire, and acknowledge a task with the given status."""
         task_result = default_task_backend.enqueue(echo, args=[1])
-        acquired = default_task_backend.acquire(
+        (acquired,) = default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="peek-test"
         )
         assert acquired.id == task_result.id
@@ -590,9 +1010,9 @@ class TestRedisTaskBackend:
         assert [r.args for r in results] == [[1], [2]]
 
     def test_peek__running_tasks(self):
-        """Peek RUNNING returns acquired tasks with worker info."""
+        """Peek RUNNING returns acquired tasks with the lease's worker info."""
         default_task_backend.enqueue(echo, args=[1])
-        acquired = default_task_backend.acquire(
+        (acquired,) = default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="peek-test"
         )
         results = list(
@@ -602,6 +1022,68 @@ class TestRedisTaskBackend:
         )
         assert [r.id for r in results] == [acquired.id]
         assert results[0].status == TaskResultStatus.RUNNING
+        assert results[0].worker_ids == ["peek-test"]
+        assert results[0].last_attempted_at == acquired.last_attempted_at
+        assert results[0].started_at == acquired.started_at
+
+    def test_peek__running_task_without_lease(self):
+        """Peek RUNNING marks a task whose hash carries no lease as RUNNING."""
+        task_result = default_task_backend.enqueue(echo, args=[1])
+        default_task_backend.acquire(
+            timeout=datetime.timedelta(seconds=1), worker="lease-less-test"
+        )
+        task_key = default_task_backend.TASK_KEY.format(
+            prefix=default_task_backend.key_prefix, task_id=task_result.id
+        )
+        default_task_backend.client.hdel(task_key, *default_task_backend.LEASE_FIELDS)
+
+        (result,) = default_task_backend.peek(
+            queue_name="default", status=TaskResultStatus.RUNNING, count=10
+        )
+
+        assert result.status == TaskResultStatus.RUNNING
+        assert result.worker_ids == []
+        assert result.last_attempted_at is None
+        assert result.started_at is None
+
+    def test_peek__running_task_with_unparseable_lease_start(self):
+        """Read a lease start that is not a timestamp as no start time."""
+        task_result = default_task_backend.enqueue(echo, args=[1])
+        default_task_backend.acquire(
+            timeout=datetime.timedelta(seconds=1), worker="malformed-test"
+        )
+        task_key = default_task_backend.TASK_KEY.format(
+            prefix=default_task_backend.key_prefix, task_id=task_result.id
+        )
+        default_task_backend.client.hset(task_key, "lease_started_at", "not-a-time")
+
+        (result,) = default_task_backend.peek(
+            queue_name="default", status=TaskResultStatus.RUNNING, count=10
+        )
+
+        assert result.status == TaskResultStatus.RUNNING
+        assert result.worker_ids == ["malformed-test"]
+        assert result.started_at is None
+
+    def test_peek__running_tasks_skip_expired_task_data(self):
+        """Peek RUNNING skips leased entries whose task data hash has expired."""
+        task_result = default_task_backend.enqueue(echo, args=[1])
+        default_task_backend.acquire(
+            timeout=datetime.timedelta(seconds=1), worker="expired-test"
+        )
+        default_task_backend.client.delete(
+            default_task_backend.TASK_KEY.format(
+                prefix=default_task_backend.key_prefix, task_id=task_result.id
+            )
+        )
+
+        results = list(
+            default_task_backend.peek(
+                queue_name="default", status=TaskResultStatus.RUNNING, count=10
+            )
+        )
+
+        assert results == []
 
     def test_peek__successful_and_failed_history(self):
         """Peek SUCCESSFUL/FAILED filter acknowledged results by status."""
@@ -680,10 +1162,9 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(boom_with_retry, args=[])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="requeue-test"
             )
-            assert acquired is not None
 
             # Simulate a failed execution
             from django.tasks.base import TaskError
@@ -709,6 +1190,11 @@ class TestRedisTaskBackend:
             )
             assert backend.client.zscore(running_key, task_result.id) is None
             assert backend.client.zscore(deferred_key, task_result.id) is not None
+            # A cleared lease reads as no lease.
+            restored = backend.get_leased_task(task_result.id)
+            assert restored is not None
+            assert restored.worker_ids == acquired.worker_ids
+            assert restored.started_at is None
         finally:
             backend.close()
 
@@ -727,10 +1213,9 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(boom_with_retry, args=[])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="preserve-test"
             )
-            assert acquired is not None
 
             from django.tasks.base import TaskError
 
@@ -778,10 +1263,9 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(boom_with_retry, args=[])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="requeue-acq-test"
             )
-            assert acquired is not None
 
             from django.tasks.base import TaskError
 
@@ -806,10 +1290,9 @@ class TestRedisTaskBackend:
             broker.main()
 
             # The task should be acquirable again
-            re_acquired = backend.acquire(
+            (re_acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="requeue-acq-test-2"
             )
-            assert re_acquired is not None
             assert re_acquired.id == task_result.id
         finally:
             backend.close()
@@ -829,10 +1312,9 @@ class TestRedisTaskBackend:
         )
         try:
             backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="cleanup-test"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -898,10 +1380,9 @@ class TestRedisTaskBackend:
         )
         try:
             backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="dequeue-failed-test"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -943,10 +1424,9 @@ class TestRedisTaskBackend:
             backend.acquire(timeout=datetime.timedelta(seconds=1), worker="purge-test")
             # One failed task
             backend.enqueue(echo, args=[3])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="purge-test-2"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -956,10 +1436,9 @@ class TestRedisTaskBackend:
             )
             # One successful task
             backend.enqueue(echo, args=[4])
-            acquired = backend.acquire(
+            (acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="purge-test-3"
             )
-            assert acquired is not None
             backend.acknowledge(
                 dataclasses.replace(
                     acquired,
@@ -1088,8 +1567,7 @@ class TestRedisTaskBackend:
                 assert buildup_deltas[2] >= 0.15
 
             backend.enqueue(echo, args=[1])
-            acquired = backend.acquire(timeout=datetime.timedelta(seconds=1))
-            assert acquired is not None
+            (acquired,) = backend.acquire(timeout=datetime.timedelta(seconds=1))
             assert len(script.calls) == buildup_end + 1
 
             with pytest.raises(TimeoutError):
@@ -1143,14 +1621,14 @@ class TestRedisTaskBackend:
                 for value in range(neighbour_tasks)
             }
 
-            acquired_ids = {
-                backend.acquire(
+            acquired_ids = set()
+            for _ in range(2 * neighbour_tasks):
+                (task_result,) = backend.acquire(
                     "compute",
                     "io",
                     timeout=datetime.timedelta(seconds=1),
-                ).id
-                for _ in range(2 * neighbour_tasks)
-            }
+                )
+                acquired_ids.add(task_result.id)
             assert neighbour_ids <= acquired_ids
         finally:
             backend.close()
@@ -1165,16 +1643,16 @@ class TestRedisTaskBackend:
         try:
             backend.enqueue(replace(echo, queue_name="compute"), args=[1])
             backend.enqueue(replace(echo, queue_name="io"), args=[2])
-            acquired = [
-                backend.acquire(
+            acquired = []
+            for _ in range(2):
+                (task_result,) = backend.acquire(
                     "default",
                     "compute",
                     "io",
                     timeout=datetime.timedelta(seconds=1),
                     worker="worker-1",
                 )
-                for _ in range(2)
-            ]
+                acquired.append(task_result)
             assert [result.task.queue_name for result in acquired] == ["compute", "io"]
             running_by_queue = {
                 queue_name: {
@@ -1211,9 +1689,10 @@ class TestRedisTaskBackend:
 
             acquired = []
             for _ in range(2 * len(queue_names)):
-                acquired.append(
-                    backend.acquire(*queue_names, timeout=datetime.timedelta(seconds=1))
+                (task_result,) = backend.acquire(
+                    *queue_names, timeout=datetime.timedelta(seconds=1)
                 )
+                acquired.append(task_result)
                 assert 0 <= backend._idle_backoff.rotation_offset < len(queue_names)
 
             assert [result.task.queue_name for result in acquired] == [
@@ -1221,11 +1700,12 @@ class TestRedisTaskBackend:
                 "default",
                 "compute",
             ] * 2
-            assert [sent_args[-1] for sent_args in recorder.sent_args] == [
+            assert [sent_args[-2] for sent_args in recorder.sent_args] == [
                 "2",
                 "0",
                 "1",
             ] * 2
+            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"1"}
         finally:
             backend.close()
 
@@ -1246,8 +1726,93 @@ class TestRedisTaskBackend:
                     timeout=datetime.timedelta(seconds=0.3),
                 )
             assert len(recorder.sent_args) > 1
-            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"5"}
+            assert {sent_args[-2] for sent_args in recorder.sent_args} == {"5"}
+            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"1"}
             assert backend._idle_backoff.rotation_offset == 5
+        finally:
+            backend.close()
+
+    def test_acquire__passes_count_to_script(self):
+        """acquire() sends the requested count as the last script argument."""
+        backend = _make_backend("acquire_count_arg_test")
+        recorder = RecordingAcquireScript(backend._acquire_script)
+        backend._acquire_script = recorder
+        try:
+            backend.enqueue(echo, args=[1])
+            (acquired,) = backend.acquire(
+                count=3, timeout=datetime.timedelta(seconds=1), worker="count-test"
+            )
+            assert recorder.sent_args[-1][-1] == "3"
+            assert acquired.worker_ids == ["count-test"]
+        finally:
+            backend.close()
+
+    def test_acquire__returns_up_to_count_tasks(self):
+        """acquire(count=N) locks at most N tasks and leaves the surplus ready."""
+        backend = _make_backend("acquire_batch_test")
+        try:
+            enqueued = [backend.enqueue(echo, args=[value]) for value in range(3)]
+            acquired = backend.acquire(
+                count=2, timeout=datetime.timedelta(seconds=1), worker="batch-test"
+            )
+            assert len(acquired) == 2
+            assert {task_result.id for task_result in acquired} <= {
+                task_result.id for task_result in enqueued
+            }
+            assert all(
+                task_result.status is TaskResultStatus.RUNNING
+                for task_result in acquired
+            )
+            assert all(
+                task_result.worker_ids == ["batch-test"] for task_result in acquired
+            )
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            ready_key = backend._segment_key(TaskResultStatus.READY, "default")
+            assert backend.client.zcard(running_key) == 2
+            assert backend.client.zcard(ready_key) == 1
+        finally:
+            backend.close()
+
+    def test_acquire__short_batch_does_not_wait_for_count(self):
+        """acquire(count=N) returns a short batch without waiting for the rest."""
+        backend = _make_backend("acquire_short_batch_test")
+        try:
+            enqueued = backend.enqueue(echo, args=[1])
+            started_at = time.monotonic()
+            acquired = backend.acquire(
+                count=5,
+                timeout=datetime.timedelta(seconds=5),
+                worker="short-batch-test",
+            )
+            assert [task_result.id for task_result in acquired] == [enqueued.id]
+            assert time.monotonic() - started_at < 2
+        finally:
+            backend.close()
+
+    def test_acquire__spreads_batch_across_queues(self):
+        """acquire(count=N) pops round-robin, spreading one batch over the queues."""
+        backend = _make_backend(
+            "acquire_batch_round_robin_test",
+            queues=["compute", "io"],
+        )
+        backend._idle_backoff.rotation_offset = 0
+        try:
+            for value in range(2):
+                backend.enqueue(replace(echo, queue_name="compute"), args=[value])
+                backend.enqueue(replace(echo, queue_name="io"), args=[value])
+            acquired = backend.acquire(
+                "compute",
+                "io",
+                count=4,
+                timeout=datetime.timedelta(seconds=1),
+            )
+            assert [task_result.task.queue_name for task_result in acquired] == [
+                "compute",
+                "io",
+                "compute",
+                "io",
+            ]
+            assert backend._idle_backoff.rotation_offset == 1
         finally:
             backend.close()
 

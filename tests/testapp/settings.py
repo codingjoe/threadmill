@@ -43,8 +43,9 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "threadmill",
     "tests.testapp",
+    "django_rq",
     "django_tasks_db",
-    "django_tasks_redis",
+    "django_tasks_rq",
 ]
 
 MIDDLEWARE = [
@@ -93,7 +94,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 TASKS = {
     DEFAULT_TASK_BACKEND_ALIAS: {
         "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
-        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory"],
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory", "scaling"],
         "REDIS_URL": REDIS_URL,
         "OPTIONS": {
             "max_connections": 10,
@@ -104,16 +105,37 @@ TASKS = {
         "BACKEND": "django_tasks_db.DatabaseBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
     },
-    "django-tasks-redis": {
-        "BACKEND": "django_tasks_redis.RedisTaskBackend",
+    "django-tasks-rq": {
+        "BACKEND": "django_tasks_rq.RQBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
-        "OPTIONS": {"REDIS_URL": REDIS_URL},
     },
     "immediate": {
         "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
     },
     "dummy": {
         "BACKEND": "django.tasks.backends.dummy.DummyBackend",
+    },
+    "stub": {
+        "BACKEND": "tests.testapp.backends.StubTaskBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
+    },
+}
+
+# django-rq resolves every queue named in TASKS from this mapping.
+RQ_QUEUES = {
+    DEFAULT_TASK_QUEUE_NAME: {"URL": REDIS_URL},
+}
+
+# Run workers as quietly as the celery and dramatiq benchmarks. Django's
+# default logging pins django.tasks to INFO, so quiet it explicitly; the
+# test app's task logs stay visible.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "root": {"level": "WARNING"},
+    "loggers": {
+        "django": {"level": "WARNING"},
+        "tests.testapp": {"level": "INFO"},
     },
 }
 

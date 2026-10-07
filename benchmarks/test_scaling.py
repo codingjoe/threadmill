@@ -17,15 +17,23 @@ includes the worker pool's fixed start cost of one to two seconds, which is a
 larger share of the faster configurations, so compare each configuration against
 the ``(1, 1)`` baseline instead of reading the times as pure throughput.
 
-Measured on 16 CPU-bound tasks, one process with four threads reaches the same
-throughput as four processes with one thread each, while four of each reaches
-4.2x. A GIL build gains nothing from extra threads at all. That is why the worker
-defaults stay one process per core with a single thread: they already reach full
-parallelism on a free-threaded build, and a crash or a task recycling stays
-confined to one process. Threads trade that isolation for a smaller memory and
-connection footprint, which is a per-deployment choice rather than a default.
+Measured on 16 CPU-bound tasks of about a second each, worker start cost included.
+On a free-threaded build one process with four threads reaches the same
+throughput as four processes with one thread each, about 2.7x, and four
+processes with four threads match them: worker count sets the parallelism, and
+threads reach it with less memory. On a GIL build extra threads never help, and
+they cost once a pool holds more worker threads in total than the queue holds
+tasks. A process requests a prefetch batch sized by its thread count, so one
+process can take the whole queue and leave its neighbours idle.
+
+That is why the defaults stay one process per core with a single thread. They
+already reach full parallelism on a free-threaded build, and a crash or a task
+recycling stays confined to one process. Threads trade that isolation for a
+smaller memory and connection footprint, which is a per-deployment choice rather
+than a default.
 """
 
+import collections
 import dataclasses
 import sys
 
@@ -33,6 +41,7 @@ import pytest
 from django.core.management import call_command
 from django.tasks import (
     DEFAULT_TASK_BACKEND_ALIAS,
+    TaskResultStatus,
     task_backends,
 )
 
@@ -44,6 +53,17 @@ TASK_COUNT = 16
 
 MEASUREMENT_ROUNDS = 2
 """Repeats per configuration, reduced to the median by the benchmark plugin."""
+
+SCALING_QUEUE_NAME = "scaling"
+"""Queue dedicated to this benchmark.
+
+A separate queue keeps the measurement honest: a worker process left behind by
+another test or worktree sharing the same Redis instance would otherwise steal
+tasks and report a drain that never did the work.
+"""
+
+scaling_workload = dataclasses.replace(compute_workload, queue_name=SCALING_QUEUE_NAME)
+"""The CPU-bound workload task, pinned to the benchmark's own queue."""
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
@@ -68,27 +88,40 @@ PARALLELISMS_UNDER_TEST = (
 """Configurations spanning process-only, thread-only and mixed parallelism."""
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
+@dataclasses.dataclass(kw_only=True, slots=True)
 class CpuWorkload:
     """A fixed CPU-bound workload processed by one worker pool configuration."""
 
     parallelism: WorkerParallelism
     task_count: int = TASK_COUNT
+    enqueued_ids: list[str] = dataclasses.field(default_factory=list, init=False)
 
     def drain(self) -> None:
         """Queue the workload, then process it with the configured worker pool."""
-        queued_task = compute_workload.using(backend=DEFAULT_TASK_BACKEND_ALIAS)
-        for _ in range(self.task_count):
-            queued_task.enqueue()
+        queued_task = scaling_workload.using(backend=DEFAULT_TASK_BACKEND_ALIAS)
+        self.enqueued_ids.extend(
+            queued_task.enqueue().id for _ in range(self.task_count)
+        )
         call_command(
             "threadmill",
             "worker",
             backend=DEFAULT_TASK_BACKEND_ALIAS,
-            queues=[compute_workload.queue_name],
+            queues=[SCALING_QUEUE_NAME],
             workers=self.parallelism.workers,
             threads=self.parallelism.threads,
             exit_empty=True,
             verbosity=0,
+        )
+
+    def verify(self) -> None:
+        """Assert every queued task succeeded, so a fast drain cannot be a lost task."""
+        backend = task_backends[DEFAULT_TASK_BACKEND_ALIAS]
+        statuses = collections.Counter(
+            backend.get_result(task_id).status for task_id in self.enqueued_ids
+        )
+        assert statuses[TaskResultStatus.SUCCESSFUL] == len(self.enqueued_ids), (
+            f"drained {statuses[TaskResultStatus.SUCCESSFUL]} of"
+            f" {len(self.enqueued_ids)} tasks: {statuses}"
         )
 
 
@@ -118,6 +151,7 @@ class TestThreadScaling:
     )
     def test_drain_cpu_workload__benchmark(self, benchmark, parallelism, empty_queues):
         """Benchmark the time to drain the workload with one pool configuration."""
+        workload = CpuWorkload(parallelism=parallelism)
         benchmark.extra_info.update(
             {
                 "workers": parallelism.workers,
@@ -130,8 +164,11 @@ class TestThreadScaling:
         )
 
         benchmark.pedantic(
-            CpuWorkload(parallelism=parallelism).drain,
+            workload.drain,
             rounds=MEASUREMENT_ROUNDS,
             iterations=1,
             warmup_rounds=0,
         )
+
+        # Outside the timed region: every round must have run every task.
+        workload.verify()

@@ -52,7 +52,11 @@ class ExponentialBackoff:
         if context.attempt < self.max_retries and issubclass(
             context.task_result.errors[-1].exception_class, self.expected_exceptions
         ):
-            return min(self.base_delay * (self.factor**context.attempt), self.max_delay)
+            delay_secs = min(
+                self.base_delay.total_seconds() * self.factor**context.attempt,
+                self.max_delay.total_seconds(),
+            )
+            return datetime.timedelta(seconds=delay_secs)
 
     def deconstruct(self):
         return (
