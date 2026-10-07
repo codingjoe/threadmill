@@ -221,10 +221,10 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
         text(
             28,
             footnote_y,
-            # joe: width checked by hand (right edge 856.1 of 900 at 11.5px); add a
+            # joe: width checked by hand (right edge 863 of 900 at 11.5px); add a
             # width guard if the canvas width or the font stack changes.
             "One process and one thread each. Threadmill, celery and dramatiq read "
-            "128 ahead; django-tasks-db and -rq read one message at a time.",
+            "128 ahead; django-tasks-db, -rq and huey read one task at a time.",
             theme=theme,
             size=11.5,
             fill=theme.faint,
