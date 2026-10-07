@@ -42,11 +42,11 @@ def _load_lua(name: str) -> str:
     return (_LUA_DIR / f"{name}.lua").read_text()
 
 
-def _parse_lease_started_at(value: bytes | None) -> datetime.datetime | None:
+def _parse_lease_started_at(value: str | None) -> datetime.datetime | None:
     """Return the lease start stamped beside a task, or None when the hash holds no timestamp."""
     try:
-        return datetime.datetime.fromisoformat(value.decode())
-    except AttributeError, ValueError:
+        return datetime.datetime.fromisoformat(value)
+    except TypeError, ValueError:
         return None
 
 
@@ -95,8 +95,7 @@ class RedisBroker(Broker):
                 f"{self.backend.key_prefix}:task:",
             ],
         )
-        for member in claimed_ids:
-            task_id = member.decode()
+        for task_id in claimed_ids:
             try:
                 self._reap_task(task_id)
             except ImportError as read_error:
@@ -118,11 +117,9 @@ class RedisBroker(Broker):
                 )
                 task_result = self.backend._apply_lease(
                     self.backend.deserialize_task_result(json.dumps(payload)),
-                    worker=lease_worker.decode() if lease_worker else None,
+                    worker=lease_worker or None,
                     lease_started_at=_parse_lease_started_at(lease_started_at),
-                    lease_token=(
-                        lease_token.decode() if lease_token is not None else None
-                    ),
+                    lease_token=lease_token,
                 )
                 self.backend.acknowledge(
                     dataclasses.replace(
@@ -226,10 +223,10 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         if data is None:
             return None
         return self._apply_lease(
-            self.deserialize_task_result(data.decode()),
-            worker=lease_worker.decode() if lease_worker else None,
+            self.deserialize_task_result(data),
+            worker=lease_worker or None,
             lease_started_at=_parse_lease_started_at(lease_started_at),
-            lease_token=lease_token.decode() if lease_token is not None else None,
+            lease_token=lease_token,
         )
 
     def __init__(self, alias: str, params: dict) -> None:
@@ -241,7 +238,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             raise ValueError(
                 f"REDIS_URL must be specified in your settings for the {type(self).__name__}."
             ) from e
-        self.client = redis.from_url(redis_url)
+        self.client = redis.from_url(redis_url, decode_responses=True)
         self._async_client: redis.asyncio.Redis | None = None
         self.redis_url = redis_url
         self.key_prefix = f"threadmill:{{{alias}}}"
@@ -264,7 +261,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def async_client(self) -> redis.asyncio.Redis:
         """Lazily-created async Redis client, reused across calls."""
         if self._async_client is None:
-            self._async_client = redis.asyncio.Redis.from_url(self.redis_url)
+            self._async_client = redis.asyncio.Redis.from_url(
+                self.redis_url, decode_responses=True
+            )
         return self._async_client
 
     def _compute_score(self, priority: int, enqueued_at: datetime.datetime) -> float:
@@ -376,10 +375,10 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
                 return self._apply_lease(
-                    self.deserialize_task_result(data.decode()),
+                    self.deserialize_task_result(data),
                     worker=worker,
                     lease_started_at=now,
-                    lease_token=lease_token.decode(),
+                    lease_token=lease_token,
                 )
 
             try:
@@ -554,10 +553,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         Leased tasks are yielded as their lease reports them.
         """
         pipe = self.client.pipeline()
-        for member in self.client.zrange(zset_key, 0, count - 1):
-            task_key = self.TASK_KEY.format(
-                prefix=self.key_prefix, task_id=member.decode()
-            )
+        for task_id in self.client.zrange(zset_key, 0, count - 1):
+            task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
             if leased:
                 pipe.hmget(task_key, "data", *self.LEASE_FIELDS)
             else:
@@ -570,33 +567,31 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 if not data:
                     continue
                 yield self._apply_lease(
-                    self.deserialize_task_result(data.decode()),
-                    worker=lease_worker.decode() if lease_worker else None,
+                    self.deserialize_task_result(data),
+                    worker=lease_worker or None,
                     lease_started_at=_parse_lease_started_at(lease_started_at),
-                    lease_token=(
-                        lease_token.decode() if lease_token is not None else None
-                    ),
+                    lease_token=lease_token,
                 )
             else:
-                yield self.deserialize_task_result(stored.decode())
+                yield self.deserialize_task_result(stored)
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
         """Yield up to `count` finished results in finish order."""
         pipe = self.client.pipeline()
-        for member in self.client.zrange(zset_key, 0, count - 1):
+        for result_id in self.client.zrange(zset_key, 0, count - 1):
             result_key = self.RESULT_KEY.format(
-                prefix=self.key_prefix, result_id=member.decode()
+                prefix=self.key_prefix, result_id=result_id
             )
             pipe.get(result_key)
         for stored in pipe.execute():
             if stored:
-                yield self.deserialize_task_result(stored.decode())
+                yield self.deserialize_task_result(stored)
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(
             self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
         ):
-            return self.deserialize_task_result(data.decode())
+            return self.deserialize_task_result(data)
         raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
 
     async def queue_stats(
@@ -639,7 +634,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         try:
             async for message in pubsub.listen():
                 if (data := message.get("data")) is not None:
-                    direction, _, queue_name = data.decode().partition(":")
+                    direction, _, queue_name = data.partition(":")
                     try:
                         event = TelemetryEvent(
                             direction=TelemetryDirection(direction),

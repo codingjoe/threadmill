@@ -135,7 +135,7 @@ def _claim_expired(
             f"{backend.key_prefix}:task:",
         ],
     )
-    return [item.decode() for item in claimed]
+    return list(claimed)
 
 
 class TestRedisBroker:
@@ -852,7 +852,7 @@ class TestRedisTaskBackend:
             backend.close()
 
     @staticmethod
-    def _await_message(pubsub, expected: bytes, *, timeout: float = 2.0):
+    def _await_message(pubsub, expected: str, *, timeout: float = 2.0):
         """Drain pubsub until a user message with the expected payload arrives."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -889,8 +889,8 @@ class TestRedisTaskBackend:
             pubsub.subscribe(backend.telemetry_channel)
             self._drain_subscription(pubsub)
             backend.enqueue(echo, args=[1])
-            message = self._await_message(pubsub, b"ingress:default")
-            assert message["channel"] == backend.telemetry_channel.encode()
+            message = self._await_message(pubsub, "ingress:default")
+            assert message["channel"] == backend.telemetry_channel
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
@@ -924,8 +924,8 @@ class TestRedisTaskBackend:
                     finished_at=timezone.now(),
                 )
             )
-            message = self._await_message(pubsub, b"egress:default")
-            assert message["channel"] == backend.telemetry_channel.encode()
+            message = self._await_message(pubsub, "egress:default")
+            assert message["channel"] == backend.telemetry_channel
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
@@ -959,15 +959,15 @@ class TestRedisTaskBackend:
             pubsub.subscribe(backend.telemetry_channel)
             self._drain_subscription(pubsub)
             backend.requeue(failed, timezone.now() + datetime.timedelta(seconds=10))
-            message = self._await_message(pubsub, b"ingress:default")
-            assert message["channel"] == backend.telemetry_channel.encode()
+            message = self._await_message(pubsub, "ingress:default")
+            assert message["channel"] == backend.telemetry_channel
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
             backend.close()
 
-    async def test_worker_telemetry__yields_bytes_reply_as_event(self):
-        """worker_telemetry() decodes the bytes pub/sub reply and yields the event."""
+    async def test_worker_telemetry__yields_reply_as_event(self):
+        """worker_telemetry() yields the pub/sub reply as an event."""
         backend = _make_backend("worker_telemetry_test")
         try:
             stream = backend.worker_telemetry()
