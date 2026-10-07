@@ -85,22 +85,23 @@ Processes allow for parallel compute (no GIL) while threads are great for low-me
 uv run manage.py threadmill worker --workers 4 --threads 2
 ```
 
-Each worker process runs one fetcher thread that reserves a batch of tasks in a single broker round-trip.
-Worker threads drain that buffer, which amortizes broker latency across fast tasks.
-A full buffer blocks the fetcher until a worker thread frees a slot.
-The gain is largest when the broker is a network hop away.
-Against a local broker the buffer is worth about a fifth of the worker's throughput in the queue comparison.
+Each worker process runs one fetcher thread.
+The fetcher reserves a batch of tasks in one broker round trip, and the worker threads drain that batch.
+This keeps the worker threads busy while the broker answers.
+A full buffer blocks the fetcher until a thread frees a slot.
+The gain is largest when the broker is far from the worker.
+Against a local broker the buffer is worth about a fifth of the throughput.
 
 Set the batch size with `--prefetch-count`.
-It defaults to four times the thread count and applies per process, not per thread.
+It defaults to four times the thread count and applies to each process.
 A value of `1` disables batching.
 
 Prefetching has soft limits:
 
-- Tasks are leased when they are fetched, so the time a task waits in the buffer counts against `lease_ttl`. Size `--prefetch-count` for your workload: the buffer holds at most that many tasks, and each of them is waiting.
-- A task enqueued after a fetch waits for the buffer to drain before a worker picks it up, though the buffer itself dispatches the highest priority task first and keeps queue order within a priority.
-- `--max-tasks` recycles a worker, it does not cap how many tasks run: a full buffer and the batch in hand both still run, so expect roughly twice the buffer size plus the thread count beyond the budget.
-- `worker_ids` records the fetcher of the process, not the thread that runs the task.
+- A fetched task holds its lease while it waits. The buffer holds at most `--prefetch-count` tasks, so size that value for your workload.
+- A task enqueued after a fetch waits for the buffer to drain. Inside the buffer the highest priority task runs first, and tasks of one priority keep queue order.
+- `--max-tasks` recycles a worker. It is not a hard limit. The buffer and the batch in hand still run, so a worker can run about twice `--prefetch-count` tasks more than its budget.
+- `worker_ids` records the fetcher of the process and not the thread that runs the task.
 
 #### Health
 
@@ -112,15 +113,15 @@ uv run manage.py threadmill worker --max-tasks 1000 --max-tasks-jitter 100
 
 This will restart the workers after 1000 tasks have been processed, with a random jitter of up to 100 tasks to avoid all workers restarting at the same time.
 
-The limit is soft: a worker drains its buffer and the batch already fetched before it stops, so it may process roughly twice `--prefetch-count` tasks beyond the configured maximum, plus whatever its threads were already running.
+The limit is soft. A worker drains its buffer and the batch in hand before it stops. It can then run about twice `--prefetch-count` tasks more than the configured maximum.
 
 Should a worker crash or be killed, the pool will automatically restart it.
 
 #### Shutdown
 
 A graceful shutdown is possible with `SIGTERM` or a keyboard interrupt.
-All workers will finish the tasks they acquired and acknowledge them, including the tasks already in their prefetch buffer.
-A hard kill cannot be intercepted, so buffered tasks are left to the lease reaper.
+All workers finish the tasks they acquired and acknowledge them. This includes the tasks in their prefetch buffer.
+A hard kill cannot be intercepted, so the lease reaper collects the buffered tasks after the lease expires.
 
 You can use `--exit-empty` to exit immediately after all tasks have been processed,
 which might be useful for draining a one-off queue.
@@ -159,10 +160,10 @@ A task whose lease expired reaches the `retry` callback as an
 A claimed task whose stored payload cannot be read any more is dropped with the
 read error logged. A dropped task records no result, so it leaves the inspector
 and cannot be requeued.
-Keep `lease_ttl` above your worst-case runtime plus the time a task may wait in a
-prefetch buffer: a task that outlives its lease can still be running, so a retry
-may execute concurrently with it. The acknowledgement of the lease holder wins:
-the late result of an expired attempt is discarded.
+Keep `lease_ttl` above your worst-case runtime and above the time a task waits in a
+prefetch buffer. A task that outlives its lease can still run, so a retry can run
+at the same time. The acknowledgement of the lease holder wins. The late result
+of an expired attempt is discarded.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
