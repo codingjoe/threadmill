@@ -163,7 +163,8 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     row_centers = [
         FIRST_ROW_CENTER + index * ROW_HEIGHT for index in range(len(results))
     ]
-    height = row_centers[-1] + FOOTNOTE_GAP + BOTTOM_PADDING
+    footnote_y = row_centers[-1] + FOOTNOTE_GAP
+    height = footnote_y + BOTTOM_PADDING
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
@@ -219,12 +220,11 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     parts.append(
         text(
             28,
-            row_centers[-1] + FOOTNOTE_GAP,
+            footnote_y,
             # joe: width checked by hand (right edge 856.1 of 900 at 11.5px); add a
             # width guard if the canvas width or the font stack changes.
-            "One process and one thread each, reading 128 messages ahead. "
-            "The Django backends read one at a time - their workers expose no "
-            "read-ahead setting.",
+            "One process and one thread each. Threadmill, celery and dramatiq read "
+            "128 ahead; django-tasks-db, -redis and -rq read one message at a time.",
             theme=theme,
             size=11.5,
             fill=theme.faint,

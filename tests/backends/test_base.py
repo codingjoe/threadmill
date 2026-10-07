@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import pickle
 import time
 import uuid
@@ -10,7 +11,7 @@ from django.tasks import (
     TaskResultStatus,
     TaskResultStatus as TRS,
 )
-from django.tasks.base import TaskError
+from django.tasks.base import TaskContext, TaskError
 from django.tasks.exceptions import InvalidTask
 from django.utils import (
     timezone,
@@ -18,6 +19,8 @@ from django.utils import (
 )
 
 from tests.testapp.tasks import (
+    boom_no_retry,
+    boom_retry_raises,
     boom_with_retry,
     echo,
     retry_always,
@@ -120,6 +123,53 @@ class TestThreadmillTaskBackend:
                 func=echo.func,
                 retry=lambda ctx: None,
             )
+
+    def test_create_task_error__builds_task_error(self) -> None:
+        """create_task_error builds a TaskError with exception info."""
+        error = ThreadmillTaskBackend.create_task_error(RuntimeError("test error"))
+        assert "RuntimeError" in error.exception_class_path
+        assert "test error" in error.traceback
+
+    def test_retry_delay__none_when_task_has_no_retry(self) -> None:
+        """Return None when the task has no retry callback."""
+        assert ThreadmillTaskBackend.retry_delay(_task_result_with_retry(echo)) is None
+
+    def test_retry_delay__returns_timedelta_from_callback(self) -> None:
+        """Return the timedelta from the retry callback."""
+        assert ThreadmillTaskBackend.retry_delay(
+            _task_result_with_retry(
+                boom_with_retry,
+                errors=[ThreadmillTaskBackend.create_task_error(ValueError("boom"))],
+            )
+        ) == datetime.timedelta(seconds=1)
+
+    def test_retry_delay__none_when_callback_returns_none(self) -> None:
+        """Return None when the retry callback returns None."""
+        result = _task_result_with_retry(
+            boom_no_retry,
+            errors=[ThreadmillTaskBackend.create_task_error(ValueError("boom"))],
+        )
+        assert ThreadmillTaskBackend.retry_delay(result) is None
+
+    def test_retry_delay__none_when_callback_raises(self, caplog) -> None:
+        """Return None and log when the retry callback raises an exception."""
+        result = _task_result_with_retry(
+            boom_retry_raises,
+            errors=[ThreadmillTaskBackend.create_task_error(ValueError("boom"))],
+        )
+        with caplog.at_level(logging.ERROR, logger="threadmill.backends.base"):
+            assert ThreadmillTaskBackend.retry_delay(result) is None
+        assert "Retry callback failed" in caplog.text
+
+    def test_retry_delay__callback_receives_errors(self) -> None:
+        """Retry callback receives a context carrying the accumulated errors."""
+        error = ThreadmillTaskBackend.create_task_error(ValueError("the latest error"))
+        result = _task_result_with_retry(
+            RetryTask(func=echo.func, retry=record_context),
+            errors=[error],
+        )
+        ThreadmillTaskBackend.retry_delay(result)
+        assert received_contexts[-1].task_result.errors == [error]
 
     def test_serialize_task_result__encodes_retry_as_path(self) -> None:
         """TaskResultEncoder serializes retry as a dotted path."""
@@ -316,7 +366,15 @@ class TestBroker:
         assert broker.shutdown_requested.is_set()
 
 
-def _task_result_with_retry(task, *, errors=None, worker_ids=None) -> TaskResult:
+received_contexts: list[TaskContext] = []
+
+
+def record_context(context: TaskContext) -> None:
+    """Retry callback that records the TaskContext it receives."""
+    received_contexts.append(context)
+
+
+def _task_result_with_retry(task, *, errors=None) -> TaskResult:
     """Build a FAILED TaskResult with errors for retry testing."""
     now = tz.now()
     return TaskResult(
@@ -329,7 +387,7 @@ def _task_result_with_retry(task, *, errors=None, worker_ids=None) -> TaskResult
         last_attempted_at=now,
         backend="default",
         errors=errors or [],
-        worker_ids=worker_ids or [],
+        worker_ids=[],
         args=[],
         kwargs={},
     )

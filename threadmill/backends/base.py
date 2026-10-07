@@ -3,9 +3,11 @@ import dataclasses
 import datetime
 import enum
 import json
+import logging
 import threading
 import typing
 from abc import ABC
+from traceback import format_exception
 
 from django.core.serializers.json import DjangoJSONEncoder
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, Task, TaskResult, TaskResultStatus
@@ -14,6 +16,8 @@ from django.tasks.base import TaskContext, TaskError
 from django.tasks.exceptions import InvalidTask
 from django.utils.inspect import is_module_level_function
 from django.utils.module_loading import import_string
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -59,6 +63,24 @@ class RetryTask(Task):
         reconstructor, (kwargs,) = super().__reduce__()
         kwargs["retry"] = self.retry_path
         return (reconstructor, (kwargs,))
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class ThreadmillTaskResult(TaskResult):
+    lease_token: str | None = None
+
+    @classmethod
+    def from_result(
+        cls, task_result: TaskResult, *, lease_token: str | None
+    ) -> ThreadmillTaskResult:
+        return cls(
+            **{
+                field.name: getattr(task_result, field.name)
+                for field in dataclasses.fields(TaskResult)
+                if field.init
+            },
+            lease_token=lease_token,
+        )
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -151,10 +173,15 @@ class TaskResultEncoder(DjangoJSONEncoder):
     """JSON encoder for TaskResult and TaskError objects."""
 
     def default(self, o):
-        if isinstance(o, (TaskResult, TaskError)):
+        if isinstance(o, TaskResult):
             return {
                 field.name: getattr(o, field.name)
-                for field in dataclasses.fields(type(o))
+                for field in dataclasses.fields(TaskResult)
+            }
+        if isinstance(o, TaskError):
+            return {
+                field.name: getattr(o, field.name)
+                for field in dataclasses.fields(TaskError)
             }
         if isinstance(o, RetryTask):
             data = {
@@ -207,6 +234,26 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
             raise InvalidTask(
                 "Task's retry function must be defined at a module level or be a deconstructible callable."
             )
+
+    @staticmethod
+    def create_task_error(exception: BaseException) -> TaskError:
+        exception_type = type(exception)
+        return TaskError(
+            exception_class_path=f"{exception_type.__module__}.{exception_type.__qualname__}",
+            traceback="".join(format_exception(exception)),
+        )
+
+    @staticmethod
+    def retry_delay(task_result: TaskResult) -> datetime.timedelta | None:
+        if task_result.task.retry:
+            try:
+                return task_result.task.retry(TaskContext(task_result=task_result))
+            except Exception:
+                logger.exception(
+                    "Retry callback failed for task '%s@%s'",
+                    task_result.id,
+                    task_result.task.module_path,
+                )
 
     def acquire(
         self,

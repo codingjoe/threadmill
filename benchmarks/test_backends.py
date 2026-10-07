@@ -17,21 +17,29 @@ that exit on their own include their stop cost too. Subtract
 that queue's task count by the difference to get the marginal throughput of a
 busy queue.
 
-Every queue runs one worker process and one thread and reads ``READ_AHEAD`` (128)
-messages ahead, so the numbers rank the queues rather than their polling
-strategies: dramatiq's poll backoff is amortized over the window, while celery and
-threadmill block on an empty queue. The two Django backends are the exception:
-their shipped workers read one task at a time and expose no read-ahead setting.
+Every queue runs one worker process and one thread, and each reads ``READ_AHEAD``
+(128) messages ahead where its queue has such a setting, so the numbers rank the
+queues rather than their polling strategies. Celery's consumer blocks on an empty
+queue, so its window costs no sleep per message. Dramatiq polls instead and sleeps
+a jittered backoff once its window fills, so a shallow window measures that backoff
+rather than the queue: the same worker drains roughly 450 tasks/s at two messages,
+1,983 at 16 and 5,658 at 64, where the sleep stops setting the rate. Threadmill
+reads the same rate into its prefetch buffer.
+
+django-tasks-db and django-tasks-redis read one task at a time because their
+shipped workers expose no read-ahead setting. django-tasks-rq forks a work horse
+per job, so its drain includes that fork.
 
 Threadmill is measured twice, reading 128 messages ahead and reading one at a
 time, so the read-ahead cost can be subtracted from both worker benchmarks. Its
 queues are deeper than the others because its marginal drain is only seconds long,
 which would otherwise sit inside the one-second quantization of the fixed cost.
-Threadmill, django-tasks-db and django-tasks-redis run one worker process that
-drains a queue and exits. Celery and dramatiq have no such mode, so the benchmark
-queues a sentinel task last and waits for it to be processed. That wait is what
-proves the queue was drained. Their workers are stopped after the measurement,
-because a graceful shutdown takes seconds and would dominate a short drain.
+Threadmill, django-tasks-db, django-tasks-redis and django-tasks-rq run one worker
+process that drains a queue and exits. Celery and dramatiq have no such mode, so
+the benchmark queues a sentinel task last and waits for it to be processed. That
+wait is what proves the queue was drained. Their workers are stopped after the
+measurement, because a graceful shutdown takes seconds and would dominate a short
+drain.
 """
 
 import collections.abc
@@ -74,11 +82,14 @@ QUEUE_DEPTH = 20_000
 READ_AHEAD = 128
 """Messages each worker reads ahead, where its queue has such a setting.
 
-Deep enough that each consumer's wait mechanism stops deciding the ranking:
-dramatiq's Redis consumer polls, and its jittered 5-10 ms backoff costs about
-0.06 ms per task over 128 messages, while celery and threadmill block on an empty
-queue. The Django backends expose no read-ahead setting and read one task at a
-time.
+Deep enough that each consumer's wait mechanism stops deciding the ranking.
+Celery's consumer blocks on an empty queue, so its window costs no sleep.
+Dramatiq polls instead and sleeps a jittered 5-10 ms backoff once its window
+fills, so a shallow window measures that backoff rather than the queue: the same
+worker drains about 451 tasks/s at two messages, 1,983 at 16 and 5,658 at 64,
+where the sleep stops setting the rate. At 128 the backoff costs about 0.06 ms
+per task. django-tasks-db and django-tasks-redis expose no read-ahead setting and
+read one task at a time; django-tasks-rq forks a work horse per job.
 """
 
 CELERY_WORKER = (
@@ -99,9 +110,9 @@ CELERY_WORKER = (
 
 The default prefork pool crashes on CPython 3.14, where the pool child loses
 the task handler state it expects, so the worker runs on the solo pool. With one
-concurrent task, ``--prefetch-multiplier=128`` sets the prefetch count to 128, the
-benchmark rate. Celery's Redis consumer blocks while its queue is empty, so the
-prefetch adds no sleep per message.
+concurrent task, ``--prefetch-multiplier={READ_AHEAD}`` sets the prefetch count to
+``READ_AHEAD``, the benchmark rate. Celery's Redis consumer blocks while its queue
+is empty, so the prefetch adds no sleep per message.
 """
 
 DRAMATIQ_WORKER = (
@@ -119,7 +130,8 @@ DRAMATIQ_WORKER = (
 The Redis broker polls rather than blocks: its consumer fetches only while fewer
 than its read-ahead of messages are unacked and, with that window full, sleeps a
 jittered 5-10 ms backoff before polling again. The CLI has no read-ahead flag, so
-the worker environment carries ``dramatiq_queue_prefetch=128``, the benchmark rate.
+the worker environment carries ``dramatiq_queue_prefetch`` set to ``READ_AHEAD``,
+the benchmark rate.
 """
 
 WORKER_STOP_TIMEOUT_SECONDS = 20
@@ -204,11 +216,13 @@ def drain_with_django_tasks_db_worker() -> None:
     )
 
 
-def drain_with_django_tasks_redis_worker() -> None:
-    """Process every queued task with the django-tasks-redis worker."""
+def drain_with_django_tasks_rq_worker() -> None:
+    """Process every queued task with the django-tasks-rq worker."""
     call_command(
-        "run_redis_tasks",
-        backend_name="django-tasks-redis",
+        "rqworker",
+        "--burst",
+        "--job-class",
+        "django_tasks_rq.Job",
         verbosity=0,
         stdout=io.StringIO(),
     )
@@ -303,10 +317,15 @@ def django_task_enqueuer(
         return [task.enqueue(index) for index in range(count)][-1]
 
     def verify_processed(enqueued_task_result: TaskResult | None) -> None:
-        """Assert that the backend executed the benchmark tasks."""
+        """Assert that the backend executed the benchmark tasks.
+
+        django-tasks-rq returns the ``django-tasks`` backport's own
+        ``TaskResultStatus``, a different enum class carrying the same string
+        value, so the status is compared by value rather than identity.
+        """
         assert enqueued_task_result is not None, "enqueue() must return a task result"
         task_result = task_backends[alias].get_result(enqueued_task_result.id)
-        assert task_result.status is TaskResultStatus.SUCCESSFUL, (
+        assert task_result.status == TaskResultStatus.SUCCESSFUL, (
             f"{alias} did not execute the benchmark tasks"
         )
 
@@ -363,7 +382,7 @@ WORKER_QUEUES = (
         "django-tasks-db", "django-tasks-db", drain_with_django_tasks_db_worker
     ),
     django_task_backend(
-        "django-tasks-redis", "django-tasks-redis", drain_with_django_tasks_redis_worker
+        "django-tasks-rq", "django-tasks-rq", drain_with_django_tasks_rq_worker
     ),
     QueueUnderTest(
         name="celery",
@@ -427,6 +446,7 @@ def empty_queues():
             "django_tasks:*",
             "celery*",
             "dramatiq:*",  # broker keys and the dramatiq:results:* results
+            "rq:*",
             "_kombu*",
         ):
             if keys := client.keys(key_pattern):
