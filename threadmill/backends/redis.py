@@ -42,7 +42,7 @@ def _load_lua(name: str) -> str:
 
 
 def _parse_lease_issued_at(value: bytes | None) -> datetime.datetime | None:
-    """Return the lease issue time stamped beside a task, or None when the hash holds no timestamp."""
+    """Return the lease start stamped beside a task, or None when the hash holds no timestamp."""
     try:
         return datetime.datetime.fromisoformat(value.decode())
     except AttributeError, ValueError:

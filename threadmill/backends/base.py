@@ -67,22 +67,12 @@ class RetryTask(Task):
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ThreadmillTaskResult(TaskResult):
-    """Task result with threadmill-specific fields.
-
-    A backend that leases tasks returns one from `acquire`. Its `lease_token`
-    is stamped beside the stored payload, and a retry attempt stamps a fresh
-    one, so `acknowledge` can discard the late result of an expired attempt.
-    The token is attempt state: it is never serialized, so it reaches neither
-    a stored payload nor a published result.
-    """
-
     lease_token: str | None = None
 
     @classmethod
     def from_result(
         cls, task_result: TaskResult, *, lease_token: str | None
     ) -> ThreadmillTaskResult:
-        """Return the task result as a leased attempt."""
         return cls(
             **{
                 field.name: getattr(task_result, field.name)
@@ -180,12 +170,7 @@ def _parse_datetime(value: object) -> object:
 
 
 class TaskResultEncoder(DjangoJSONEncoder):
-    """JSON encoder for TaskResult and TaskError objects.
-
-    Only the fields of the base types are written, so threadmill-specific
-    fields such as the lease token stay out of stored data and published
-    results.
-    """
+    """JSON encoder for TaskResult and TaskError objects."""
 
     def default(self, o):
         if isinstance(o, TaskResult):
@@ -278,9 +263,6 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     ) -> TaskResult:
         """
         Return and lock the next task to be processed without removing it from the queue.
-
-        A backend that leases tasks returns a `ThreadmillTaskResult` carrying
-        the lease token of the attempt, so `acknowledge` can prove the lease.
 
         Args:
             queue_names: The names of the queues to acquire tasks from.
