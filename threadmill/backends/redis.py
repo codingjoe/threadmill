@@ -41,7 +41,7 @@ def _load_lua(name: str) -> str:
     return (_LUA_DIR / f"{name}.lua").read_text()
 
 
-def _parse_lease_issued_at(value: bytes | None) -> datetime.datetime | None:
+def _parse_last_attempted_at(value: bytes | None) -> datetime.datetime | None:
     """Return the lease start stamped beside a task, or None when the hash holds no timestamp."""
     try:
         return datetime.datetime.fromisoformat(value.decode())
@@ -167,7 +167,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     SEGMENT_KEY = "{prefix}:{queue_name}:{status}"
     DEFERRED_KEY = "{prefix}:{queue_name}:deferred"
 
-    LEASE_FIELDS = ("lease_worker", "lease_issued_at", "lease_token")
+    LEASE_FIELDS = ("lease_worker", "last_attempted_at", "lease_token")
 
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
@@ -186,7 +186,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def get_leased_task(self, task_id: str) -> ThreadmillTaskResult | None:
         """Return a running task as its lease holds it, or None when its hash is gone."""
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
-        data, lease_worker, lease_issued_at, lease_token = self.client.hmget(
+        data, lease_worker, last_attempted_at, lease_token = self.client.hmget(
             task_key, "data", *self.LEASE_FIELDS
         )
         if data is None:
@@ -194,7 +194,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         return self._apply_lease(
             self.deserialize_task_result(data.decode()),
             worker=lease_worker.decode() if lease_worker else None,
-            lease_issued_at=_parse_lease_issued_at(lease_issued_at),
+            last_attempted_at=_parse_last_attempted_at(last_attempted_at),
             lease_token=lease_token.decode() if lease_token is not None else None,
         )
 
@@ -345,7 +345,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 return self._apply_lease(
                     self.deserialize_task_result(data.decode()),
                     worker=worker,
-                    lease_issued_at=now,
+                    last_attempted_at=now,
                     lease_token=lease_token,
                 )
 
@@ -371,7 +371,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         task_result: TaskResult,
         *,
         worker: str | None,
-        lease_issued_at: datetime.datetime | None,
+        last_attempted_at: datetime.datetime | None,
         lease_token: str | None,
     ) -> ThreadmillTaskResult:
         """Return a stored task result as a running attempt.
@@ -383,8 +383,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         return dataclasses.replace(
             leased,
             status=TaskResultStatus.RUNNING,
-            started_at=leased.started_at or lease_issued_at,
-            last_attempted_at=lease_issued_at or leased.last_attempted_at,
+            started_at=leased.started_at or last_attempted_at,
+            last_attempted_at=last_attempted_at or leased.last_attempted_at,
             worker_ids=(
                 [*leased.worker_ids, worker]
                 if worker is not None
@@ -531,13 +531,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             if not stored:
                 continue
             if leased:
-                data, lease_worker, lease_issued_at, lease_token = stored
+                data, lease_worker, last_attempted_at, lease_token = stored
                 if not data:
                     continue
                 yield self._apply_lease(
                     self.deserialize_task_result(data.decode()),
                     worker=lease_worker.decode() if lease_worker else None,
-                    lease_issued_at=_parse_lease_issued_at(lease_issued_at),
+                    last_attempted_at=_parse_last_attempted_at(last_attempted_at),
                     lease_token=(
                         lease_token.decode() if lease_token is not None else None
                     ),

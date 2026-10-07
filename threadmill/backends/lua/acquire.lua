@@ -32,7 +32,7 @@ for offset = 0, num_queues - 1 do
     if data then
       local deadline = tonumber(ARGV[1]) + lease_ttl_ms
       redis.call('ZADD', KEYS[queue_index * 2 - 1], deadline, task_id)
-      redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'lease_issued_at', ARGV[2], 'lease_token', ARGV[8])
+      redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'last_attempted_at', ARGV[2], 'lease_token', ARGV[8])
       return data
     end
   end
