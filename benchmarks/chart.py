@@ -77,13 +77,19 @@ DARK_THEME = Theme(
     accent_bar="#6366f1",
 )
 
-DIAGNOSTIC_QUEUES = frozenset({"threadmill (no prefetch)"})
+DIAGNOSTIC_QUEUES = frozenset({"Threadmill (no prefetch)"})
 """Queues that the benchmark measures and the chart leaves out.
 
 The harness runs threadmill twice to compare its prefetch buffer with a single
 task. Against a local broker the two results differ by less than one percent. A
 chart with both rows ranks them on measurement noise.
 """
+
+FREE_THREADING_QUEUE = "Threadmill (free threading)"
+"""Queue the benchmark lists only where threads really run in parallel."""
+
+FOOTNOTE_LINE_HEIGHT = 17
+"""Distance between the baselines of two stacked footnote lines."""
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
@@ -144,9 +150,30 @@ def text(x, y, content, *, theme, size=13, fill=None, weight=400, anchor="start"
 
 def describe(results: list[QueueResult]) -> str:
     """Return a sentence describing the throughput of every queue."""
-    return "Tasks per second with one worker: " + ", ".join(
+    return "Tasks per second with one worker process each: " + ", ".join(
         f"{result.name} {result.throughput:,.0f}" for result in results
     )
+
+
+def create_footnote_lines(results: list[QueueResult]) -> list[str]:
+    """Return the footnote, one line per element.
+
+    The worker configuration line names the free-threading queue only when the
+    benchmark measured one, so a chart built from a GIL build claims no thread
+    parallelism it did not measure.
+    """
+    if any(result.name == FREE_THREADING_QUEUE for result in results):
+        workers = (
+            "One process and one thread each, except Threadmill on a free-threaded"
+            " build, which runs four."
+        )
+    else:
+        workers = "One process and one thread each."
+    return [
+        workers,
+        "Threadmill, celery and dramatiq read 128 ahead;"
+        " django-tasks-db and -rq read one message at a time.",
+    ]
 
 
 def build_chart(results: list[QueueResult], theme: Theme) -> str:
@@ -177,8 +204,8 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
         text(
             28,
             68,
-            f"{depth_label} trivial tasks per queue · one worker process, "
-            "one thread · higher is better",
+            f"{depth_label} trivial tasks per queue · one worker process each · "
+            "higher is better",
             theme=theme,
             size=12.5,
             fill=theme.muted,
@@ -217,19 +244,22 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
             )
         )
 
-    parts.append(
-        text(
-            28,
-            footnote_y,
-            # joe: width checked by hand (right edge 856.1 of 900 at 11.5px); add a
-            # width guard if the canvas width or the font stack changes.
-            "One process and one thread each. Threadmill, celery and dramatiq read "
-            "128 ahead; django-tasks-db and -rq read one message at a time.",
-            theme=theme,
-            size=11.5,
-            fill=theme.faint,
+    footnote_lines = create_footnote_lines(results)
+    for line_index, line in enumerate(footnote_lines):
+        parts.append(
+            text(
+                28,
+                footnote_y + line_index * FOOTNOTE_LINE_HEIGHT,
+                # joe: widths estimated against the 11.5px hand check this comment
+                # replaced (right edge 856.1 of 900 for 132 characters); the longest
+                # line now reaches about 675 of 900. Recheck if the canvas width or
+                # the font stack changes.
+                line,
+                theme=theme,
+                size=11.5,
+                fill=theme.faint,
+            )
         )
-    )
     parts.append("</svg>")
     return "\n".join(parts)
 

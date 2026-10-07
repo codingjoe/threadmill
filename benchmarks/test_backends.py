@@ -38,6 +38,11 @@ time. The read-ahead cost can therefore be subtracted from both worker benchmark
 Its queues are deeper than the others, because its marginal drain is only seconds
 long. A shallow queue sits inside the one-second quantization of the fixed cost.
 
+On a free-threaded interpreter with the GIL disabled, Threadmill is measured once
+more with ``FREE_THREADING_THREAD_COUNT`` threads in one process. That queue is
+listed only there, because on any other interpreter the threads run one at a time
+and the drain would only repeat the single-threaded rate.
+
 Threadmill, django-tasks-db and django-tasks-rq run one worker process that drains
 a queue and exits. Celery and dramatiq have no such mode, so the benchmark queues a
 sentinel task last and waits for it. That wait proves that the queue was drained.
@@ -75,6 +80,7 @@ from benchmarks.celery_app import (
 )
 from benchmarks.dramatiq_app import dramatiq_echo, dramatiq_mark_processed
 from tests.testapp.tasks import echo
+from threadmill.executor import is_free_threaded_build, is_gil_enabled
 
 ENQUEUE_ITERATIONS = 500
 """Tasks enqueued within one enqueue benchmark round."""
@@ -97,6 +103,15 @@ about 0.06 ms for each task.
 
 django-tasks-db reads one task at a time. django-tasks-rq forks a work horse for
 each job. Neither queue can be told to read ahead.
+"""
+
+FREE_THREADING_THREAD_COUNT = 4
+"""Threads the free-threading threadmill worker runs, where the build allows it.
+
+Deliberately a fixed small number rather than every core, so the bar states what
+a free-threaded build does for the same pool and not what this machine happens to
+have. The other queues all run one thread, which is why the bar is labelled with
+its thread count.
 """
 
 CELERY_WORKER = (
@@ -204,6 +219,27 @@ def drain_with_threadmill_worker_no_prefetch() -> None:
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
         prefetch_count=1,
+        exit_empty=True,
+        verbosity=0,
+    )
+
+
+def drain_with_threadmill_free_threading_worker() -> None:
+    """Process every queued task with one threadmill worker on several threads.
+
+    Only meaningful on a free-threaded interpreter, where the threads run at the
+    same time. The queue is only listed under test when the running interpreter is
+    free-threaded, so this drain never reports the single-threaded rate of a GIL
+    build as if it were a parallel one.
+    """
+    call_command(
+        "threadmill",
+        "worker",
+        backend=DEFAULT_TASK_BACKEND_ALIAS,
+        queues=[DEFAULT_TASK_QUEUE_NAME],
+        workers=1,
+        threads=FREE_THREADING_THREAD_COUNT,
+        prefetch_count=READ_AHEAD,
         exit_empty=True,
         verbosity=0,
     )
@@ -373,15 +409,43 @@ of a cold worker start and stop is quantized to about a second. A shallower queu
 therefore keeps the prefetch comparison inside that step.
 """
 
+THREADS_RUN_IN_PARALLEL = is_free_threaded_build() and not is_gil_enabled()
+"""Whether this interpreter runs Python threads at the same time.
+
+A free-threaded build stops doing so as soon as a C extension that has not
+declared free-threading support enables the GIL, so the build flag alone does not
+answer this.
+"""
+
+FREE_THREADING_QUEUES = (
+    (
+        django_task_backend(
+            "Threadmill (free threading)",
+            DEFAULT_TASK_BACKEND_ALIAS,
+            drain_with_threadmill_free_threading_worker,
+            task_count=THREADMILL_TASK_COUNT,
+        ),
+    )
+    if THREADS_RUN_IN_PARALLEL
+    else ()
+)
+"""The free-threading queue, listed only where threads really are parallel.
+
+On any other interpreter the drain behind this queue measures the same
+single-threaded rate as the queue above it, which would read as a free-threading
+result that found no speedup.
+"""
+
 WORKER_QUEUES = (
     django_task_backend(
-        "threadmill",
+        "Threadmill",
         DEFAULT_TASK_BACKEND_ALIAS,
         drain_with_threadmill_worker,
         task_count=THREADMILL_TASK_COUNT,
     ),
+    *FREE_THREADING_QUEUES,
     django_task_backend(
-        "threadmill (no prefetch)",
+        "Threadmill (no prefetch)",
         DEFAULT_TASK_BACKEND_ALIAS,
         drain_with_threadmill_worker_no_prefetch,
         task_count=THREADMILL_TASK_COUNT,
