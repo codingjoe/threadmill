@@ -16,6 +16,8 @@ from dramatiq.brokers.redis import RedisBroker
 from dramatiq.results import Results
 from dramatiq.results.backends.redis import RedisBackend
 
+from benchmarks import cpu_work
+
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 PROCESSED_KEY = "benchmark:processed"
@@ -47,3 +49,10 @@ def dramatiq_echo(value):
 def dramatiq_mark_processed():
     """Record that every earlier task in the queue has been processed."""
     client.incr(PROCESSED_KEY)
+
+
+@dramatiq.actor(broker=redis_broker, queue_name=cpu_work.CPU_QUEUE)
+def dramatiq_compute(value):
+    """Consume CPU, then record that this task finished."""
+    cpu_work.count_primes()
+    client.incr(cpu_work.COMPLETION_KEY)
