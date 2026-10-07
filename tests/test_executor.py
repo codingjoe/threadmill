@@ -1012,27 +1012,17 @@ class TestTaskPrefetcher:
         assert prefetcher.buffer(task_result) is True
         assert prefetcher.task_buffer.get_nowait().id == task_result.id
 
-    def test_buffer__dispatches_highest_priority_first(self):
-        """Hand out the highest priority task first, earlier enqueued on ties."""
-        enqueued_at = timezone.now()
-        low = _task_result(dataclasses.replace(echo, priority=1), 1)
-        first_high = dataclasses.replace(
-            _task_result(dataclasses.replace(echo, priority=5), 2),
-            enqueued_at=enqueued_at,
-        )
-        middle = _task_result(dataclasses.replace(echo, priority=3), 3)
-        later_high = dataclasses.replace(
-            _task_result(dataclasses.replace(echo, priority=5), 4),
-            enqueued_at=enqueued_at + datetime.timedelta(seconds=1),
-        )
+    def test_buffer__dispatches_in_lease_order(self):
+        """Hand out the tasks in the order the fetcher leased them."""
+        leased = [
+            _task_result(dataclasses.replace(echo, priority=priority), value)
+            for value, priority in enumerate((1, 5, 3, 5))
+        ]
         prefetcher = _make_prefetcher(StubPrefetchBackend())
 
-        for task_result in (low, first_high, middle, later_high):
+        for task_result in leased:
             assert prefetcher.buffer(task_result) is True
 
         assert [prefetcher.task_buffer.get_nowait().id for _ in range(4)] == [
-            first_high.id,
-            later_high.id,
-            middle.id,
-            low.id,
+            task_result.id for task_result in leased
         ]

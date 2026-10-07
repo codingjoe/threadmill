@@ -298,8 +298,8 @@ class TaskPrefetcher(threading.Thread):
         self.worker = worker
         self.backend = backend
         self.prefetch_count = prefetch_count
-        self.task_buffer: queue.PriorityQueue[ThreadmillTaskResult] = (
-            queue.PriorityQueue(maxsize=prefetch_count)
+        self.task_buffer: queue.Queue[ThreadmillTaskResult] = queue.Queue(
+            maxsize=prefetch_count
         )
         self.completion: Future[None] = Future()
         self.stop_requested = threading.Event()

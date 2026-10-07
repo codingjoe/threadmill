@@ -69,12 +69,6 @@ class RetryTask(Task):
 class ThreadmillTaskResult(TaskResult):
     lease_token: str | None = None
 
-    def __lt__(self, other: ThreadmillTaskResult) -> bool:
-        return (-self.task.priority, self.enqueued_at) < (
-            -other.task.priority,
-            other.enqueued_at,
-        )
-
     @classmethod
     def from_result(
         cls, task_result: TaskResult, *, lease_token: str | None
@@ -285,10 +279,9 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
             queue.Empty: The first task is unavailable and the timeout is None.
 
         Returns:
-            Between one and `count` leased task results. The list is never empty.
-            Each result is a `ThreadmillTaskResult` that orders by priority and
-            enqueue time. The prefetch buffer uses this order to select the next
-            task.
+            Between one and `count` leased task results in lease order. The list is
+            never empty. Each result is a `ThreadmillTaskResult` that carries the
+            lease token for its acknowledgement.
         """
         raise NotImplementedError
 
