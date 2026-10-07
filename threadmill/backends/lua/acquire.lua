@@ -39,7 +39,7 @@ for offset = 0, num_queues - 1 do
         math.random(0, 0xffffff), math.random(0, 0xffffff),
         math.random(0, 0xffffff), math.random(0, 0xffffff))
       redis.call('ZADD', KEYS[queue_index * 2 - 1], deadline, task_id)
-      redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'last_attempted_at', ARGV[2], 'lease_token', lease_token)
+      redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'lease_started_at', ARGV[2], 'lease_token', lease_token)
       return { data, lease_token }
     end
   end
