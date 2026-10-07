@@ -85,9 +85,6 @@ Processes allow for parallel compute (no GIL) while threads are great for low-me
 uv run manage.py threadmill worker --workers 4 --threads 2
 ```
 
-Each worker process runs a fetcher thread that leases a batch of tasks ahead of the worker threads.
-Set the batch size with `--prefetch-count`, four times the thread count by default.
-
 #### Health
 
 If your tasks leak memory, you can recycle (restart) the workers after a certain number of tasks have been processed:
