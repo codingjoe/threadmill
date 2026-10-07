@@ -15,10 +15,9 @@ curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/m
 
 We require a persistent Redis without eviction.
 
-Redis connections use the redis-py default `decode_responses=False`, so all
-values read from Redis are bytes. We do not guard against misconfiguration.
-We fail loudly instead. The same goes for Redis data altered mid-flight.
-These are deliberate design decisions.
+Redis connections explicitly load with `decode_responses=True`, so all values
+read from Redis are strings. We do not guard against Redis data altered
+mid-flight. We fail loudly instead. These are deliberate design decisions.
 
 ## Testing
 
