@@ -178,7 +178,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
     ACQUIRE_SCRIPT = _load_lua("acquire")
-    """Lease up to a given number of tasks from the priority queues in one round-trip."""
+    """Lease up to a given number of tasks from the priority queues in one broker call."""
     ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
     """Remove from running, persist the result, and clean up."""
 

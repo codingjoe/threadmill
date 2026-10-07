@@ -78,11 +78,11 @@ DARK_THEME = Theme(
 )
 
 DIAGNOSTIC_QUEUES = frozenset({"threadmill (no prefetch)"})
-"""Queues the benchmark measures but the chart leaves out.
+"""Queues that the benchmark measures and the chart leaves out.
 
-The harness runs threadmill twice to bracket its prefetch buffer, and on a local
-broker the two land within a percent of each other, so plotting both would rank
-them on measurement noise.
+The harness runs threadmill twice to compare its prefetch buffer with a single
+task. Against a local broker the two results differ by less than one percent. A
+chart with both rows ranks them on measurement noise.
 """
 
 

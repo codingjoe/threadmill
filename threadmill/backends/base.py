@@ -70,7 +70,10 @@ class ThreadmillTaskResult(TaskResult):
     lease_token: str | None = None
 
     def __lt__(self, other: ThreadmillTaskResult) -> bool:
-        """Order by descending priority, then by enqueue time, as the queue does."""
+        """Order the results by priority from highest to lowest.
+
+        Two results with the same priority keep their enqueue order.
+        """
         return (-self.task.priority, self.enqueued_at) < (
             -other.task.priority,
             other.enqueued_at,
@@ -270,25 +273,26 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         worker: str = "",
     ) -> list[ThreadmillTaskResult]:
         """
-        Return and lock up to `count` tasks without removing them from the queue.
+        Return and lock up to `count` tasks. The tasks stay in the queue.
 
-        Waits up to `timeout` for the first task only and fills the remaining
-        `count - 1` tasks without waiting.
+        The method waits up to `timeout` for the first task. It fills the
+        remaining tasks without a wait.
 
         Args:
             queue_names: The names of the queues to acquire tasks from.
             count: The maximum number of tasks to acquire, at least 1.
-            timeout: The maximum time to wait for the first task. If None, wait indefinitely.
-            worker: The name of the worker thread acquiring the tasks.
+            timeout: The maximum time to wait for the first task. If None, the method waits without a limit.
+            worker: The name of the worker thread that acquires the tasks.
 
         Raises:
-            TimeoutError: If the first task does not arrive within the specified timeout.
-            queue.Empty: If the first task is unavailable and timeout is None.
+            TimeoutError: The first task does not arrive within the specified timeout.
+            queue.Empty: The first task is unavailable and the timeout is None.
 
         Returns:
-            Between one and `count` leased task results, never an empty list. They
-            are `ThreadmillTaskResult`s, which order by priority and enqueue time
-            so the prefetch buffer can hand out the most important task first.
+            Between one and `count` leased task results. The list is never empty.
+            Each result is a `ThreadmillTaskResult` that orders by priority and
+            enqueue time. The prefetch buffer uses this order to select the next
+            task.
         """
         raise NotImplementedError
 

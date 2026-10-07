@@ -196,10 +196,10 @@ class TaskExecutor:
 
 
 class WorkerProcess(multiprocessing.Process):
-    """Single worker process running a prefetcher and thread_count consumer threads."""
+    """One worker process with one prefetcher and `thread_count` consumer threads."""
 
     task_wait_timeout: datetime.timedelta = datetime.timedelta(seconds=1)
-    """How long a thread waits on the broker or the buffer before it re-checks its stop condition."""
+    """How long a thread waits before it examines its stop condition again."""
 
     def __init__(
         self,
@@ -280,7 +280,7 @@ class WorkerProcess(multiprocessing.Process):
 
 
 class TaskPrefetcher(threading.Thread):
-    """Single prefetcher thread filling the task buffer of one worker process."""
+    """The prefetcher thread of one worker process. It fills the task buffer."""
 
     def __init__(
         self,
@@ -330,7 +330,7 @@ class TaskPrefetcher(threading.Thread):
             self.finished.set()
 
     def buffer(self, task_result: ThreadmillTaskResult) -> bool:
-        """Buffer one task result; return False when the prefetcher must stop."""
+        """Buffer one task result. Return False when the prefetcher must stop."""
         while not self.stop_requested.is_set():
             try:
                 self.task_buffer.put(
@@ -343,7 +343,7 @@ class TaskPrefetcher(threading.Thread):
 
 
 class WorkerThread(threading.Thread):
-    """Single worker thread consuming tasks from the process prefetch buffer."""
+    """A worker thread that runs the tasks from the prefetch buffer."""
 
     def __init__(
         self,
