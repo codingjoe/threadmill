@@ -26,16 +26,16 @@ rather than the queue: the same worker drains roughly 450 tasks/s at two message
 1,983 at 16 and 5,658 at 64, where the sleep stops setting the rate. Threadmill
 reads the same rate into its prefetch buffer.
 
-django-tasks-db and django-tasks-redis read one task at a time because their
-shipped workers expose no read-ahead setting. django-tasks-rq forks a work horse
-per job, so its drain includes that fork.
+django-tasks-db reads one task at a time, because its shipped worker exposes no
+read-ahead setting. django-tasks-rq forks a work horse per job, so its drain
+includes that fork and it reads one task at a time too.
 
 Threadmill is measured twice, reading 128 messages ahead and reading one at a
 time, so the read-ahead cost can be subtracted from both worker benchmarks. Its
 queues are deeper than the others because its marginal drain is only seconds long,
 which would otherwise sit inside the one-second quantization of the fixed cost.
-Threadmill, django-tasks-db, django-tasks-redis and django-tasks-rq run one worker
-process that drains a queue and exits. Celery and dramatiq have no such mode, so
+Threadmill, django-tasks-db and django-tasks-rq run one worker process that
+drains a queue and exits. Celery and dramatiq have no such mode, so
 the benchmark queues a sentinel task last and waits for it to be processed. That
 wait is what proves the queue was drained. Their workers are stopped after the
 measurement, because a graceful shutdown takes seconds and would dominate a short
@@ -88,8 +88,8 @@ Dramatiq polls instead and sleeps a jittered 5-10 ms backoff once its window
 fills, so a shallow window measures that backoff rather than the queue: the same
 worker drains about 451 tasks/s at two messages, 1,983 at 16 and 5,658 at 64,
 where the sleep stops setting the rate. At 128 the backoff costs about 0.06 ms
-per task. django-tasks-db and django-tasks-redis expose no read-ahead setting and
-read one task at a time; django-tasks-rq forks a work horse per job.
+per task. django-tasks-db reads one task at a time, and django-tasks-rq forks a
+work horse per job, so neither can be told to read ahead.
 """
 
 CELERY_WORKER = (
@@ -382,7 +382,10 @@ WORKER_QUEUES = (
         "django-tasks-db", "django-tasks-db", drain_with_django_tasks_db_worker
     ),
     django_task_backend(
-        "django-tasks-rq", "django-tasks-rq", drain_with_django_tasks_rq_worker
+        "django-tasks-rq",
+        "django-tasks-rq",
+        drain_with_django_tasks_rq_worker,
+        task_count=5_000,  # about 80 tasks/s; see the module docstring
     ),
     QueueUnderTest(
         name="celery",

@@ -128,22 +128,25 @@ class TestCommand:
         )
         assert handler.formatter.format(record) == "Hello world"
 
-    def test_call_command__prefetch_count(self):
+    def test_call_command__prefetch_count(self, caplog):
         """Pass the prefetch count through to the running task executor."""
         enqueued = default_task_backend.enqueue(echo, args=[1])
         original_stream = handler.stream
         parent_log = io.StringIO()
         handler.setStream(parent_log)
         try:
-            call_command(
-                "threadmill",
-                "worker",
-                verbosity=0,
-                workers=1,
-                queues=["default"],
-                exit_empty=True,
-                prefetch_count=7,
-            )
+            # The worker no longer forces a level on the root logger, so the
+            # startup record is only emitted when the caller asks for INFO.
+            with caplog.at_level(logging.INFO):
+                call_command(
+                    "threadmill",
+                    "worker",
+                    verbosity=0,
+                    workers=1,
+                    queues=["default"],
+                    exit_empty=True,
+                    prefetch_count=7,
+                )
         finally:
             handler.setStream(original_stream)
         records = [

@@ -19,7 +19,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
-    <img alt="Tasks per second with one worker: dramatiq 6,975, threadmill 5,437, celery 2,080, django-tasks-db 1,981, django-tasks-redis 1,391." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
+    <img alt="Tasks per second with one worker: threadmill 11,973, dramatiq 7,331, celery 2,307, django-tasks-db 2,080, django-tasks-rq 90." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
   </picture>
 </p>
 
@@ -88,7 +88,8 @@ uv run manage.py threadmill worker --workers 4 --threads 2
 Each worker process runs one fetcher thread that reserves a batch of tasks in a single broker round-trip.
 Worker threads drain that buffer, which amortizes broker latency across fast tasks.
 A full buffer blocks the fetcher until a worker thread frees a slot.
-The gain is largest when the broker is a network hop away; against a local broker a task spends most of its time executing and acknowledging rather than waiting to be fetched.
+The gain is largest when the broker is a network hop away.
+Against a local broker the buffer is worth about a fifth of the worker's throughput in the queue comparison.
 
 Set the batch size with `--prefetch-count`.
 It defaults to four times the thread count and applies per process, not per thread.
