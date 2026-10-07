@@ -310,8 +310,6 @@ class TaskPrefetcher(threading.Thread):
         except Exception as exception:
             self.completion.set_exception(exception)
         finally:
-            # A BaseException would leave the consumers waiting for a result
-            # that never comes.
             if not self.completion.done():
                 self.completion.set_result(None)
 
