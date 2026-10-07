@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import typing
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from inspect import iscoroutinefunction
 from queue import Empty, Full
 from traceback import format_exception
@@ -257,9 +257,14 @@ class WorkerProcess(multiprocessing.Process):
             consumer_thread.join(join_timeout)
         self.prefetcher.stop_requested.set()
         self.prefetcher.join(join_timeout)
-        if (failure := self.prefetcher.failure) is not None:
-            logger.error("Worker process %s exits after a fetch failure", self.name)
-            raise failure
+        completion = self.prefetcher.completion
+        if completion.done() and (failure := completion.exception()) is not None:
+            logger.error(
+                "Worker process %s exits after a fetch failure",
+                self.name,
+                exc_info=failure,
+            )
+            raise SystemExit(1)
 
     def record_task(self) -> None:
         """Record one processed task and stop when max_tasks is reached."""
@@ -296,21 +301,16 @@ class TaskPrefetcher(threading.Thread):
         self.task_buffer: queue.PriorityQueue[ThreadmillTaskResult] = (
             queue.PriorityQueue(maxsize=prefetch_count)
         )
-        self.finished = threading.Event()
+        self.completion: Future[None] = Future()
         self.stop_requested = threading.Event()
-        self.failure: Exception | None = None
 
     def run(self) -> None:
         try:
             self.fill_buffer()
         except Exception as exception:
-            # The worker process reads this after the join, so a failed fetch
-            # cannot look like a drained queue.
-            self.failure = exception
-            logger.exception("Task prefetcher '%s' failed", self.name)
-            raise
-        finally:
-            self.finished.set()
+            self.completion.set_exception(exception)
+        else:
+            self.completion.set_result(None)
 
     def fill_buffer(self) -> None:
         """Fill the task buffer until the worker stops or the queue is drained."""
@@ -368,7 +368,7 @@ class WorkerThread(threading.Thread):
                     timeout=self.worker.task_wait_timeout.total_seconds()
                 )
             except Empty:
-                if prefetcher.finished.is_set():
+                if prefetcher.completion.done():
                     return
                 continue
 

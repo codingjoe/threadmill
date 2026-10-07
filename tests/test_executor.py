@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import Future
 
 import pytest
 from django.tasks import (
@@ -114,7 +115,7 @@ def _prefetched_thread(
     worker.expired = threading.Event()
     prefetcher = TaskPrefetcher(worker=worker, backend=backend, prefetch_count=1)
     prefetcher.buffer(task_result)
-    prefetcher.finished.set()
+    prefetcher.completion.set_result(None)
     worker.prefetcher = prefetcher
     return WorkerThread(worker=worker, index=0, backend=backend)
 
@@ -158,16 +159,17 @@ class StubPrefetchWorker:
         self.shutdown_requested = threading.Event()
 
 
-class CountingEvent(threading.Event):
-    """Event that counts is_set() checks to observe consumer poll cycles."""
+class CountingFuture(Future):
+    """Future that counts done() checks to observe consumer poll cycles."""
 
     def __init__(self) -> None:
         super().__init__()
         self.checks = 0
 
-    def is_set(self) -> bool:
+    def done(self) -> bool:
+        """Count the check before reporting the future state."""
         self.checks += 1
-        return super().is_set()
+        return super().done()
 
 
 def _make_prefetcher(
@@ -617,10 +619,8 @@ class TestWorkerProcess:
         assert not run_thread.is_alive()
         assert handler.formatter is worker.log_formatter
 
-    def test_run__raises_when_prefetcher_fails(self, monkeypatch):
-        """Re-raise a prefetch failure so the worker process exits non-zero."""
-        thread_failures = []
-        monkeypatch.setattr(threading, "excepthook", thread_failures.append)
+    def test_run__exits_when_prefetcher_fails(self, monkeypatch):
+        """Exit with SystemExit(1) after the prefetcher recorded a fetch failure."""
         monkeypatch.setattr(
             "threadmill.executor.WorkerProcess.task_wait_timeout",
             datetime.timedelta(seconds=0.01),
@@ -632,14 +632,12 @@ class TestWorkerProcess:
             log_formatter=JsonFormatter(),
         )
 
-        with pytest.raises(RuntimeError, match="backend unavailable"):
+        with pytest.raises(SystemExit) as exit_info:
             worker.run()
 
+        assert exit_info.value.code == 1
         assert worker.prefetcher is not None
-        assert isinstance(worker.prefetcher.failure, RuntimeError)
-        assert worker.prefetcher.finished.is_set()
-        assert len(thread_failures) == 1
-        assert isinstance(thread_failures[0].exc_value, RuntimeError)
+        assert isinstance(worker.prefetcher.completion.exception(), RuntimeError)
 
     def test_run__child_exits_non_zero_on_prefetch_failure(self, capfd):
         """A child whose prefetcher failed exits non-zero and logs the failure."""
@@ -657,6 +655,25 @@ class TestWorkerProcess:
 
         assert worker.exitcode == 1
         assert "exits after a fetch failure" in capfd.readouterr().out
+
+    def test_run__reports_fetch_failure_once(self, capfd):
+        """Report a child's fetch failure in exactly one traceback."""
+        worker = WorkerProcess(
+            thread_count=1,
+            backend_alias="stub",
+            queues=("default",),
+            log_formatter=JsonFormatter(),
+        )
+
+        worker.start()
+        worker.join(timeout=5)
+        if worker.is_alive():
+            worker.terminate()
+
+        captured = capfd.readouterr()
+        assert worker.exitcode == 1
+        output = captured.out + captured.err
+        assert output.count("Traceback (most recent call last):") == 1, output
 
 
 class TestWorkerThread:
@@ -801,29 +818,33 @@ class TestWorkerThread:
         result = default_task_backend.get_result(enqueued.id)
         assert result.status == TaskResultStatus.FAILED
 
-    def test_run__returns_when_buffer_drained_and_finished(self) -> None:
-        """run() returns once the buffer is drained and the prefetcher finished."""
+    def test_run__returns_when_buffer_drained_and_completion_done(self) -> None:
+        """run() returns once the buffer is drained and the prefetcher completed."""
         worker = _make_worker(max_tasks=1)
         worker.lock = threading.Lock()
         worker.expired = threading.Event()
         prefetcher = TaskPrefetcher(
             worker=worker, backend=default_task_backend, prefetch_count=1
         )
-        prefetcher.finished.set()
+        prefetcher.completion.set_result(None)
         worker.prefetcher = prefetcher
 
         WorkerThread(worker=worker, index=0, backend=default_task_backend).run()
 
-    def test_run__waits_for_buffer_until_finished(self) -> None:
+    def test_run__waits_for_buffer_until_completion_done(self, monkeypatch) -> None:
         """run() keeps polling an empty buffer while the prefetcher is alive."""
+        monkeypatch.setattr(
+            "threadmill.executor.WorkerProcess.task_wait_timeout",
+            datetime.timedelta(seconds=0.01),
+        )
         worker = _make_worker(max_tasks=1)
         worker.lock = threading.Lock()
         worker.expired = threading.Event()
         prefetcher = TaskPrefetcher(
             worker=worker, backend=default_task_backend, prefetch_count=1
         )
-        finished = CountingEvent()
-        prefetcher.finished = finished
+        completion = CountingFuture()
+        prefetcher.completion = completion
         worker.prefetcher = prefetcher
 
         reader = threading.Thread(
@@ -834,15 +855,15 @@ class TestWorkerThread:
         )
         reader.start()
         deadline = time.monotonic() + 2
-        while finished.checks < 1 and time.monotonic() < deadline:
+        while completion.checks < 1 and time.monotonic() < deadline:
             time.sleep(0.005)
         assert reader.is_alive()
 
-        finished.set()
+        completion.set_result(None)
         reader.join(timeout=1)
 
         assert not reader.is_alive()
-        assert finished.checks >= 2
+        assert completion.checks >= 2
 
 
 class TestTaskPrefetcher:
@@ -867,8 +888,8 @@ class TestTaskPrefetcher:
             prefetcher.stop_requested.set()
             thread.join(timeout=2)
         assert not thread.is_alive()
-        assert prefetcher.finished.is_set()
-        assert prefetcher.failure is None
+        assert prefetcher.completion.done()
+        assert prefetcher.completion.exception() is None
         assert [prefetcher.task_buffer.get_nowait().id for _ in range(2)] == [
             first.id,
             second.id,
@@ -883,8 +904,8 @@ class TestTaskPrefetcher:
         prefetcher.worker.expired.set()
         prefetcher.run()
 
-        assert prefetcher.finished.is_set()
-        assert prefetcher.failure is None
+        assert prefetcher.completion.done()
+        assert prefetcher.completion.exception() is None
         assert backend.calls == []
 
     def test_run__stops_on_stop_requested(self):
@@ -895,7 +916,7 @@ class TestTaskPrefetcher:
         prefetcher.stop_requested.set()
         prefetcher.run()
 
-        assert prefetcher.finished.is_set()
+        assert prefetcher.completion.done()
         assert backend.calls == []
 
     def test_run__acquires_a_full_buffer(self):
@@ -910,7 +931,7 @@ class TestTaskPrefetcher:
         assert backend.calls[0]["count"] == 5
         assert prefetcher.task_buffer.get_nowait().id == task_result.id
         assert len(backend.calls) == 1
-        assert prefetcher.finished.is_set()
+        assert prefetcher.completion.done()
 
     def test_run__stops_after_batch_when_shutdown_requested(self):
         """Buffer one final batch, then stop when a shutdown was requested."""
@@ -927,7 +948,7 @@ class TestTaskPrefetcher:
             second.id,
         ]
         assert len(backend.calls) == 1
-        assert prefetcher.finished.is_set()
+        assert prefetcher.completion.done()
 
     def test_run__stops_on_empty_when_exit_empty(self):
         """Break out of the fetch loop when the queue drained and exit_empty is set."""
@@ -937,8 +958,8 @@ class TestTaskPrefetcher:
         prefetcher.run()
 
         assert len(backend.calls) == 1
-        assert prefetcher.finished.is_set()
-        assert prefetcher.failure is None
+        assert prefetcher.completion.done()
+        assert prefetcher.completion.exception() is None
 
     def test_run__stops_on_empty_when_shutdown_requested(self):
         """Break out of the fetch loop when a shutdown was requested."""
@@ -949,18 +970,17 @@ class TestTaskPrefetcher:
         prefetcher.run()
 
         assert len(backend.calls) == 1
-        assert prefetcher.finished.is_set()
+        assert prefetcher.completion.done()
 
-    def test_run__records_failure_and_reraises(self):
-        """Record a fetch failure, mark the fetcher finished, and re-raise."""
-        backend = StubPrefetchBackend(RuntimeError("backend unavailable"))
-        prefetcher = _make_prefetcher(backend)
+    def test_run__records_failure_on_completion(self):
+        """Record a fetch failure on the completion future without raising."""
+        failure = RuntimeError("backend unavailable")
+        prefetcher = _make_prefetcher(StubPrefetchBackend(failure))
 
-        with pytest.raises(RuntimeError, match="backend unavailable"):
-            prefetcher.run()
+        prefetcher.run()
 
-        assert isinstance(prefetcher.failure, RuntimeError)
-        assert prefetcher.finished.is_set()
+        assert prefetcher.completion.done()
+        assert prefetcher.completion.exception() is failure
 
     def test_buffer__returns_false_when_full_and_stop_requested(self):
         """Abandon a full buffer as soon as the prefetcher must stop."""
@@ -979,8 +999,8 @@ class TestTaskPrefetcher:
             thread.join(timeout=3)
 
         assert not thread.is_alive()
-        assert prefetcher.finished.is_set()
-        assert prefetcher.failure is None
+        assert prefetcher.completion.done()
+        assert prefetcher.completion.exception() is None
         assert prefetcher.task_buffer.qsize() == 1
         assert prefetcher.task_buffer.get_nowait().id == buffered.id
 
