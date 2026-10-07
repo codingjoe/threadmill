@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
+from django.tasks.exceptions import TaskResultDoesNotExist
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -356,6 +357,7 @@ class TestRedisTaskBackend:
             assert acquired.last_attempted_at is not None
             assert acquired.started_at == acquired.last_attempted_at
             assert acquired.worker_ids == ["test-worker"]
+            assert acquired.lease_token is not None
 
             # Verify the lease is persisted, not only applied in memory.
             restored = backend.get_leased_task(task_result.id)
@@ -363,6 +365,7 @@ class TestRedisTaskBackend:
             assert restored.worker_ids == acquired.worker_ids
             assert restored.started_at == acquired.started_at
             assert restored.last_attempted_at == acquired.last_attempted_at
+            assert restored.lease_token == acquired.lease_token
         finally:
             backend.close()
 
@@ -478,6 +481,31 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    def test_acknowledge__keeps_lease_token_out_of_the_result(self):
+        """Persist no lease token: it is attempt state, not result state."""
+        backend = _make_backend("acknowledge_token_test")
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="token-test"
+            )
+            assert acquired is not None
+
+            backend.acknowledge(
+                replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            result_key = backend.RESULT_KEY.format(
+                prefix=backend.key_prefix, result_id=task_result.id
+            )
+            assert "lease_token" not in json.loads(backend.client.get(result_key))
+        finally:
+            backend.close()
+
     async def test_running_reaper__fails_expired_tasks(self):
         """Running reaper creates FAILED results for tasks with expired lease."""
         backend = RedisTaskBackend(
@@ -562,6 +590,62 @@ class TestRedisTaskBackend:
             # The result should still be the FAILED one from the reaper
             result = backend.get_result(task_result.id)
             assert result.status == TaskResultStatus.FAILED
+        finally:
+            backend.close()
+
+    def test_stale_acknowledge__keeps_retry_attempt_after_requeue(self):
+        """Discard a late acknowledgement while a retry attempt holds the lease."""
+        backend = _make_backend(
+            "stale_ack_retry_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
+            expired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="expired-worker"
+            )
+            assert expired is not None
+            _expire_lease(backend, task_result.id)
+            RedisBroker(backend).main()
+
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            backend.client.zadd(deferred_key, {task_result.id: 0})
+            RedisBroker(backend).main()
+            retry = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="retry-worker"
+            )
+            assert retry is not None
+            assert retry.id == task_result.id
+
+            backend.acknowledge(
+                replace(
+                    expired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.zscore(running_key, task_result.id) is not None
+            assert backend.client.exists(task_key)
+
+            backend.acknowledge(
+                replace(
+                    retry,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+            assert backend.get_result(task_result.id).worker_ids == [
+                "expired-worker",
+                "retry-worker",
+            ]
         finally:
             backend.close()
 

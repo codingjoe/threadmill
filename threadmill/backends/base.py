@@ -65,6 +65,24 @@ class RetryTask(Task):
         return (reconstructor, (kwargs,))
 
 
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class ThreadmillTaskResult(TaskResult):
+    lease_token: str | None = None
+
+    @classmethod
+    def from_result(
+        cls, task_result: TaskResult, *, lease_token: str | None
+    ) -> ThreadmillTaskResult:
+        return cls(
+            **{
+                field.name: getattr(task_result, field.name)
+                for field in dataclasses.fields(TaskResult)
+                if field.init
+            },
+            lease_token=lease_token,
+        )
+
+
 @dataclasses.dataclass(kw_only=True, slots=True)
 class QueueCounts:
     """Point-in-time cardinality of each queue segment."""
@@ -155,10 +173,15 @@ class TaskResultEncoder(DjangoJSONEncoder):
     """JSON encoder for TaskResult and TaskError objects."""
 
     def default(self, o):
-        if isinstance(o, (TaskResult, TaskError)):
+        if isinstance(o, TaskResult):
             return {
                 field.name: getattr(o, field.name)
-                for field in dataclasses.fields(type(o))
+                for field in dataclasses.fields(TaskResult)
+            }
+        if isinstance(o, TaskError):
+            return {
+                field.name: getattr(o, field.name)
+                for field in dataclasses.fields(TaskError)
             }
         if isinstance(o, RetryTask):
             data = {

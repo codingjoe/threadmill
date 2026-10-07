@@ -27,6 +27,7 @@ from threadmill.backends.base import (
     TelemetryDirection,
     TelemetryEvent,
     ThreadmillTaskBackend,
+    ThreadmillTaskResult,
 )
 from threadmill.exceptions import AcknowledgementTimeout
 
@@ -166,7 +167,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     SEGMENT_KEY = "{prefix}:{queue_name}:{status}"
     DEFERRED_KEY = "{prefix}:{queue_name}:deferred"
 
-    LEASE_FIELDS = ("lease_worker", "lease_started_at")
+    LEASE_FIELDS = ("lease_worker", "lease_started_at", "lease_token")
 
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
@@ -182,10 +183,10 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             status=status.value.lower(),
         )
 
-    def get_leased_task(self, task_id: str) -> TaskResult | None:
+    def get_leased_task(self, task_id: str) -> ThreadmillTaskResult | None:
         """Return a running task as its lease holds it, or None when its hash is gone."""
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
-        data, lease_worker, lease_started_at = self.client.hmget(
+        data, lease_worker, lease_started_at, lease_token = self.client.hmget(
             task_key, "data", *self.LEASE_FIELDS
         )
         if data is None:
@@ -194,6 +195,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             self.deserialize_task_result(data.decode()),
             worker=lease_worker.decode() if lease_worker else None,
             lease_started_at=_parse_lease_started_at(lease_started_at),
+            lease_token=lease_token.decode() if lease_token is not None else None,
         )
 
     def __init__(self, alias: str, params: dict) -> None:
@@ -324,7 +326,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             now_ms = now.timestamp() * 1000
             now_iso = now.isoformat()
 
-            if data := self._acquire_script(
+            if result := self._acquire_script(
                 keys=keys,
                 args=[
                     str(now_ms),
@@ -336,12 +338,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     str(self._rotation_offset),
                 ],
             ):
+                data, lease_token = result
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
                 return self._apply_lease(
                     self.deserialize_task_result(data.decode()),
                     worker=worker,
                     lease_started_at=now,
+                    lease_token=lease_token.decode(),
                 )
 
             try:
@@ -367,12 +371,16 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         *,
         worker: str | None,
         lease_started_at: datetime.datetime | None,
-    ) -> TaskResult:
+        lease_token: str | None,
+    ) -> ThreadmillTaskResult:
         """Return a stored task result as a running attempt.
 
         `worker=None` means the lease records no worker; an empty string still
         counts as an attempt, and a task that already records a start keeps it.
         """
+        task_result = ThreadmillTaskResult.from_result(
+            task_result, lease_token=lease_token
+        )
         return dataclasses.replace(
             task_result,
             status=TaskResultStatus.RUNNING,
@@ -402,6 +410,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         )
         finished_at = task_result.finished_at or timezone.now()
         finish_score = finished_at.timestamp() * 1000
+        lease_token = (
+            task_result.lease_token
+            if isinstance(task_result, ThreadmillTaskResult)
+            else None
+        )
 
         self._acknowledge_script(
             keys=[
@@ -419,6 +432,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 task_result.status.name,
                 self.telemetry_channel,
                 task_result.task.queue_name,
+                lease_token or "",
             ],
         )
 
@@ -518,13 +532,16 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             if not stored:
                 continue
             if leased:
-                data, lease_worker, lease_started_at = stored
+                data, lease_worker, lease_started_at, lease_token = stored
                 if not data:
                     continue
                 yield self._apply_lease(
                     self.deserialize_task_result(data.decode()),
                     worker=lease_worker.decode() if lease_worker else None,
                     lease_started_at=_parse_lease_started_at(lease_started_at),
+                    lease_token=(
+                        lease_token.decode() if lease_token is not None else None
+                    ),
                 )
             else:
                 yield self.deserialize_task_result(stored.decode())
