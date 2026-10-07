@@ -334,18 +334,6 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_fail_unreadable_task__skips_when_task_data_is_missing(self, caplog):
-        """Failing an unreadable task logs and skips when its task data is gone."""
-        backend = _make_backend("reap_gone_callback_missing_data_test")
-        try:
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-                RedisBroker(backend)._fail_unreadable_task(
-                    "missing-task-id", ImportError("gone")
-                )
-            assert "has no task data" in caplog.text
-        finally:
-            backend.close()
-
 
 class TestRedisTaskBackend:
     """Tests for the RedisTaskBackend update and lease functionality."""

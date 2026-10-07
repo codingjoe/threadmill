@@ -115,9 +115,6 @@ class RedisBroker(Broker):
         data, lease_worker, lease_started_at, lease_token = self.backend.client.hmget(
             task_key, "data", *self.backend.LEASE_FIELDS
         )
-        if data is None:
-            logger.warning("Claimed task %r has no task data; skipping", task_id)
-            return
         logger.error(
             "Task %r retry callback is gone from the code base; failing the task: %s",
             task_id,
