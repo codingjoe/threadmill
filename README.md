@@ -85,23 +85,8 @@ Processes allow for parallel compute (no GIL) while threads are great for low-me
 uv run manage.py threadmill worker --workers 4 --threads 2
 ```
 
-Each worker process runs one fetcher thread.
-The fetcher reserves a batch of tasks in one broker round trip, and the worker threads drain that batch.
-This keeps the worker threads busy while the broker answers.
-A full buffer blocks the fetcher until a thread frees a slot.
-The gain is largest when the broker is far from the worker.
-Against a local broker the buffer is worth about a fifth of the throughput.
-
-Set the batch size with `--prefetch-count`.
-It defaults to four times the thread count and applies to each process.
-A value of `1` disables batching.
-
-Prefetching has soft limits:
-
-- A fetched task holds its lease while it waits. The buffer holds at most `--prefetch-count` tasks, so size that value for your workload.
-- A task enqueued after a fetch waits for the buffer to drain. Inside the buffer the highest priority task runs first, and tasks of one priority keep queue order.
-- `--max-tasks` recycles a worker. It is not a hard limit. The buffer and the batch in hand still run, so a worker can run about twice `--prefetch-count` tasks more than its budget.
-- `worker_ids` records the fetcher of the process and not the thread that runs the task.
+Each worker process runs a fetcher thread that leases a batch of tasks ahead of the worker threads.
+Set the batch size with `--prefetch-count`, four times the thread count by default.
 
 #### Health
 
