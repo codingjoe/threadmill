@@ -325,9 +325,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             now = timezone.now()
             now_ms = now.timestamp() * 1000
             now_iso = now.isoformat()
-            lease_token = str(uuid.uuid7())
 
-            if data := self._acquire_script(
+            if result := self._acquire_script(
                 keys=keys,
                 args=[
                     str(now_ms),
@@ -337,16 +336,16 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     worker,
                     str(int(self.lease_ttl.total_seconds() * 1000)),
                     str(self._rotation_offset),
-                    lease_token,
                 ],
             ):
+                data, lease_token = result
                 self._miss_count = 0
                 self._rotation_offset = (self._rotation_offset + 1) % len(queue_names)
                 return self._apply_lease(
                     self.deserialize_task_result(data.decode()),
                     worker=worker,
                     last_attempted_at=now,
-                    lease_token=lease_token,
+                    lease_token=lease_token.decode(),
                 )
 
             try:

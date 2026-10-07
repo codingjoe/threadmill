@@ -22,6 +22,9 @@
 local num_queues = tonumber(ARGV[4])
 local lease_ttl_ms = tonumber(ARGV[6])
 local start_index = tonumber(ARGV[7])
+if not redis.REDIS_VERSION_NUM or redis.REDIS_VERSION_NUM < 0x070000 then
+  return redis.error_reply('ERR threadmill requires Redis 7.0 or later')
+end
 for offset = 0, num_queues - 1 do
   local queue_index = (start_index + offset) % num_queues + 1
   local result = redis.call('ZPOPMIN', KEYS[queue_index * 2])
@@ -31,9 +34,13 @@ for offset = 0, num_queues - 1 do
     local data = redis.call('HGET', task_key, 'data')
     if data then
       local deadline = tonumber(ARGV[1]) + lease_ttl_ms
+      local lease_token = string.format(
+        '%06x%06x%06x%06x',
+        math.random(0, 0xffffff), math.random(0, 0xffffff),
+        math.random(0, 0xffffff), math.random(0, 0xffffff))
       redis.call('ZADD', KEYS[queue_index * 2 - 1], deadline, task_id)
-      redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'last_attempted_at', ARGV[2], 'lease_token', ARGV[8])
-      return data
+      redis.call('HSET', task_key, 'lease_worker', ARGV[5], 'last_attempted_at', ARGV[2], 'lease_token', lease_token)
+      return { data, lease_token }
     end
   end
 end
