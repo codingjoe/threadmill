@@ -154,12 +154,6 @@ class TaskExecutor:
     def run(self) -> None:
         """Start consuming tasks until shutdown is requested."""
         configure_logging(self.log_formatter)
-        logger.info(
-            "Starting %d worker processes with %d threads and %d prefetched tasks each",
-            self.process_count,
-            self.thread_count,
-            self.prefetch_count,
-        )
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)
         ]

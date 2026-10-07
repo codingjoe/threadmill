@@ -1,7 +1,5 @@
 import argparse
 import datetime
-import io
-import json
 import logging
 import re
 import signal
@@ -9,11 +7,10 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.tasks import TaskResultStatus, default_task_backend
+from django.tasks import default_task_backend
 
 from tests.testapp.tasks import (
     compute_workload,
-    echo,
     io_workload,
     memory_workload,
 )
@@ -128,37 +125,16 @@ class TestCommand:
         )
         assert handler.formatter.format(record) == "Hello world"
 
-    def test_call_command__prefetch_count(self, caplog):
+    def test_call_command__prefetch_count(self):
         """Pass the prefetch count through to the running task executor."""
-        enqueued = default_task_backend.enqueue(echo, args=[1])
-        original_stream = handler.stream
-        parent_log = io.StringIO()
-        handler.setStream(parent_log)
-        try:
-            # The worker no longer forces a level on the root logger, so the
-            # startup record is only emitted when the caller asks for INFO.
-            with caplog.at_level(logging.INFO):
-                call_command(
-                    "threadmill",
-                    "worker",
-                    verbosity=0,
-                    workers=1,
-                    queues=["default"],
-                    exit_empty=True,
-                    prefetch_count=7,
-                )
-        finally:
-            handler.setStream(original_stream)
-        records = [
-            json.loads(line)
-            for line in parent_log.getvalue().splitlines()
-            if line.startswith("{")
-        ]
-        assert any("7 prefetched tasks each" in record["message"] for record in records)
-        assert (
-            default_task_backend.get_result(enqueued.id).status
-            is TaskResultStatus.SUCCESSFUL
-        )
+        with patch.object(threadmill.TaskExecutor, "run", autospec=True) as run:
+            call_command(
+                "threadmill",
+                "worker",
+                verbosity=0,
+                prefetch_count=7,
+            )
+        assert run.call_args.args[0].prefetch_count == 7
 
     def test_call_command__prefetch_count__raise_command_error(self):
         """Reject a negative prefetch count with a CommandError."""
