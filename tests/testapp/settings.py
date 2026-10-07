@@ -43,8 +43,9 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "threadmill",
     "tests.testapp",
+    "django_rq",
     "django_tasks_db",
-    "django_tasks_redis",
+    "django_tasks_rq",
 ]
 
 MIDDLEWARE = [
@@ -104,10 +105,9 @@ TASKS = {
         "BACKEND": "django_tasks_db.DatabaseBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
     },
-    "django-tasks-redis": {
-        "BACKEND": "django_tasks_redis.RedisTaskBackend",
+    "django-tasks-rq": {
+        "BACKEND": "django_tasks_rq.RQBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
-        "OPTIONS": {"REDIS_URL": REDIS_URL},
     },
     "immediate": {
         "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
@@ -115,6 +115,11 @@ TASKS = {
     "dummy": {
         "BACKEND": "django.tasks.backends.dummy.DummyBackend",
     },
+}
+
+# django-rq resolves every queue named in TASKS from this mapping.
+RQ_QUEUES = {
+    DEFAULT_TASK_QUEUE_NAME: {"URL": REDIS_URL},
 }
 
 # Run workers as quietly as the celery and dramatiq benchmarks. Django's
