@@ -318,7 +318,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         count: int = 1,
         timeout: datetime.timedelta | None = None,
         worker: str = "",
-    ) -> list[TaskResult]:
+    ) -> list[ThreadmillTaskResult]:
         queue_names = queue_names or tuple(self.queues)
         deadline = time.monotonic() + timeout.total_seconds() if timeout else None
         keys = [

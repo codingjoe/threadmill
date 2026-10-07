@@ -69,6 +69,13 @@ class RetryTask(Task):
 class ThreadmillTaskResult(TaskResult):
     lease_token: str | None = None
 
+    def __lt__(self, other: ThreadmillTaskResult) -> bool:
+        """Order by descending priority, then by enqueue time, as the queue does."""
+        return (-self.task.priority, self.enqueued_at) < (
+            -other.task.priority,
+            other.enqueued_at,
+        )
+
     @classmethod
     def from_result(
         cls, task_result: TaskResult, *, lease_token: str | None
@@ -261,7 +268,7 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         count: int = 1,
         timeout: datetime.timedelta | None = None,
         worker: str = "",
-    ) -> list[TaskResult]:
+    ) -> list[ThreadmillTaskResult]:
         """
         Return and lock up to `count` tasks without removing them from the queue.
 
@@ -279,7 +286,9 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
             queue.Empty: If the first task is unavailable and timeout is None.
 
         Returns:
-            Between one and `count` task results, never an empty list.
+            Between one and `count` leased task results, never an empty list. They
+            are `ThreadmillTaskResult`s, which order by priority and enqueue time
+            so the prefetch buffer can hand out the most important task first.
         """
         raise NotImplementedError
 

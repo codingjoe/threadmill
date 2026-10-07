@@ -3,7 +3,6 @@
 import asyncio
 import dataclasses
 import datetime
-import itertools
 import json
 import logging
 import multiprocessing
@@ -28,7 +27,7 @@ from django.utils import timezone
 from django.utils.json import normalize_json
 
 if typing.TYPE_CHECKING:
-    from .backends.base import Broker, ThreadmillTaskBackend
+    from .backends.base import Broker, ThreadmillTaskBackend, ThreadmillTaskResult
 
 
 class JsonFormatter(logging.Formatter):
@@ -280,20 +279,6 @@ class WorkerProcess(multiprocessing.Process):
         self.join()
 
 
-@dataclasses.dataclass(order=True, slots=True)
-class PrefetchedTask:
-    """A buffered task result, awaiting dispatch to a worker thread.
-
-    The buffer holds these rather than bare task results so it can hand out the
-    highest priority task first, and preserve fetch order within a priority.
-    """
-
-    sort_key: tuple[int, int]
-    """Negated task priority, then fetch order; the heap compares on this."""
-
-    task_result: TaskResult = dataclasses.field(compare=False)
-
-
 class TaskPrefetcher(threading.Thread):
     """Single prefetcher thread filling the task buffer of one worker process."""
 
@@ -308,10 +293,9 @@ class TaskPrefetcher(threading.Thread):
         self.worker = worker
         self.backend = backend
         self.prefetch_count = prefetch_count
-        self.task_buffer: queue.PriorityQueue[PrefetchedTask] = queue.PriorityQueue(
-            maxsize=prefetch_count
+        self.task_buffer: queue.PriorityQueue[ThreadmillTaskResult] = (
+            queue.PriorityQueue(maxsize=prefetch_count)
         )
-        self.fetch_sequence = itertools.count()
         self.finished = threading.Event()
         self.stop_requested = threading.Event()
         self.failure: Exception | None = None
@@ -345,15 +329,12 @@ class TaskPrefetcher(threading.Thread):
         finally:
             self.finished.set()
 
-    def buffer(self, task_result: TaskResult) -> bool:
+    def buffer(self, task_result: ThreadmillTaskResult) -> bool:
         """Buffer one task result; return False when the prefetcher must stop."""
-        item = PrefetchedTask(
-            (-task_result.task.priority, next(self.fetch_sequence)), task_result
-        )
         while not self.stop_requested.is_set():
             try:
                 self.task_buffer.put(
-                    item, timeout=self.worker.task_wait_timeout.total_seconds()
+                    task_result, timeout=self.worker.task_wait_timeout.total_seconds()
                 )
             except Full:
                 continue
@@ -382,7 +363,7 @@ class WorkerThread(threading.Thread):
             try:
                 task_result = prefetcher.task_buffer.get(
                     timeout=self.worker.task_wait_timeout.total_seconds()
-                ).task_result
+                )
             except Empty:
                 if prefetcher.finished.is_set():
                     return

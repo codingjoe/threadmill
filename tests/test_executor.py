@@ -29,7 +29,11 @@ from tests.testapp.tasks import (
     echo,
     log_message,
 )
-from threadmill.backends.base import Broker, ThreadmillTaskBackend
+from threadmill.backends.base import (
+    Broker,
+    ThreadmillTaskBackend,
+    ThreadmillTaskResult,
+)
 from threadmill.executor import (
     JsonFormatter,
     TaskExecutor,
@@ -56,9 +60,9 @@ async def _async_task():
     return 99
 
 
-def _task_result(task, *args, **kwargs) -> TaskResult:
-    """Build a READY `TaskResult` without touching Redis."""
-    return TaskResult(
+def _task_result(task, *args, **kwargs) -> ThreadmillTaskResult:
+    """Build a READY `ThreadmillTaskResult` without touching Redis."""
+    return ThreadmillTaskResult(
         task=task,
         id=str(uuid.uuid7()),
         status=TaskResultStatus.READY,
@@ -865,9 +869,10 @@ class TestTaskPrefetcher:
         assert not thread.is_alive()
         assert prefetcher.finished.is_set()
         assert prefetcher.failure is None
-        assert [
-            prefetcher.task_buffer.get_nowait().task_result.id for _ in range(2)
-        ] == [first.id, second.id]
+        assert [prefetcher.task_buffer.get_nowait().id for _ in range(2)] == [
+            first.id,
+            second.id,
+        ]
         assert all(call["count"] == 4 for call in backend.calls)
 
     def test_run__stops_on_expired(self):
@@ -903,7 +908,7 @@ class TestTaskPrefetcher:
         prefetcher.run()
 
         assert backend.calls[0]["count"] == 5
-        assert prefetcher.task_buffer.get_nowait().task_result.id == task_result.id
+        assert prefetcher.task_buffer.get_nowait().id == task_result.id
         assert len(backend.calls) == 1
         assert prefetcher.finished.is_set()
 
@@ -917,9 +922,10 @@ class TestTaskPrefetcher:
         prefetcher.worker.shutdown_requested.set()
         prefetcher.run()
 
-        assert [
-            prefetcher.task_buffer.get_nowait().task_result.id for _ in range(2)
-        ] == [first.id, second.id]
+        assert [prefetcher.task_buffer.get_nowait().id for _ in range(2)] == [
+            first.id,
+            second.id,
+        ]
         assert len(backend.calls) == 1
         assert prefetcher.finished.is_set()
 
@@ -976,7 +982,7 @@ class TestTaskPrefetcher:
         assert prefetcher.finished.is_set()
         assert prefetcher.failure is None
         assert prefetcher.task_buffer.qsize() == 1
-        assert prefetcher.task_buffer.get_nowait().task_result.id == buffered.id
+        assert prefetcher.task_buffer.get_nowait().id == buffered.id
 
     def test_buffer__returns_true_when_space_available(self):
         """Buffer a task result when the queue has room."""
@@ -984,19 +990,29 @@ class TestTaskPrefetcher:
         prefetcher = _make_prefetcher(StubPrefetchBackend())
 
         assert prefetcher.buffer(task_result) is True
-        assert prefetcher.task_buffer.get_nowait().task_result.id == task_result.id
+        assert prefetcher.task_buffer.get_nowait().id == task_result.id
 
     def test_buffer__dispatches_highest_priority_first(self):
-        """Hand out the highest priority task first and keep fetch order on ties."""
+        """Hand out the highest priority task first, earlier enqueued on ties."""
+        enqueued_at = timezone.now()
         low = _task_result(dataclasses.replace(echo, priority=1), 1)
-        high = _task_result(dataclasses.replace(echo, priority=5), 2)
+        first_high = dataclasses.replace(
+            _task_result(dataclasses.replace(echo, priority=5), 2),
+            enqueued_at=enqueued_at,
+        )
         middle = _task_result(dataclasses.replace(echo, priority=3), 3)
-        later_high = _task_result(dataclasses.replace(echo, priority=5), 4)
+        later_high = dataclasses.replace(
+            _task_result(dataclasses.replace(echo, priority=5), 4),
+            enqueued_at=enqueued_at + datetime.timedelta(seconds=1),
+        )
         prefetcher = _make_prefetcher(StubPrefetchBackend())
 
-        for task_result in (low, high, middle, later_high):
+        for task_result in (low, first_high, middle, later_high):
             assert prefetcher.buffer(task_result) is True
 
-        assert [
-            prefetcher.task_buffer.get_nowait().task_result.id for _ in range(4)
-        ] == [high.id, later_high.id, middle.id, low.id]
+        assert [prefetcher.task_buffer.get_nowait().id for _ in range(4)] == [
+            first_high.id,
+            later_high.id,
+            middle.id,
+            low.id,
+        ]
