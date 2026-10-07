@@ -22,9 +22,6 @@
 local num_queues = tonumber(ARGV[4])
 local lease_ttl_ms = tonumber(ARGV[6])
 local start_index = tonumber(ARGV[7])
-if not redis.REDIS_VERSION_NUM or redis.REDIS_VERSION_NUM < 0x070000 then
-  return redis.error_reply('ERR threadmill requires Redis 7.0 or later')
-end
 for offset = 0, num_queues - 1 do
   local queue_index = (start_index + offset) % num_queues + 1
   local result = redis.call('ZPOPMIN', KEYS[queue_index * 2])
