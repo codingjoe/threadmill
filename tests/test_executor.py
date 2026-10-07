@@ -641,34 +641,50 @@ class TestWorkerProcess:
 
     def test_run__child_exits_non_zero_on_prefetch_failure(self, capfd):
         """A child whose prefetcher failed exits non-zero and logs the failure."""
-        worker = WorkerProcess(
-            thread_count=1,
-            backend_alias="stub",
-            queues=("default",),
-            log_formatter=JsonFormatter(),
-        )
+        original_start_method = multiprocessing.get_start_method()
+        # A forkserver worker inherits the stdout of the long-lived forkserver
+        # instead of the file descriptor this fixture replaces, so its records
+        # would never reach capfd.
+        multiprocessing.set_start_method("spawn", force=True)
+        try:
+            worker = WorkerProcess(
+                thread_count=1,
+                backend_alias="stub",
+                queues=("default",),
+                log_formatter=JsonFormatter(),
+            )
 
-        worker.start()
-        worker.join(timeout=5)
-        if worker.is_alive():
-            worker.terminate()
+            worker.start()
+            worker.join(timeout=5)
+            if worker.is_alive():
+                worker.terminate()
+        finally:
+            multiprocessing.set_start_method(original_start_method, force=True)
 
         assert worker.exitcode == 1
         assert "exits after a fetch failure" in capfd.readouterr().out
 
     def test_run__reports_fetch_failure_once(self, capfd):
         """Report a child's fetch failure in exactly one traceback."""
-        worker = WorkerProcess(
-            thread_count=1,
-            backend_alias="stub",
-            queues=("default",),
-            log_formatter=JsonFormatter(),
-        )
+        original_start_method = multiprocessing.get_start_method()
+        # A forkserver worker inherits the stdout of the long-lived forkserver
+        # instead of the file descriptor this fixture replaces, so its records
+        # would never reach capfd.
+        multiprocessing.set_start_method("spawn", force=True)
+        try:
+            worker = WorkerProcess(
+                thread_count=1,
+                backend_alias="stub",
+                queues=("default",),
+                log_formatter=JsonFormatter(),
+            )
 
-        worker.start()
-        worker.join(timeout=5)
-        if worker.is_alive():
-            worker.terminate()
+            worker.start()
+            worker.join(timeout=5)
+            if worker.is_alive():
+                worker.terminate()
+        finally:
+            multiprocessing.set_start_method(original_start_method, force=True)
 
         captured = capfd.readouterr()
         assert worker.exitcode == 1
