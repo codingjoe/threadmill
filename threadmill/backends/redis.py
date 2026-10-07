@@ -85,7 +85,11 @@ class RedisBroker(Broker):
         )
 
     def _reap_running_queue(self, queue_name: str) -> None:
-        """Claim tasks whose processing lease has expired from the running set."""
+        """Claim tasks whose processing lease has expired from the running set.
+
+        The claim issues a fresh lease, so the expired holder can no longer
+        acknowledge while the broker decides the task's fate.
+        """
         running_key = self.backend._segment_key(TaskResultStatus.RUNNING, queue_name)
         claimed_ids = self._reaper_script(
             keys=[running_key],
@@ -93,6 +97,7 @@ class RedisBroker(Broker):
                 str(int(self.CLAIM_TTL.total_seconds() * 1000)),
                 str(self.backend.batch_size),
                 f"{self.backend.key_prefix}:task:",
+                uuid.uuid4().hex,
             ],
         )
         for task_id in claimed_ids:

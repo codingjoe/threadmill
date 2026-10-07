@@ -7,6 +7,7 @@ import logging
 import queue
 import time
 import typing
+import uuid
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -125,6 +126,7 @@ def _claim_expired(
     broker: RedisBroker,
     *,
     queue_name: str = "default",
+    lease_token: str | None = None,
 ) -> list[str]:
     """Run the reaper claim script and return the claimed IDs."""
     claimed = broker._reaper_script(
@@ -133,6 +135,7 @@ def _claim_expired(
             str(int(RedisBroker.CLAIM_TTL.total_seconds() * 1000)),
             str(backend.batch_size),
             f"{backend.key_prefix}:task:",
+            lease_token or uuid.uuid4().hex,
         ],
     )
     return list(claimed)
@@ -244,6 +247,55 @@ class TestRedisBrokerReap:
             # Once the claim lapses the task is claimed again.
             _expire_lease(backend, task_result.id)
             assert _claim_expired(backend, broker) == [task_result.id]
+        finally:
+            backend.close()
+
+    def test_reap__issues_fresh_lease_token(self):
+        """Claiming replaces the expired holder's token and blocks its acknowledge."""
+        backend = _make_backend(
+            "reap_fresh_token_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(boom_no_retry, args=[])
+            acquired = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _expire_lease(backend, task_result.id)
+
+            broker = RedisBroker(backend)
+            claim_token = uuid.uuid4().hex
+            assert _claim_expired(backend, broker, lease_token=claim_token) == [
+                task_result.id
+            ]
+
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.hget(task_key, "lease_token") == claim_token
+            assert acquired.lease_token != claim_token
+
+            # The expired holder's late success is discarded, so the task hash
+            # survives for the claim's decision.
+            backend.acknowledge(
+                replace(
+                    acquired,
+                    status=TaskResultStatus.SUCCESSFUL,
+                    finished_at=timezone.now(),
+                )
+            )
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
+            assert backend.client.exists(task_key)
+
+            # The claim's own decision still applies.
+            broker._reap_task(task_result.id)
+            result = backend.get_result(task_result.id)
+            assert result.status == TaskResultStatus.FAILED
+            assert (
+                result.errors[-1].exception_class_path
+                == "threadmill.exceptions.AcknowledgementTimeout"
+            )
         finally:
             backend.close()
 

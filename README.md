@@ -140,9 +140,9 @@ A stored retry callback that is gone from the code base fails the task the same
 way, recording an `ImportError` beside the timeout error. The failure is stored
 as a regular result, so it can be requeued or dropped from the inspector.
 Keep `lease_ttl` above your worst-case runtime: a task that outlives its lease
-can still be running, so a retry may execute concurrently with it. The
-acknowledgement of the lease holder wins: the late result of an expired attempt
-is discarded.
+can still be running, so a retry may execute concurrently with it. Claiming an
+expired task issues a new lease, so the expired attempt can no longer publish
+and its late result is discarded.
 
 All keys for one backend alias share a Redis Cluster hash tag (`{alias}`), so
 every multi-key operation — including the cross-queue acquire — runs on a single
