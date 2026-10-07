@@ -70,10 +70,6 @@ class ThreadmillTaskResult(TaskResult):
     lease_token: str | None = None
 
     def __lt__(self, other: ThreadmillTaskResult) -> bool:
-        """Order the results by priority from highest to lowest.
-
-        Two results with the same priority keep their enqueue order.
-        """
         return (-self.task.priority, self.enqueued_at) < (
             -other.task.priority,
             other.enqueued_at,
