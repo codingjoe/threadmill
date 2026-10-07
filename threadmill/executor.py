@@ -302,32 +302,35 @@ class TaskPrefetcher(threading.Thread):
 
     def run(self) -> None:
         try:
-            while not self.stop_requested.is_set() and not self.worker.expired.is_set():
-                try:
-                    batch = self.backend.acquire(
-                        *self.worker.queues,
-                        count=self.prefetch_count,
-                        timeout=self.worker.task_wait_timeout,
-                        worker=self.name,
-                    )
-                except Empty, TimeoutError:
-                    if (
-                        self.worker.exit_empty
-                        or self.worker.shutdown_requested.is_set()
-                    ):
-                        break
-                else:
-                    for task_result in batch:
-                        if not self.buffer(task_result):
-                            break
-                    if self.worker.shutdown_requested.is_set():
-                        break
+            self.fill_buffer()
         except Exception as exception:
+            # The worker process reads this after the join, so a failed fetch
+            # cannot look like a drained queue.
             self.failure = exception
             logger.exception("Task prefetcher '%s' failed", self.name)
             raise
         finally:
             self.finished.set()
+
+    def fill_buffer(self) -> None:
+        """Fill the task buffer until the worker stops or the queue is drained."""
+        while not self.stop_requested.is_set() and not self.worker.expired.is_set():
+            try:
+                batch = self.backend.acquire(
+                    *self.worker.queues,
+                    count=self.prefetch_count,
+                    timeout=self.worker.task_wait_timeout,
+                    worker=self.name,
+                )
+            except Empty, TimeoutError:
+                if self.worker.exit_empty or self.worker.shutdown_requested.is_set():
+                    break
+            else:
+                for task_result in batch:
+                    if not self.buffer(task_result):
+                        break
+                if self.worker.shutdown_requested.is_set():
+                    break
 
     def buffer(self, task_result: ThreadmillTaskResult) -> bool:
         """Buffer one task result. Return False when the prefetcher must stop."""
