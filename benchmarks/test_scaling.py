@@ -36,6 +36,7 @@ than a default.
 import collections
 import dataclasses
 import sys
+import sysconfig
 
 import pytest
 from django.core.management import call_command
@@ -46,7 +47,6 @@ from django.tasks import (
 )
 
 from tests.testapp.tasks import compute_workload
-from threadmill.executor import is_free_threaded_build, is_gil_enabled
 
 TASK_COUNT = 16
 """CPU-bound tasks drained per measurement, about one second of work each."""
@@ -158,8 +158,10 @@ class TestThreadScaling:
                 "threads": parallelism.threads,
                 "tasks": TASK_COUNT,
                 "python": sys.version.split()[0],
-                "free_threaded_build": is_free_threaded_build(),
-                "gil_enabled": is_gil_enabled(),
+                "free_threaded_build": bool(
+                    sysconfig.get_config_var("Py_GIL_DISABLED")
+                ),
+                "gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
             }
         )
 

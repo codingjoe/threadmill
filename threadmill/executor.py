@@ -100,16 +100,6 @@ def configure_logging(formatter: logging.Formatter) -> None:
     root_logger.addHandler(handler)
 
 
-def is_free_threaded_build() -> bool:
-    """Return whether this interpreter is a free-threaded build."""
-    return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-
-
-def is_gil_enabled() -> bool:
-    """Return whether the global interpreter lock is currently enabled."""
-    return getattr(sys, "_is_gil_enabled", lambda: True)()
-
-
 def warn_when_free_threading_is_unavailable() -> None:
     """Warn when a free-threaded build runs with the GIL enabled.
 
@@ -117,11 +107,12 @@ def warn_when_free_threading_is_unavailable() -> None:
     for the whole process, which silently costs the parallelism the build exists
     to provide.
     """
-    if is_free_threaded_build() and is_gil_enabled():
+    free_threaded_build = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)()
+    if free_threaded_build and gil_enabled:
         logger.warning(
-            "free-threaded interpreter is running with the GIL enabled, so worker "
-            "threads run one at a time. A C extension that does not declare "
-            "free-threading support, such as hiredis, re-enables the GIL"
+            "Free-threaded interpreter is running with the GIL enabled. C extensions "
+            "that do not declare free-threading support may re-enable the GIL"
         )
 
 
@@ -179,8 +170,6 @@ class TaskExecutor:
     def run(self) -> None:
         """Start consuming tasks until shutdown is requested."""
         configure_logging(self.log_formatter)
-        # The warning only reaches the log handler once configure_logging has
-        # routed the multiprocessing logger through the root logger.
         warn_when_free_threading_is_unavailable()
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)

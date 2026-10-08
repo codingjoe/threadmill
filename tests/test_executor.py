@@ -46,8 +46,6 @@ from threadmill.executor import (
     WorkerThread,
     configure_logging,
     handler,
-    is_free_threaded_build,
-    is_gil_enabled,
     warn_when_free_threading_is_unavailable,
 )
 
@@ -304,62 +302,53 @@ class TestConfigureLogging:
 class TestFreeThreadingDiagnostic:
     """Tests for the interpreter free-threading diagnostic."""
 
-    def test_is_free_threaded_build__report_interpreter(self, monkeypatch):
-        """Report the free-threading build flag of the interpreter."""
-        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
-        assert is_free_threaded_build() is True
-        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 0)
-        assert is_free_threaded_build() is False
-
-    def test_is_free_threaded_build__treat_absent_flag_as_gil_build(self, monkeypatch):
-        """Treat an interpreter without the build flag as a GIL build."""
-        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: None)
-        assert is_free_threaded_build() is False
-
-    def test_is_gil_enabled__report_interpreter(self):
-        """Report the GIL state of the running interpreter."""
-        assert is_gil_enabled() is sys._is_gil_enabled()
-
-    def test_is_gil_enabled__assume_enabled_without_private_api(self, monkeypatch):
-        """Assume the GIL is enabled when the private API is absent."""
-        monkeypatch.delattr(sys, "_is_gil_enabled", raising=False)
-        assert is_gil_enabled() is True
-
     def test_warn_when_free_threading_is_unavailable__warn_lost_parallelism(
         self, monkeypatch, caplog
     ):
         """Warn when a free-threaded build runs with the GIL enabled."""
-        monkeypatch.setattr("threadmill.executor.is_free_threaded_build", lambda: True)
-        monkeypatch.setattr("threadmill.executor.is_gil_enabled", lambda: True)
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        monkeypatch.setattr(sys, "_is_gil_enabled", lambda: True)
 
         with caplog.at_level(logging.WARNING, logger="multiprocessing"):
             warn_when_free_threading_is_unavailable()
 
-        assert "so worker threads run one at a time" in caplog.text
+        assert "may re-enable the GIL" in caplog.text
 
     def test_warn_when_free_threading_is_unavailable__silent_without_gil(
         self, monkeypatch, caplog
     ):
         """Stay silent when a free-threaded build runs without the GIL."""
-        monkeypatch.setattr("threadmill.executor.is_free_threaded_build", lambda: True)
-        monkeypatch.setattr("threadmill.executor.is_gil_enabled", lambda: False)
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        monkeypatch.setattr(sys, "_is_gil_enabled", lambda: False)
 
         with caplog.at_level(logging.WARNING, logger="multiprocessing"):
             warn_when_free_threading_is_unavailable()
 
-        assert "so worker threads run one at a time" not in caplog.text
+        assert "may re-enable the GIL" not in caplog.text
 
     def test_warn_when_free_threading_is_unavailable__silent_on_gil_build(
         self, monkeypatch, caplog
     ):
-        """Stay silent on an interpreter without free threading."""
-        monkeypatch.setattr("threadmill.executor.is_free_threaded_build", lambda: False)
-        monkeypatch.setattr("threadmill.executor.is_gil_enabled", lambda: True)
+        """Stay silent on an interpreter without the build flag."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: None)
+        monkeypatch.setattr(sys, "_is_gil_enabled", lambda: True)
 
         with caplog.at_level(logging.WARNING, logger="multiprocessing"):
             warn_when_free_threading_is_unavailable()
 
-        assert "so worker threads run one at a time" not in caplog.text
+        assert "may re-enable the GIL" not in caplog.text
+
+    def test_warn_when_free_threading_is_unavailable__assume_gil_without_api(
+        self, monkeypatch, caplog
+    ):
+        """Assume the GIL is enabled when the private API is absent."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        monkeypatch.delattr(sys, "_is_gil_enabled", raising=False)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "may re-enable the GIL" in caplog.text
 
 
 def _wait_for_result(task_id: str) -> TaskResult:
