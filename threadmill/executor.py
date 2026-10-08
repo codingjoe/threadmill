@@ -10,6 +10,7 @@ import queue
 import random
 import socket
 import sys
+import sysconfig
 import threading
 import time
 import typing
@@ -99,6 +100,22 @@ def configure_logging(formatter: logging.Formatter) -> None:
     root_logger.addHandler(handler)
 
 
+def warn_when_free_threading_is_unavailable() -> None:
+    """Warn when a free-threaded build runs with the GIL enabled.
+
+    A C extension that has not declared free-threading support re-enables the GIL
+    for the whole process, which silently costs the parallelism the build exists
+    to provide.
+    """
+    free_threaded_build = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)()
+    if free_threaded_build and gil_enabled:
+        logger.warning(
+            "Free-threaded interpreter is running with the GIL enabled. C extensions "
+            "that do not declare free-threading support may re-enable the GIL"
+        )
+
+
 @dataclasses.dataclass(kw_only=True, slots=True)
 class TaskExecutor:
     """Tasks consumed from shared joinable queues via process and thread pools."""
@@ -153,6 +170,7 @@ class TaskExecutor:
     def run(self) -> None:
         """Start consuming tasks until shutdown is requested."""
         configure_logging(self.log_formatter)
+        warn_when_free_threading_is_unavailable()
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)
         ]

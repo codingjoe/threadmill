@@ -9,6 +9,8 @@ import os
 import redis
 from celery import Celery
 
+from benchmarks import cpu_work
+
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 PROCESSED_KEY = "benchmark:processed"
@@ -29,6 +31,13 @@ celery_app.conf.update(
 def celery_echo(value):
     """Return the given value."""
     return value
+
+
+@celery_app.task(queue=cpu_work.CPU_QUEUE)
+def celery_compute(value):
+    """Consume CPU, then record that this task finished."""
+    cpu_work.count_primes()
+    client.incr(cpu_work.COMPLETION_KEY)
 
 
 @celery_app.task

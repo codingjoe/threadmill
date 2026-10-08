@@ -94,7 +94,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 TASKS = {
     DEFAULT_TASK_BACKEND_ALIAS: {
         "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
-        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory"],
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "compute", "io", "memory", "scaling"],
         "REDIS_URL": REDIS_URL,
         "OPTIONS": {
             "max_connections": 10,

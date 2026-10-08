@@ -1,25 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 412" width="900" height="412" role="img" aria-label="Tasks per second with one worker: threadmill 9,960, dramatiq 7,177, huey 6,038, celery 2,280, django-tasks-db 2,065, django-tasks-rq 82.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 402" width="900" height="402" role="img" aria-label="Tasks per second with one worker process each: Threadmill 19,954, Threadmill (GIL) 9,215, dramatiq 7,251, huey 6,254, celery 2,497, django-tasks-db 1,814, django-tasks-rq 84.">
 <style>svg{max-width:100%;height:auto}</style>
-<rect x="0.5" y="0.5" width="899" height="411" rx="14" fill="#0d1117" stroke="#30363d"/>
+<rect x="0.5" y="0.5" width="899" height="401" rx="14" fill="#0d1117" stroke="#30363d"/>
 <text x="28" y="46" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="19" font-weight="700" fill="#e6edf3" text-anchor="start">Queue throughput</text>
-<text x="28" y="68" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="12.5" font-weight="400" fill="#8b949e" text-anchor="start">5,000–60,000 trivial tasks per queue · one worker process, one thread · higher is better</text>
-<text x="180" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="700" fill="#e6edf3" text-anchor="end">threadmill</text>
+<text x="28" y="68" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="12.5" font-weight="400" fill="#8b949e" text-anchor="start">5,000–120,000 trivial tasks per queue · one worker process each · higher is better</text>
+<text x="180" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="700" fill="#e6edf3" text-anchor="end">Threadmill</text>
 <rect x="200" y="100" width="560.00" height="20" rx="5" fill="#6366f1" opacity="1"/>
-<text x="770" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="700" fill="#818cf8" text-anchor="start">9,960/s</text>
-<text x="180" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">dramatiq</text>
-<rect x="200" y="140" width="403.52" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="613.518" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">7,177/s</text>
-<text x="180" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">huey</text>
-<rect x="200" y="180" width="339.52" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="549.524" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">6,038/s</text>
-<text x="180" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">celery</text>
-<rect x="200" y="220" width="128.19" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="338.192" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,280/s</text>
-<text x="180" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-db</text>
-<rect x="200" y="260" width="116.09" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="326.087" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,065/s</text>
-<text x="180" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-rq</text>
-<rect x="200" y="300" width="4.61" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="214.615" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">82/s</text>
-<text x="28" y="348" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start">One process and one thread each. Threadmill, celery and dramatiq read 128 ahead; django-tasks-db, -rq and huey read one task at a time.</text>
+<text x="770" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="700" fill="#818cf8" text-anchor="start">19,954/s</text>
+<text x="180" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">Threadmill (GIL)</text>
+<rect x="200" y="140" width="258.60" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="468.598" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">9,215/s</text>
+<text x="180" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">dramatiq</text>
+<rect x="200" y="180" width="203.50" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="413.498" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">7,251/s</text>
+<text x="180" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">huey</text>
+<rect x="200" y="220" width="175.52" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="385.525" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">6,254/s</text>
+<text x="180" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">celery</text>
+<rect x="200" y="260" width="70.09" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="280.09" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,497/s</text>
+<text x="180" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-db</text>
+<rect x="200" y="300" width="50.91" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="260.91" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">1,814/s</text>
+<text x="180" y="355" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-rq</text>
+<rect x="200" y="340" width="2.36" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="212.355" y="355" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">84/s</text>
 </svg>

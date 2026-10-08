@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import queue
 import sys
+import sysconfig
 import threading
 import time
 import uuid
@@ -19,6 +20,7 @@ from django.tasks import (
     default_task_backend,
     task,
 )
+from django.tasks.exceptions import TaskResultDoesNotExist
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -29,6 +31,7 @@ from tests.testapp.tasks import (
     count_users,
     echo,
     log_message,
+    record_execution,
 )
 from threadmill.backends.base import (
     Broker,
@@ -43,6 +46,7 @@ from threadmill.executor import (
     WorkerThread,
     configure_logging,
     handler,
+    warn_when_free_threading_is_unavailable,
 )
 
 
@@ -295,6 +299,74 @@ class TestConfigureLogging:
         )
 
 
+class TestFreeThreadingDiagnostic:
+    """Tests for the interpreter free-threading diagnostic."""
+
+    def test_warn_when_free_threading_is_unavailable__warn_lost_parallelism(
+        self, monkeypatch, caplog
+    ):
+        """Warn when a free-threaded build runs with the GIL enabled."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        monkeypatch.setattr(sys, "_is_gil_enabled", lambda: True)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "may re-enable the GIL" in caplog.text
+
+    def test_warn_when_free_threading_is_unavailable__silent_without_gil(
+        self, monkeypatch, caplog
+    ):
+        """Stay silent when a free-threaded build runs without the GIL."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        monkeypatch.setattr(sys, "_is_gil_enabled", lambda: False)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "may re-enable the GIL" not in caplog.text
+
+    def test_warn_when_free_threading_is_unavailable__silent_on_gil_build(
+        self, monkeypatch, caplog
+    ):
+        """Stay silent on an interpreter without the build flag."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: None)
+        monkeypatch.setattr(sys, "_is_gil_enabled", lambda: True)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "may re-enable the GIL" not in caplog.text
+
+    def test_warn_when_free_threading_is_unavailable__assume_gil_without_api(
+        self, monkeypatch, caplog
+    ):
+        """Assume the GIL is enabled when the private API is absent."""
+        monkeypatch.setattr(sysconfig, "get_config_var", lambda name: 1)
+        monkeypatch.delattr(sys, "_is_gil_enabled", raising=False)
+
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            warn_when_free_threading_is_unavailable()
+
+        assert "may re-enable the GIL" in caplog.text
+
+
+def _wait_for_result(task_id: str) -> TaskResult:
+    """Poll for a task result until the worker persists it.
+
+    A spawned worker boots Django before it can process anything, so a fixed
+    sleep races the worker instead of waiting for it.
+    """
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            return default_task_backend.get_result(task_id)
+        except TaskResultDoesNotExist:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 class TestTaskExecutor:
     """Tests for the TaskExecutor dataclass and its methods."""
 
@@ -425,6 +497,32 @@ class TestTaskExecutor:
         assert {r.id for r in results} == {r.id for r in enqueued}
         assert all(r.status == TaskResultStatus.SUCCESSFUL for r in results)
 
+    def test_run__processes_each_task_exactly_once_with_threads(self, tmp_path):
+        """Process every queued task exactly once across concurrent worker threads."""
+        count = 40
+        execution_log = tmp_path / "executed"
+        for value in range(count):
+            default_task_backend.enqueue(
+                record_execution, args=[str(execution_log), value]
+            )
+
+        executor = TaskExecutor(
+            backend=default_task_backend,
+            workers=1,
+            threads=4,
+            queues=("default",),
+            exit_empty=True,
+        )
+        run_thread = threading.Thread(target=executor.run, daemon=True)
+        run_thread.start()
+        run_thread.join(timeout=60)
+        assert not run_thread.is_alive()
+
+        recorded = sorted(
+            int(line) for line in execution_log.read_text(encoding="utf-8").split()
+        )
+        assert recorded == list(range(count))
+
     def test_run__routes_task_logs_to_stdout(self, capfd):
         """Emit task log records as JSON on standard output."""
         enqueued = default_task_backend.enqueue(log_message, args=["hello from task"])
@@ -476,11 +574,10 @@ class TestTaskExecutor:
             )
             run_thread = threading.Thread(target=executor.run, daemon=True)
             run_thread.start()
-            time.sleep(3)
+            result = _wait_for_result(enqueued.id)
             executor.shutdown()
             run_thread.join(timeout=5)
             assert not run_thread.is_alive()
-            result = default_task_backend.get_result(enqueued.id)
             assert result.status == TaskResultStatus.SUCCESSFUL
         finally:
             multiprocessing.set_start_method(original_start_method, force=True)

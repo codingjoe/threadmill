@@ -5,6 +5,7 @@ import datetime
 import json
 import logging
 import queue
+import threading
 import time
 import typing
 from dataclasses import replace
@@ -35,6 +36,7 @@ from threadmill.backends.base import (
 from threadmill.backends.redis import (  # noqa: E402
     RedisBroker,
     RedisTaskBackend,
+    _IdleBackoff,
 )
 
 TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
@@ -1637,7 +1639,7 @@ class TestRedisTaskBackend:
             "acquire_rotation_index_test",
             queues=["default", "compute", "io"],
         )
-        backend._rotation_offset = 4
+        backend._idle_backoff.rotation_offset = 4
         try:
             backend.enqueue(replace(echo, queue_name="compute"), args=[1])
             backend.enqueue(replace(echo, queue_name="io"), args=[2])
@@ -1666,7 +1668,7 @@ class TestRedisTaskBackend:
             assert running_by_queue["compute"] == {acquired[0].id}
             assert running_by_queue["io"] == {acquired[1].id}
             assert running_by_queue["default"] == set()
-            assert backend._rotation_offset == (4 + 2) % 3
+            assert backend._idle_backoff.rotation_offset == (4 + 2) % 3
         finally:
             backend.close()
 
@@ -1679,7 +1681,7 @@ class TestRedisTaskBackend:
         )
         recorder = RecordingAcquireScript(backend._acquire_script)
         backend._acquire_script = recorder
-        backend._rotation_offset = 2
+        backend._idle_backoff.rotation_offset = 2
         try:
             for repeat in range(2):
                 for queue_name in queue_names:
@@ -1691,7 +1693,7 @@ class TestRedisTaskBackend:
                     *queue_names, timeout=datetime.timedelta(seconds=1)
                 )
                 acquired.append(task_result)
-                assert 0 <= backend._rotation_offset < len(queue_names)
+                assert 0 <= backend._idle_backoff.rotation_offset < len(queue_names)
 
             assert [result.task.queue_name for result in acquired] == [
                 "io",
@@ -1715,7 +1717,7 @@ class TestRedisTaskBackend:
         )
         recorder = RecordingAcquireScript(backend._acquire_script)
         backend._acquire_script = recorder
-        backend._rotation_offset = 5
+        backend._idle_backoff.rotation_offset = 5
         try:
             with pytest.raises(TimeoutError):
                 backend.acquire(
@@ -1726,7 +1728,7 @@ class TestRedisTaskBackend:
             assert len(recorder.sent_args) > 1
             assert {sent_args[-2] for sent_args in recorder.sent_args} == {"5"}
             assert {sent_args[-1] for sent_args in recorder.sent_args} == {"1"}
-            assert backend._rotation_offset == 5
+            assert backend._idle_backoff.rotation_offset == 5
         finally:
             backend.close()
 
@@ -1793,7 +1795,7 @@ class TestRedisTaskBackend:
             "acquire_batch_round_robin_test",
             queues=["compute", "io"],
         )
-        backend._rotation_offset = 0
+        backend._idle_backoff.rotation_offset = 0
         try:
             for value in range(2):
                 backend.enqueue(replace(echo, queue_name="compute"), args=[value])
@@ -1810,11 +1812,11 @@ class TestRedisTaskBackend:
                 "compute",
                 "io",
             ]
-            assert backend._rotation_offset == 1
+            assert backend._idle_backoff.rotation_offset == 1
         finally:
             backend.close()
 
-    def test_init__randomize_rotation_offset(self):
+    def test_idle_backoff__randomize_rotation_offset(self):
         """Seed each backend differently so recycled workers spread across queues."""
         queues = ["default", "compute", "io"]
         backends = [
@@ -1822,7 +1824,44 @@ class TestRedisTaskBackend:
             for index in range(32)
         ]
         try:
-            assert len({backend._rotation_offset for backend in backends}) > 1
+            assert (
+                len({backend._idle_backoff.rotation_offset for backend in backends}) > 1
+            )
         finally:
             for backend in backends:
                 backend.close()
+
+    def test_idle_backoff__isolate_between_threads(self):
+        """Give each worker thread its own idle polling state."""
+        backend = _make_backend("acquire_thread_isolation_test")
+        observed: dict[str, list[_IdleBackoff]] = {}
+
+        def observe(name: str) -> None:
+            first = backend._idle_backoff
+            first.miss_count = 7
+            first.rotation_offset = 11
+            observed[name] = [first, backend._idle_backoff]
+
+        thread_names = ("worker-a", "worker-b")
+        threads = [
+            threading.Thread(target=observe, args=(name,)) for name in thread_names
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            # Repeated access on one thread returns the same mutated object.
+            assert observed["worker-a"][0] is observed["worker-a"][1]
+            assert observed["worker-b"][0] is observed["worker-b"][1]
+            assert observed["worker-a"][0].miss_count == 7
+
+            # Separate threads never share state.
+            assert observed["worker-a"][0] is not observed["worker-b"][0]
+
+            # The acquiring thread stays isolated from every worker thread.
+            assert backend._idle_backoff.miss_count == 0
+            assert backend._idle_backoff is not observed["worker-a"][0]
+        finally:
+            backend.close()

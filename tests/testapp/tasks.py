@@ -32,6 +32,13 @@ def log_message(message):
 
 
 @task()
+def record_execution(path, value):
+    """Append one line per execution so tests can detect duplicate processing."""
+    with open(path, "a", encoding="utf-8") as recorded:
+        recorded.write(f"{value}\n")
+
+
+@task()
 def count_users():
     """Count all users in the database (tests model access in workers)."""
     from django.contrib.auth.models import User  # noqa
