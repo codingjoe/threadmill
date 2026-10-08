@@ -2,8 +2,13 @@
 
 Generate the numbers first, then the chart:
 
-    uv run pytest benchmarks -m benchmark --benchmark-json=benchmark.json
-    uv run python benchmarks/chart.py benchmark.json
+    uv run pytest benchmarks/test_backends.py -m benchmark --benchmark-json=benchmark.json
+    uv run --python 3.14t pytest benchmarks/test_backends.py -m benchmark -k free \
+        --benchmark-json=benchmark-free-threaded.json
+    uv run python benchmarks/chart.py benchmark.json benchmark-free-threaded.json
+
+The first run measures every queue on the GIL build. The second one supplies the
+free-threading row, which the benchmark lists only where threads run in parallel.
 """
 
 import dataclasses
@@ -23,8 +28,7 @@ PLOT_WIDTH = 560
 
 FIRST_ROW_CENTER = 110
 ROW_HEIGHT = 40
-FOOTNOTE_GAP = 38
-BOTTOM_PADDING = 64
+BOTTOM_PADDING = 52
 
 FONT = (
     'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
@@ -47,9 +51,6 @@ class Theme:
     muted: str
     """Secondary text, and the bars that are not highlighted."""
 
-    faint: str
-    """Footnotes."""
-
     accent: str
     """The highlighted queue and its value."""
 
@@ -62,7 +63,6 @@ LIGHT_THEME = Theme(
     border="#e5e7eb",
     ink="#111827",
     muted="#6b7280",
-    faint="#9ca3af",
     accent="#4f46e5",
     accent_bar="#4f46e5",
 )
@@ -72,7 +72,6 @@ DARK_THEME = Theme(
     border="#30363d",
     ink="#e6edf3",
     muted="#8b949e",
-    faint="#6e7681",
     accent="#818cf8",
     accent_bar="#6366f1",
 )
@@ -88,8 +87,17 @@ chart with both rows ranks them on measurement noise.
 FREE_THREADING_QUEUE = "Threadmill (free threading)"
 """Queue the benchmark lists only where threads really run in parallel."""
 
-FOOTNOTE_LINE_HEIGHT = 17
-"""Distance between the baselines of two stacked footnote lines."""
+DISPLAY_NAMES = {
+    "Threadmill (free threading)": "Threadmill",
+    "Threadmill": "Threadmill (GIL)",
+}
+"""Chart labels for the threadmill rows, keyed by benchmark queue name.
+
+The benchmark names identify a row across runs, so they stay as they are and the
+chart translates them for the reader. The free-threading result is threadmill's
+headline row and carries the plain name, and the row measured next to the other
+queues is labelled as the GIL baseline.
+"""
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
@@ -136,7 +144,35 @@ def read_results(json_path: pathlib.Path) -> list[QueueResult]:
                 task_count=process["extra_info"]["tasks"],
             )
         )
+    return rank(results)
+
+
+def rank(results: list[QueueResult]) -> list[QueueResult]:
+    """Return the results, fastest first."""
     return sorted(results, key=lambda result: result.throughput, reverse=True)
+
+
+def with_free_threading_result(
+    results: list[QueueResult], free_threading_results: list[QueueResult]
+) -> list[QueueResult]:
+    """Return the results with the free-threading row taken from another run.
+
+    The free-threading row is measured on a free-threaded interpreter, while every
+    other row is measured on the GIL build the chart ranks, so the two runs are
+    merged. The remaining rows of the second run repeat queues that the first run
+    already measured and are ignored.
+    """
+    free_threading = [
+        result
+        for result in free_threading_results
+        if result.name == FREE_THREADING_QUEUE
+    ]
+    if not free_threading:
+        raise SystemExit(f"no {FREE_THREADING_QUEUE} row in the free-threaded run")
+    return rank(
+        [result for result in results if result.name != FREE_THREADING_QUEUE]
+        + free_threading
+    )
 
 
 def text(x, y, content, *, theme, size=13, fill=None, weight=400, anchor="start"):
@@ -148,33 +184,16 @@ def text(x, y, content, *, theme, size=13, fill=None, weight=400, anchor="start"
     )
 
 
+def display_name(queue_name: str) -> str:
+    """Return the chart label of a queue."""
+    return DISPLAY_NAMES.get(queue_name, queue_name)
+
+
 def describe(results: list[QueueResult]) -> str:
     """Return a sentence describing the throughput of every queue."""
     return "Tasks per second with one worker process each: " + ", ".join(
-        f"{result.name} {result.throughput:,.0f}" for result in results
+        f"{display_name(result.name)} {result.throughput:,.0f}" for result in results
     )
-
-
-def create_footnote_lines(results: list[QueueResult]) -> list[str]:
-    """Return the footnote, one line per element.
-
-    Two lines because the whole footnote no longer fits the canvas at a legible
-    size. The worker configuration line names the free-threading queue only when
-    the benchmark measured one, so a chart built from a GIL build claims no thread
-    parallelism it did not measure.
-    """
-    if any(result.name == FREE_THREADING_QUEUE for result in results):
-        workers = (
-            "One process and one thread each, except Threadmill on a free-threaded"
-            " build, which runs four."
-        )
-    else:
-        workers = "One process and one thread each."
-    return [
-        workers,
-        "Threadmill, celery and dramatiq read 128 ahead;"
-        " django-tasks-db, -rq and huey read one task at a time.",
-    ]
 
 
 def build_chart(results: list[QueueResult], theme: Theme) -> str:
@@ -191,8 +210,7 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     row_centers = [
         FIRST_ROW_CENTER + index * ROW_HEIGHT for index in range(len(results))
     ]
-    footnote_y = row_centers[-1] + FOOTNOTE_GAP
-    height = footnote_y + BOTTOM_PADDING
+    height = row_centers[-1] + BOTTOM_PADDING
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
@@ -220,7 +238,7 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
             text(
                 LABEL_X,
                 center + 5,
-                result.name,
+                display_name(result.name),
                 theme=theme,
                 size=14,
                 weight=700 if is_fastest else 400,
@@ -245,35 +263,25 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
             )
         )
 
-    footnote_lines = create_footnote_lines(results)
-    for line_index, line in enumerate(footnote_lines):
-        parts.append(
-            text(
-                28,
-                footnote_y + line_index * FOOTNOTE_LINE_HEIGHT,
-                # joe: widths calibrated from the 11.5px hand check below (right edge
-                # 863 of 900 for 141 characters, about 5.9px per character); the
-                # longest line now reaches about 626 of 900. Recheck if the canvas
-                # width or the font stack changes.
-                line,
-                theme=theme,
-                size=11.5,
-                fill=theme.faint,
-            )
-        )
     parts.append("</svg>")
     return "\n".join(parts)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {sys.argv[0]} <benchmark.json>")
+    if len(sys.argv) not in {2, 3}:
+        raise SystemExit(
+            f"usage: {sys.argv[0]} <benchmark.json> [<free-threaded-benchmark.json>]"
+        )
     queues = read_results(pathlib.Path(sys.argv[1]))
+    if len(sys.argv) == 3:
+        queues = with_free_threading_result(
+            queues, read_results(pathlib.Path(sys.argv[2]))
+        )
     for theme, path in ((LIGHT_THEME, LIGHT_THEME_PATH), (DARK_THEME, DARK_THEME_PATH)):
         path.write_text(build_chart(queues, theme) + "\n")
         print(f"wrote {path} ({path.stat().st_size} bytes)")
     for queue in queues:
         print(
-            f"{queue.name:20s} {queue.throughput:8,.0f}/s "
+            f"{display_name(queue.name):20s} {queue.throughput:8,.0f}/s "
             f"(enqueue {1 / queue.enqueue_seconds:8,.0f}/s, start {queue.start_seconds:.4f}s)"
         )

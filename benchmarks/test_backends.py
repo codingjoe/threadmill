@@ -18,7 +18,10 @@ exit on their own include their stop cost too. Subtract
 the task count of the queue by the difference. The result is the marginal
 throughput of a busy queue.
 
-Every queue runs one worker process and one thread. Each queue reads ``READ_AHEAD``
+Every queue runs one worker process and ``WORKER_THREAD_COUNT`` threads where its
+worker supports threads, so the bars rank the queues and their interpreters rather
+than the size of their pools. django-tasks-db and django-tasks-rq ship
+single-threaded workers and run one thread each. Each queue reads ``READ_AHEAD``
 messages ahead where the queue has such a setting. The numbers therefore rank the
 queues and not their polling strategies. The consumer of Celery blocks on an empty
 queue, so its window costs no sleep for each message. Dramatiq polls instead and
@@ -40,9 +43,10 @@ Its queues are deeper than the others, because its marginal drain is only second
 long. A shallow queue sits inside the one-second quantization of the fixed cost.
 
 On a free-threaded interpreter with the GIL disabled, Threadmill is measured once
-more with ``FREE_THREADING_THREAD_COUNT`` threads in one process. That queue is
-listed only there, because on any other interpreter the threads run one at a time
-and the drain would only repeat the single-threaded rate.
+more with the same ``WORKER_THREAD_COUNT`` threads as every other queue. That row is
+listed only there, because on any other interpreter its threads run one at a time
+and the drain would only repeat the single-threaded rate. The two Threadmill rows
+are therefore the same worker configuration on two interpreters.
 
 Threadmill, django-tasks-db and django-tasks-rq run one worker process that drains
 a queue and exits. Celery and dramatiq have no such mode, so the benchmark queues a
@@ -57,6 +61,7 @@ import io
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 import typing
@@ -82,7 +87,6 @@ from benchmarks.celery_app import (
 from benchmarks.dramatiq_app import dramatiq_echo, dramatiq_mark_processed
 from benchmarks.huey_app import huey_echo, huey_mark_processed
 from tests.testapp.tasks import echo
-from threadmill.executor import is_free_threaded_build, is_gil_enabled
 
 ENQUEUE_ITERATIONS = 500
 """Tasks enqueued within one enqueue benchmark round."""
@@ -108,13 +112,13 @@ each job. Neither queue can be told to read ahead. huey pops one task at a time
 and has no read-ahead setting either.
 """
 
-FREE_THREADING_THREAD_COUNT = 4
-"""Threads the free-threading threadmill worker runs, where the build allows it.
+WORKER_THREAD_COUNT = 4
+"""Threads every worker runs, where its queue supports threads.
 
-Deliberately a fixed small number rather than every core, so the bar states what
-a free-threaded build does for the same pool and not what this machine happens to
-have. The other queues all run one thread, which is why the bar is labelled with
-its thread count.
+The same pool size for every queue, so the comparison isolates the queue and its
+interpreter rather than the pool. Deliberately a fixed small number rather than
+every core, so the bars state what a given pool does and not what this machine
+happens to have.
 """
 
 CELERY_WORKER = (
@@ -124,21 +128,22 @@ CELERY_WORKER = (
     "-A",
     "benchmarks.celery_app:celery_app",
     "worker",
-    "--pool=solo",
-    f"--prefetch-multiplier={READ_AHEAD}",
+    "--pool=threads",
+    f"--concurrency={WORKER_THREAD_COUNT}",
+    f"--prefetch-multiplier={READ_AHEAD // WORKER_THREAD_COUNT}",
     "--loglevel=WARNING",
     "--without-gossip",
     "--without-mingle",
     "--without-heartbeat",
 )
-"""Celery worker running as one process with one thread, ``READ_AHEAD`` messages ahead.
+"""Celery worker running as one process with ``WORKER_THREAD_COUNT`` threads, ``READ_AHEAD`` messages ahead.
 
 The default prefork pool crashes on CPython 3.14. The pool child loses the task
-handler state that it expects. The worker therefore runs on the solo pool. With
-one concurrent task, ``--prefetch-multiplier={READ_AHEAD}`` sets the prefetch
-count to ``READ_AHEAD``, which is the benchmark rate. The Redis consumer of
-Celery blocks while its queue is empty, so the prefetch adds no sleep for each
-message.
+handler state that it expects. The worker therefore runs on the thread pool. Celery
+multiplies the concurrency by ``--prefetch-multiplier``, so the multiplier
+``READ_AHEAD // WORKER_THREAD_COUNT`` holds the window at ``READ_AHEAD`` messages.
+The Redis consumer of Celery blocks while its queue is empty, so the prefetch adds
+no sleep for each message.
 """
 
 DRAMATIQ_WORKER = (
@@ -149,15 +154,16 @@ DRAMATIQ_WORKER = (
     "--processes",
     "1",
     "--threads",
-    "1",
+    f"{WORKER_THREAD_COUNT}",
 )
-"""dramatiq worker running as one process with one thread, ``READ_AHEAD`` messages ahead.
+"""dramatiq worker running as one process with ``WORKER_THREAD_COUNT`` threads, ``READ_AHEAD`` messages ahead.
 
 The Redis broker polls and does not block. Its consumer fetches only while fewer
 messages than its read-ahead are unacked. When that window is full, the consumer
 sleeps a jittered backoff of 5 to 10 ms and then polls again. The command line
 has no read-ahead flag, so the worker environment carries
-``dramatiq_queue_prefetch``. The benchmark sets this variable to ``READ_AHEAD``.
+``dramatiq_queue_prefetch``. The benchmark sets this variable to ``READ_AHEAD``,
+which is an absolute window rather than one for each thread.
 """
 
 HUEY_WORKER = (
@@ -165,13 +171,13 @@ HUEY_WORKER = (
     "-m",
     "huey.bin.huey_consumer",
     "benchmarks.huey_app.huey_app",
-    "--workers=1",
+    f"--workers={WORKER_THREAD_COUNT}",
     "--worker-type=thread",
     "--no-periodic",
     "--quiet",
     "--graceful-signal=TERM",
 )
-"""huey consumer running as one process with one thread, one message at a time.
+"""huey consumer running as one process with ``WORKER_THREAD_COUNT`` threads, one message at a time.
 
 The Redis storage of huey blocks on an empty queue and pops a single message.
 It has no read-ahead setting. ``--quiet`` matches the log level of the other
@@ -216,13 +222,14 @@ class QueueUnderTest:
 
 
 def drain_with_threadmill_worker() -> None:
-    """Process every queued task with a single threadmill worker process."""
+    """Process every queued task with one threadmill worker process on ``WORKER_THREAD_COUNT`` threads."""
     call_command(
         "threadmill",
         "worker",
         backend=DEFAULT_TASK_BACKEND_ALIAS,
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
+        threads=WORKER_THREAD_COUNT,
         prefetch_count=READ_AHEAD,
         exit_empty=True,
         verbosity=0,
@@ -230,7 +237,7 @@ def drain_with_threadmill_worker() -> None:
 
 
 def drain_with_threadmill_worker_no_prefetch() -> None:
-    """Process every queued task with one threadmill worker reading one at a time.
+    """Process every queued task with the same pool reading one task at a time.
 
     The no-prefetch ablation of the entry above, so the read-ahead cost can be
     subtracted.
@@ -241,6 +248,7 @@ def drain_with_threadmill_worker_no_prefetch() -> None:
         backend=DEFAULT_TASK_BACKEND_ALIAS,
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
+        threads=WORKER_THREAD_COUNT,
         prefetch_count=1,
         exit_empty=True,
         verbosity=0,
@@ -248,12 +256,13 @@ def drain_with_threadmill_worker_no_prefetch() -> None:
 
 
 def drain_with_threadmill_free_threading_worker() -> None:
-    """Process every queued task with one threadmill worker on several threads.
+    """Process every queued task with the same pool on a free-threaded interpreter.
 
-    Only meaningful on a free-threaded interpreter, where the threads run at the
-    same time. The queue is only listed under test when the running interpreter is
-    free-threaded, so this drain never reports the single-threaded rate of a GIL
-    build as if it were a parallel one.
+    Same one process and ``WORKER_THREAD_COUNT`` threads as every other queue, so
+    the two Threadmill rows differ in the interpreter alone. Only meaningful on a
+    free-threaded interpreter, where the threads run at the same time. The queue is
+    only listed under test there, so this drain never reports the single-threaded
+    rate of a GIL build as if it were a parallel one.
     """
     call_command(
         "threadmill",
@@ -261,7 +270,7 @@ def drain_with_threadmill_free_threading_worker() -> None:
         backend=DEFAULT_TASK_BACKEND_ALIAS,
         queues=[DEFAULT_TASK_QUEUE_NAME],
         workers=1,
-        threads=FREE_THREADING_THREAD_COUNT,
+        threads=WORKER_THREAD_COUNT,
         prefetch_count=READ_AHEAD,
         exit_empty=True,
         verbosity=0,
@@ -296,13 +305,13 @@ def drain_with_django_tasks_rq_worker() -> None:
 
 
 def drain_with_celery_worker() -> None:
-    """Process every queued task with a single-process Celery worker."""
+    """Process every queued task with a Celery worker on ``WORKER_THREAD_COUNT`` threads."""
     celery_mark_processed.delay()
     drain_with_subprocess_worker(CELERY_WORKER)
 
 
 def drain_with_dramatiq_worker() -> None:
-    """Process every queued task with a single-process, single-thread dramatiq worker."""
+    """Process every queued task with a dramatiq worker on ``WORKER_THREAD_COUNT`` threads."""
     dramatiq_mark_processed.send()
     drain_with_subprocess_worker(
         DRAMATIQ_WORKER,
@@ -311,7 +320,7 @@ def drain_with_dramatiq_worker() -> None:
 
 
 def drain_with_huey_worker() -> None:
-    """Process every queued task with a single-thread huey consumer."""
+    """Process every queued task with a huey consumer on ``WORKER_THREAD_COUNT`` threads."""
     huey_mark_processed()
     drain_with_subprocess_worker(HUEY_WORKER)
 
@@ -387,7 +396,10 @@ def django_task_enqueuer(
 
     def enqueue(count: int) -> TaskResult:
         """Accept `count` echo tasks, returning the newest task result."""
-        return [task.enqueue(index) for index in range(count)][-1]
+        task_result = task.enqueue(0)
+        for index in range(1, count):
+            task_result = task.enqueue(index)
+        return task_result
 
     def verify_processed(enqueued_task_result: TaskResult | None) -> None:
         """Assert that the backend executed the benchmark tasks.
@@ -436,15 +448,24 @@ def django_task_backend(
     )
 
 
-THREADMILL_TASK_COUNT = 60_000
-"""Tasks threadmill queues, so its marginal drain outruns the one-second fixed cost.
+THREADMILL_TASK_COUNT = 120_000
+"""Tasks every threadmill queue holds, so its marginal drain outruns the one-second fixed cost.
 
-Threadmill drains a queue in about 3 seconds for each 20,000 tasks. The fixed cost
-of a cold worker start and stop is quantized to about a second. A shallower queue
-therefore keeps the prefetch comparison inside that step.
+Threadmill drains this queue in about 14 seconds with four threads on a GIL build
+and in about 4 seconds on a free-threaded one. The fixed cost of a cold worker start
+and stop is quantized to about a second. A shallower queue therefore keeps the
+prefetch comparison inside that step.
+
+The same depth for both interpreters keeps the two Threadmill rows comparable. A
+deeper queue measures a slower rate per task, because a larger keyspace costs the
+broker more, so a depth that differs between the rows would show up as a difference
+between the interpreters.
 """
 
-THREADS_RUN_IN_PARALLEL = is_free_threaded_build() and not is_gil_enabled()
+THREADS_RUN_IN_PARALLEL = (
+    bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    and not getattr(sys, "_is_gil_enabled", lambda: True)()
+)
 """Whether this interpreter runs Python threads at the same time.
 
 A free-threaded build stops doing so as soon as a C extension that has not
@@ -466,9 +487,8 @@ FREE_THREADING_QUEUES = (
 )
 """The free-threading queue, listed only where threads really are parallel.
 
-On any other interpreter the drain behind this queue measures the same
-single-threaded rate as the queue above it, which would read as a free-threading
-result that found no speedup.
+On any other interpreter the drain behind this queue runs the same pool with one
+thread at a time, so it would report a free-threading result that found no speedup.
 """
 
 WORKER_QUEUES = (

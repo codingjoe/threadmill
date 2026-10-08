@@ -19,7 +19,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
-    <img alt="Tasks per second with one worker process each: Threadmill (free threading) 60,259, Threadmill 12,021, dramatiq 6,967, huey 5,389, celery 2,186, django-tasks-db 2,056, django-tasks-rq 75." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
+    <img alt="Tasks per second with one worker process each: Threadmill 19,954, Threadmill (GIL) 9,215, dramatiq 7,251, huey 6,254, celery 2,497, django-tasks-db 1,814, django-tasks-rq 84." src="https://github.com/codingjoe/threadmill/raw/main/docs/images/backend-comparison-light.svg">
   </picture>
 </p>
 
