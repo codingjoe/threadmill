@@ -31,7 +31,8 @@ into its prefetch buffer.
 
 django-tasks-db reads one task at a time, because its shipped worker does not
 expose a read-ahead setting. django-tasks-rq forks a work horse for each job, so
-its drain includes that fork and it reads one task at a time too.
+its drain includes that fork and it reads one task at a time too. huey blocks on
+an empty queue, but pops one message at a time either way.
 
 Threadmill is measured twice, with 128 messages ahead and with one message at a
 time. The read-ahead cost can therefore be subtracted from both worker benchmarks.
@@ -74,6 +75,7 @@ from benchmarks.celery_app import (
     celery_mark_processed,
 )
 from benchmarks.dramatiq_app import dramatiq_echo, dramatiq_mark_processed
+from benchmarks.huey_app import huey_echo, huey_mark_processed
 from tests.testapp.tasks import echo
 
 ENQUEUE_ITERATIONS = 500
@@ -96,7 +98,8 @@ and 5,658 at 64. At 64 the sleep stops to set the rate. At 128 the backoff costs
 about 0.06 ms for each task.
 
 django-tasks-db reads one task at a time. django-tasks-rq forks a work horse for
-each job. Neither queue can be told to read ahead.
+each job. Neither queue can be told to read ahead. huey pops one task at a time
+and has no read-ahead setting either.
 """
 
 CELERY_WORKER = (
@@ -140,6 +143,26 @@ messages than its read-ahead are unacked. When that window is full, the consumer
 sleeps a jittered backoff of 5 to 10 ms and then polls again. The command line
 has no read-ahead flag, so the worker environment carries
 ``dramatiq_queue_prefetch``. The benchmark sets this variable to ``READ_AHEAD``.
+"""
+
+HUEY_WORKER = (
+    sys.executable,
+    "-m",
+    "huey.bin.huey_consumer",
+    "benchmarks.huey_app.huey_app",
+    "--workers=1",
+    "--worker-type=thread",
+    "--no-periodic",
+    "--quiet",
+    "--graceful-signal=TERM",
+)
+"""huey consumer running as one process with one thread, one message at a time.
+
+The Redis storage of huey blocks on an empty queue and pops a single message.
+It has no read-ahead setting. ``--quiet`` matches the log level of the other
+workers and ``--no-periodic`` skips the periodic-task scan, because the
+benchmark app registers none. ``--graceful-signal=TERM`` stops the consumer on
+SIGTERM the way the other worker benchmarks stop theirs.
 """
 
 WORKER_STOP_TIMEOUT_SECONDS = 20
@@ -251,6 +274,12 @@ def drain_with_dramatiq_worker() -> None:
     )
 
 
+def drain_with_huey_worker() -> None:
+    """Process every queued task with a single-thread huey consumer."""
+    huey_mark_processed()
+    drain_with_subprocess_worker(HUEY_WORKER)
+
+
 def drain_with_subprocess_worker(
     argv: collections.abc.Sequence[str],
     env: collections.abc.Mapping[str, str] | None = None,
@@ -352,6 +381,12 @@ def enqueue_dramatiq_tasks(count: int) -> None:
         dramatiq_echo.send(index)
 
 
+def enqueue_huey_tasks(count: int) -> None:
+    """Accept `count` echo tasks on the huey queue."""
+    for index in range(count):
+        huey_echo(index)
+
+
 def django_task_backend(
     name: str,
     alias: str,
@@ -405,6 +440,11 @@ WORKER_QUEUES = (
         enqueue=enqueue_dramatiq_tasks,
         drain=drain_with_dramatiq_worker,
     ),
+    QueueUnderTest(
+        name="huey",
+        enqueue=enqueue_huey_tasks,
+        drain=drain_with_huey_worker,
+    ),
 )
 """Queues that ship a worker to process queued tasks."""
 
@@ -457,6 +497,7 @@ def empty_queues():
             "django_tasks:*",
             "celery*",
             "dramatiq:*",  # broker keys and the dramatiq:results:* results
+            "huey.*",  # queue, results, schedule and counter keys
             "rq:*",
             "_kombu*",
         ):
