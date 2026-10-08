@@ -55,6 +55,7 @@ test = [
   "django-tasks-db",
   "django-tasks-rq",
   "dramatiq[redis]>=2.2.1",
+  "huey",
   "pytest",
   "pytest-asyncio",
   "pytest-benchmark",

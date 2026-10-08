@@ -1,26 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 412" width="900" height="412" role="img" aria-label="Tasks per second with one worker process each: Threadmill (free threading) 59,697, Threadmill 11,963, dramatiq 7,182, celery 2,397, django-tasks-db 2,103, django-tasks-rq 74.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 452" width="900" height="452" role="img" aria-label="Tasks per second with one worker process each: Threadmill (free threading) 60,259, Threadmill 12,021, dramatiq 6,967, huey 5,389, celery 2,186, django-tasks-db 2,056, django-tasks-rq 75.">
 <style>svg{max-width:100%;height:auto}</style>
-<rect x="0.5" y="0.5" width="899" height="411" rx="14" fill="#0d1117" stroke="#30363d"/>
+<rect x="0.5" y="0.5" width="899" height="451" rx="14" fill="#0d1117" stroke="#30363d"/>
 <text x="28" y="46" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="19" font-weight="700" fill="#e6edf3" text-anchor="start">Queue throughput</text>
 <text x="28" y="68" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="12.5" font-weight="400" fill="#8b949e" text-anchor="start">5,000–60,000 trivial tasks per queue · one worker process each · higher is better</text>
 <text x="180" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="700" fill="#e6edf3" text-anchor="end">Threadmill (free threading)</text>
 <rect x="200" y="100" width="560.00" height="20" rx="5" fill="#6366f1" opacity="1"/>
-<text x="770" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="700" fill="#818cf8" text-anchor="start">59,697/s</text>
+<text x="770" y="115" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="700" fill="#818cf8" text-anchor="start">60,259/s</text>
 <text x="180" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">Threadmill</text>
-<rect x="200" y="140" width="112.22" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="322.217" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">11,963/s</text>
+<rect x="200" y="140" width="111.72" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="321.716" y="155" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">12,021/s</text>
 <text x="180" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">dramatiq</text>
-<rect x="200" y="180" width="67.37" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="277.372" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">7,182/s</text>
-<text x="180" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">celery</text>
-<rect x="200" y="220" width="22.48" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="232.483" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,397/s</text>
-<text x="180" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-db</text>
-<rect x="200" y="260" width="19.73" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="229.728" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,103/s</text>
-<text x="180" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-rq</text>
-<rect x="200" y="300" width="0.70" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
-<text x="210.698" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">74/s</text>
-<text x="28" y="348" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start">One process and one thread each, except Threadmill on a free-threaded build, which runs four.</text>
-<text x="28" y="365" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start">Threadmill, celery and dramatiq read 128 ahead; django-tasks-db and -rq read one message at a time.</text>
+<rect x="200" y="180" width="64.75" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="274.747" y="195" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">6,967/s</text>
+<text x="180" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">huey</text>
+<rect x="200" y="220" width="50.08" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="260.078" y="235" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">5,389/s</text>
+<text x="180" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">celery</text>
+<rect x="200" y="260" width="20.31" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="230.314" y="275" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,186/s</text>
+<text x="180" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-db</text>
+<rect x="200" y="300" width="19.10" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="229.103" y="315" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">2,056/s</text>
+<text x="180" y="355" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="14" font-weight="400" fill="#8b949e" text-anchor="end">django-tasks-rq</text>
+<rect x="200" y="340" width="0.70" height="20" rx="5" fill="#8b949e" opacity="0.25"/>
+<text x="210.702" y="355" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="13" font-weight="400" fill="#8b949e" text-anchor="start">75/s</text>
+<text x="28" y="388" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start">One process and one thread each, except Threadmill on a free-threaded build, which runs four.</text>
+<text x="28" y="405" font-family='system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' font-size="11.5" font-weight="400" fill="#6e7681" text-anchor="start">Threadmill, celery and dramatiq read 128 ahead; django-tasks-db, -rq and huey read one task at a time.</text>
 </svg>

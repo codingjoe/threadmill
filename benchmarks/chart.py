@@ -158,8 +158,9 @@ def describe(results: list[QueueResult]) -> str:
 def create_footnote_lines(results: list[QueueResult]) -> list[str]:
     """Return the footnote, one line per element.
 
-    The worker configuration line names the free-threading queue only when the
-    benchmark measured one, so a chart built from a GIL build claims no thread
+    Two lines because the whole footnote no longer fits the canvas at a legible
+    size. The worker configuration line names the free-threading queue only when
+    the benchmark measured one, so a chart built from a GIL build claims no thread
     parallelism it did not measure.
     """
     if any(result.name == FREE_THREADING_QUEUE for result in results):
@@ -172,7 +173,7 @@ def create_footnote_lines(results: list[QueueResult]) -> list[str]:
     return [
         workers,
         "Threadmill, celery and dramatiq read 128 ahead;"
-        " django-tasks-db and -rq read one message at a time.",
+        " django-tasks-db, -rq and huey read one task at a time.",
     ]
 
 
@@ -250,10 +251,10 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
             text(
                 28,
                 footnote_y + line_index * FOOTNOTE_LINE_HEIGHT,
-                # joe: widths estimated against the 11.5px hand check this comment
-                # replaced (right edge 856.1 of 900 for 132 characters); the longest
-                # line now reaches about 675 of 900. Recheck if the canvas width or
-                # the font stack changes.
+                # joe: widths calibrated from the 11.5px hand check below (right edge
+                # 863 of 900 for 141 characters, about 5.9px per character); the
+                # longest line now reaches about 626 of 900. Recheck if the canvas
+                # width or the font stack changes.
                 line,
                 theme=theme,
                 size=11.5,
