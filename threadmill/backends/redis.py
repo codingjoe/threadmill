@@ -51,11 +51,13 @@ def _parse_lease_started_at(value: str | None) -> datetime.datetime | None:
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
-class IdleBackoff:
+class _IdleBackoff:
     """Idle polling state for a single worker thread.
 
     Every worker thread backs off and rotates independently, so one thread's
-    misses never reset or double another thread's delay.
+    misses never reset or double another thread's delay. Private, so it is not
+    mistaken for a public backoff like ``threadmill.retry.ExponentialBackoff``,
+    which retries failed tasks rather than pacing idle polls.
     """
 
     miss_count: int = 0
@@ -245,11 +247,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
 
     @property
-    def _idle_backoff(self) -> IdleBackoff:
+    def _idle_backoff(self) -> _IdleBackoff:
         """Return the idle polling state of the calling worker thread."""
         backoff = getattr(self._idle_backoffs, "backoff", None)
         if backoff is None:
-            backoff = IdleBackoff(
+            backoff = _IdleBackoff(
                 rotation_offset=random.randrange(len(self.queues))  # noqa: S311
             )
             self._idle_backoffs.backoff = backoff

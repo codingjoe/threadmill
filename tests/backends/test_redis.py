@@ -34,9 +34,9 @@ from threadmill.backends.base import (
     TelemetryEvent,
 )
 from threadmill.backends.redis import (  # noqa: E402
-    IdleBackoff,
     RedisBroker,
     RedisTaskBackend,
+    _IdleBackoff,
 )
 
 TELEMETRY_INTERVAL = datetime.timedelta(seconds=60)
@@ -1834,7 +1834,7 @@ class TestRedisTaskBackend:
     def test_idle_backoff__isolate_between_threads(self):
         """Give each worker thread its own idle polling state."""
         backend = _make_backend("acquire_thread_isolation_test")
-        observed: dict[str, list[IdleBackoff]] = {}
+        observed: dict[str, list[_IdleBackoff]] = {}
 
         def observe(name: str) -> None:
             first = backend._idle_backoff
