@@ -163,8 +163,7 @@ class TaskDetail(Static):
             lines.append("[b]Errors:[/b]")
             for error in result.errors:
                 lines.append(f"  {error.exception_class_path}")
-                for line in error.traceback.splitlines():
-                    lines.append(f"    {line}")
+                lines.extend(f"    {line}" for line in error.traceback.splitlines())
         return "\n".join(lines)
 
 
@@ -617,8 +616,5 @@ class InspectorApp(App):
             pass
         else:
             if stream is not None:
-                try:
-                    async for event in stream:
-                        self.telemetry_buffer.record(event, now=time.monotonic())
-                except asyncio.CancelledError:
-                    raise
+                async for event in stream:
+                    self.telemetry_buffer.record(event, now=time.monotonic())

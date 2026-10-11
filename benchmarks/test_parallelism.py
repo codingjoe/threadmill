@@ -264,9 +264,10 @@ def drain_with_external_worker(
     """
     client = redis.Redis.from_url(REDIS_URL)
     client.delete(cpu_work.COMPLETION_KEY)
-    log = tempfile.TemporaryFile()
+    # The worker writes to the log until the stop_workers fixture closes it.
+    log = tempfile.TemporaryFile()  # noqa: SIM115
     # The command is a fixed worker CLI, never caller input.
-    process = subprocess.Popen(  # noqa: S603
+    process = subprocess.Popen(
         argv,
         env=env,
         stdout=log,
@@ -285,16 +286,18 @@ def wait_until_completed(
         if int(client.get(cpu_work.COMPLETION_KEY) or 0) >= TASK_COUNT:
             return
         if process.poll() is not None:
-            raise AssertionError(
+            message = (
                 f"Worker exited with {process.returncode} after "
                 f"{int(client.get(cpu_work.COMPLETION_KEY) or 0)} of {TASK_COUNT}"
                 f" tasks:\n{read_log_tail(log)}"
             )
+            raise AssertionError(message)
         time.sleep(0.001)
-    raise AssertionError(
+    message = (
         f"Worker processed {int(client.get(cpu_work.COMPLETION_KEY) or 0)} of"
         f" {TASK_COUNT} tasks within {DRAIN_TIMEOUT_SECONDS}s:\n{read_log_tail(log)}"
     )
+    raise AssertionError(message)
 
 
 def read_log_tail(log: typing.IO[bytes], line_count: int = 40) -> str:

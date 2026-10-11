@@ -93,6 +93,30 @@ lint.extend-select = [
   "W",
 ]
 lint.ignore = [ "D1", "D203", "D212", "E501", "RUF01" ]
+lint.per-file-ignores."benchmarks/**" = [
+  "DJ006",
+  "DJ007",
+  "DJ008",
+  "PLR2004",
+  "S101",
+  "S105",
+  "S106",
+  "S311",
+  "S603",
+  "S607"
+]
+lint.per-file-ignores."tests/**" = [
+  "DJ006",
+  "DJ007",
+  "DJ008",
+  "PLR2004",
+  "S101",
+  "S105",
+  "S106",
+  "S311",
+  "S603",
+  "S607"
+]
 lint.isort.combine-as-imports = true
 lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [ "threadmill", "tests" ]

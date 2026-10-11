@@ -48,6 +48,7 @@ class RetryTask(Task):
             if hasattr(self.retry, "deconstruct"):
                 return self.retry.deconstruct()
             return f"{self.retry.__module__}.{self.retry.__qualname__}"
+        return None
 
     @classmethod
     def _reconstruct(cls, kwargs):
@@ -185,12 +186,11 @@ class TaskResultEncoder(DjangoJSONEncoder):
                 for field in dataclasses.fields(TaskError)
             }
         if isinstance(o, RetryTask):
-            data = {
+            return {
                 field.name: getattr(o, field.name)
                 for field in dataclasses.fields(RetryTask)
                 if field.name not in {"func", "retry"}
             } | {"func": o.module_path, "retry": o.retry_path}
-            return data
         return super().default(o)
 
 
@@ -232,9 +232,11 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         if task.retry is not None and not (
             is_module_level_function(task.retry) or hasattr(task.retry, "deconstruct")
         ):
-            raise InvalidTask(
-                "Task's retry function must be defined at a module level or be a deconstructible callable."
+            message = (
+                "Task's retry function must be defined at a module level or be a "
+                "deconstructible callable."
             )
+            raise InvalidTask(message)
 
     @staticmethod
     def create_task_error(exception: BaseException) -> TaskError:
@@ -255,6 +257,7 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
                     task_result.id,
                     task_result.task.module_path,
                 )
+        return None
 
     def acquire(
         self,

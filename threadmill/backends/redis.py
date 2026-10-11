@@ -30,7 +30,7 @@ from threadmill.backends.base import (
     ThreadmillTaskBackend,
     ThreadmillTaskResult,
 )
-from threadmill.exceptions import AcknowledgementTimeout
+from threadmill.exceptions import AcknowledgementTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ class RedisBroker(Broker):
             errors=[
                 *task_result.errors,
                 self.backend.create_task_error(
-                    AcknowledgementTimeout("Task processing lease expired.")
+                    AcknowledgementTimeoutError("Task processing lease expired.")
                 ),
             ],
         )
@@ -227,9 +227,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         try:
             redis_url = params["REDIS_URL"]
         except KeyError as e:
-            raise ValueError(
-                f"REDIS_URL must be specified in your settings for the {type(self).__name__}."
-            ) from e
+            message = (
+                "REDIS_URL must be specified in your settings for the "
+                f"{type(self).__name__}."
+            )
+            raise ValueError(message) from e
         self.client = redis.from_url(redis_url, decode_responses=True)
         self._async_client: redis.asyncio.Redis | None = None
         self.redis_url = redis_url
@@ -395,9 +397,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             try:
                 remaining = deadline - time.monotonic()
             except TypeError:
-                raise queue.Empty("No task available.")
+                message = "No task available."
+                raise queue.Empty(message)
             if remaining <= 0:
-                raise TimeoutError("No task available within the specified timeout.")
+                message = "No task available within the specified timeout."
+                raise TimeoutError(message)
             # Stop doubling once the interval reaches poll_max_interval; larger
             # exponents would only overflow the float math.
             cap = int(self.poll_max_interval / self.poll_interval).bit_length()
@@ -606,7 +610,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             self.RESULT_KEY.format(prefix=self.key_prefix, result_id=result_id)
         ):
             return self.deserialize_task_result(data)
-        raise TaskResultDoesNotExist(f"Task result {result_id!r} does not exist.")
+        message = f"Task result {result_id!r} does not exist."
+        raise TaskResultDoesNotExist(message)
 
     async def queue_stats(
         self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)

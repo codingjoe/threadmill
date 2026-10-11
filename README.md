@@ -149,7 +149,7 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 | `poll_max_interval` | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                                   |
 
 A task whose lease expired reaches the `retry` callback as an
-`AcknowledgementTimeout` error, or is marked FAILED when nothing retries it.
+`AcknowledgementTimeoutError` error, or is marked FAILED when nothing retries it.
 A claimed task whose stored payload cannot be read any more is dropped with the
 read error logged. A dropped task records no result, so it leaves the inspector
 and cannot be requeued.
@@ -186,7 +186,7 @@ import datetime
 from django.tasks import task
 from requests import HTTPError
 
-from threadmill.exceptions import AcknowledgementTimeout
+from threadmill.exceptions import AcknowledgementTimeoutError
 from threadmill.retry import ExponentialBackoff
 
 
@@ -196,7 +196,7 @@ from threadmill.retry import ExponentialBackoff
         max_delay=datetime.timedelta(minutes=5),
         factor=2.0,
         max_retries=5,
-        expected_exceptions=(HTTPError, AcknowledgementTimeout),
+        expected_exceptions=(HTTPError, AcknowledgementTimeoutError),
     )
 )
 def fetch_github_api(url: str): ...
