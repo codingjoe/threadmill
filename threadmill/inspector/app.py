@@ -291,7 +291,7 @@ class TaskList(Vertical):
         if confirmed:
             try:
                 self.backend.requeue(task, datetime.datetime.now(datetime.UTC))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Requeue failed for task %s", task.id)
                 self.app.notify("Requeue failed.", severity="error")
             else:
@@ -313,7 +313,7 @@ class TaskList(Vertical):
         if confirmed:
             try:
                 self.backend.dequeue(task)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Delete failed for task %s", task.id)
                 self.app.notify("Delete failed.", severity="error")
             else:
@@ -341,7 +341,7 @@ class TaskList(Vertical):
             self._current_results = list(
                 backend.peek(queue_name=queue_name, status=status, count=100)
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Failed to peek tasks for %r", queue_name)
             self._current_results = []
         columns = TAB_COLUMNS[tab_id]
@@ -435,7 +435,7 @@ class QueueList(ListView):
         if confirmed:
             try:
                 self.app.backend.purge(queue_name)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Purge failed for %r", queue_name)
                 self.app.notify("Purge failed.", severity="error")
             else:
@@ -577,7 +577,7 @@ class InspectorApp(App):
         """Fetch queue counts and merge live pub/sub rates into the telemetry."""
         try:
             telemetry = await self.backend.queue_stats()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Failed to refresh queue stats")
         else:
             for queue_name, stats in telemetry.queues.items():

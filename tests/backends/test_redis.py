@@ -33,7 +33,7 @@ from threadmill.backends.base import (
     TelemetryDirection,
     TelemetryEvent,
 )
-from threadmill.backends.redis import (  # noqa: E402
+from threadmill.backends.redis import (
     RedisBroker,
     RedisTaskBackend,
     _IdleBackoff,

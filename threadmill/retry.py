@@ -10,7 +10,8 @@ if typing.TYPE_CHECKING:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ExponentialBackoff:
-    """Delay retries exponentially, capped at ``max_delay`` and limited to ``max_retries`` attempts.
+    """
+    Delay retries exponentially, capped at ``max_delay`` and limited to ``max_retries`` attempts.
 
     Only retry exceptions listed in ``expected_exceptions``.
 

@@ -1,4 +1,5 @@
-"""Render the queue throughput chart that the README embeds.
+"""
+Render the queue throughput chart that the README embeds.
 
 Generate the numbers first, then the chart:
 
@@ -155,7 +156,8 @@ def rank(results: list[QueueResult]) -> list[QueueResult]:
 def with_free_threading_result(
     results: list[QueueResult], free_threading_results: list[QueueResult]
 ) -> list[QueueResult]:
-    """Return the results with the free-threading row taken from another run.
+    """
+    Return the results with the free-threading row taken from another run.
 
     The free-threading row is measured on a free-threaded interpreter, while every
     other row is measured on the GIL build the chart ranks, so the two runs are

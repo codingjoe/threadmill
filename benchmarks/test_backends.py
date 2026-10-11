@@ -1,4 +1,5 @@
-"""Benchmarks comparing threadmill against other Django task queues.
+"""
+Benchmarks comparing threadmill against other Django task queues.
 
 Every backend is measured on the same trivial echo task and the same queue. The
 numbers therefore show queue and worker overhead and not task work.
@@ -237,7 +238,8 @@ def drain_with_threadmill_worker() -> None:
 
 
 def drain_with_threadmill_worker_no_prefetch() -> None:
-    """Process every queued task with the same pool reading one task at a time.
+    """
+    Process every queued task with the same pool reading one task at a time.
 
     The no-prefetch ablation of the entry above, so the read-ahead cost can be
     subtracted.
@@ -256,7 +258,8 @@ def drain_with_threadmill_worker_no_prefetch() -> None:
 
 
 def drain_with_threadmill_free_threading_worker() -> None:
-    """Process every queued task with the same pool on a free-threaded interpreter.
+    """
+    Process every queued task with the same pool on a free-threaded interpreter.
 
     Same one process and ``WORKER_THREAD_COUNT`` threads as every other queue, so
     the two Threadmill rows differ in the interpreter alone. Only meaningful on a
@@ -402,7 +405,8 @@ def django_task_enqueuer(
         return task_result
 
     def verify_processed(enqueued_task_result: TaskResult | None) -> None:
-        """Assert that the backend executed the benchmark tasks.
+        """
+        Assert that the backend executed the benchmark tasks.
 
         django-tasks-rq returns the ``django-tasks`` backport's own
         ``TaskResultStatus``, a different enum class carrying the same string
@@ -558,7 +562,8 @@ against it, because a drain shorter than the start cost is not measurable.
 
 @pytest.fixture(autouse=True)
 def stop_workers(empty_queues):
-    """Stop every worker a benchmark started, after its measurement.
+    """
+    Stop every worker a benchmark started, after its measurement.
 
     Depends on ``empty_queues`` so that the queue cleanup runs after the workers
     stop, rather than while one is still writing to Redis.

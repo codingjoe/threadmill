@@ -1,4 +1,5 @@
-"""The dramatiq broker the comparison benchmarks hand tasks to.
+"""
+The dramatiq broker the comparison benchmarks hand tasks to.
 
 The dramatiq worker CLI imports this module without setting up Django, so it
 must not import Django or any Django application. The broker carries the Results

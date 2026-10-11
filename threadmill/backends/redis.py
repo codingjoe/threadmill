@@ -52,7 +52,8 @@ def _parse_lease_started_at(value: str | None) -> datetime.datetime | None:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class _IdleBackoff:
-    """Idle polling state for a single worker thread.
+    """
+    Idle polling state for a single worker thread.
 
     Every worker thread backs off and rotates independently, so one thread's
     misses never reset or double another thread's delay. Private, so it is not
@@ -159,17 +160,18 @@ class RedisBroker(Broker):
         for queue_name in self.backend.queues:
             try:
                 self._move_queue(queue_name)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Mover error for queue %r", queue_name)
 
             try:
                 self._reap_running_queue(queue_name)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Running reaper error for queue %r", queue_name)
 
 
 class RedisTaskBackend(ThreadmillTaskBackend):
-    """Redis-backed durable priority queue backend.
+    """
+    Redis-backed durable priority queue backend.
 
     Uses sorted sets for priority ordering, a running set for in-flight
     tracking, and a deferred set for scheduled tasks. All multi-step operations
@@ -267,7 +269,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         return self._async_client
 
     def _compute_score(self, priority: int, enqueued_at: datetime.datetime) -> float:
-        """Compute a ZSET score for priority-ordered FIFO queueing.
+        """
+        Compute a ZSET score for priority-ordered FIFO queueing.
 
         Higher priority (more positive) tasks are popped first. Within the same
         priority, earlier enqueued tasks are popped first.
@@ -281,7 +284,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         args: Sequence | None = None,
         kwargs: dict | None = None,
     ) -> TaskResult:
-        """Enqueue a task for execution.
+        """
+        Enqueue a task for execution.
 
         If the task has a run_after datetime, it is stored in the deferred set
         instead of the active priority queue.
@@ -414,7 +418,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         lease_started_at: datetime.datetime | None,
         lease_token: str | None,
     ) -> ThreadmillTaskResult:
-        """Return a stored task result as a running attempt.
+        """
+        Return a stored task result as a running attempt.
 
         `worker=None` means the lease records no worker; an empty string still
         counts as an attempt, and a task that already records a start keeps it.
@@ -556,7 +561,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def _peek_tasks(
         self, zset_key: str, count: int, *, leased: bool
     ) -> Generator[TaskResult]:
-        """Yield up to `count` stored tasks in queue order.
+        """
+        Yield up to `count` stored tasks in queue order.
 
         Leased tasks are yielded as their lease reports them.
         """

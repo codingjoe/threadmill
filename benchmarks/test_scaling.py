@@ -1,4 +1,5 @@
-"""Benchmarks comparing process and thread parallelism for CPU-bound tasks.
+"""
+Benchmarks comparing process and thread parallelism for CPU-bound tasks.
 
 The backend comparison measures queue overhead with a trivial echo task, which
 says nothing about the parallelism a worker pool actually delivers. Only a
