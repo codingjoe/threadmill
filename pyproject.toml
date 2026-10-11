@@ -72,18 +72,27 @@ module.name = "threadmill"
 
 [tool.ruff]
 src = [ "benchmarks", "tests", "threadmill" ]
-lint.select = [
-  "B",  # flake8-bugbear
-  "C",  # flake8-comprehensions
-  "D",  # pydocstyle
-  "E",  # pycodestyle errors
-  "F",  # pyflakes
-  "I",  # isort
-  "S",  # flake8-bandit
-  "UP", # pyupgrade
-  "W",  # pycodestyle warnings
+lint.extend-select = [
+  "C90",
+  "D",
+  "D213",
+  "DJ",
+  "E",
+  "G",
+  "N",
+  "PERF",
+  "PT",
+  "PTH",
+  "RET",
+  "S",
+  "SIM",
+  "SLOT",
+  "T20",
+  "TRY",
+  "UP",
+  "W",
 ]
-lint.ignore = [ "B904", "D1", "E501", "S101" ]
+lint.ignore = [ "D1", "D203", "D212", "E501", "RUF01" ]
 lint.isort.combine-as-imports = true
 lint.isort.force-wrap-aliases = true
 lint.isort.known-first-party = [ "threadmill", "tests" ]
