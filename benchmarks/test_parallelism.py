@@ -1,4 +1,5 @@
-"""Benchmark how much CPU parallelism each framework delivers.
+"""
+Benchmark how much CPU parallelism each framework delivers.
 
 The queue comparison in ``test_backends.py`` measures queue overhead with a
 trivial echo task, and ``test_scaling.py`` measures threadmill alone. Neither
@@ -255,7 +256,8 @@ def drain_with_external_worker(
     argv: collections.abc.Sequence[str],
     env: collections.abc.Mapping[str, str] | None = None,
 ) -> None:
-    """Run a worker CLI until every queued task reported completion.
+    """
+    Run a worker CLI until every queued task reported completion.
 
     The worker is stopped after the measurement, by the ``stop_workers`` fixture,
     because a graceful shutdown takes seconds and would dominate a short drain.
@@ -399,7 +401,8 @@ def identify_parallelism(parallelism: FrameworkParallelism) -> str:
 
 @pytest.fixture(autouse=True)
 def stop_workers(empty_queues):
-    """Stop every worker a measurement started, after the measurement.
+    """
+    Stop every worker a measurement started, after the measurement.
 
     Depends on ``empty_queues`` so that the cleanup runs after the workers stop,
     rather than while one is still writing to Redis.

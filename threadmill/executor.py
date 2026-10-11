@@ -101,7 +101,8 @@ def configure_logging(formatter: logging.Formatter) -> None:
 
 
 def warn_when_free_threading_is_unavailable() -> None:
-    """Warn when a free-threaded build runs with the GIL enabled.
+    """
+    Warn when a free-threaded build runs with the GIL enabled.
 
     A C extension that has not declared free-threading support re-enables the GIL
     for the whole process, which silently costs the parallelism the build exists

@@ -352,7 +352,8 @@ class TestFreeThreadingDiagnostic:
 
 
 def _wait_for_result(task_id: str) -> TaskResult:
-    """Poll for a task result until the worker persists it.
+    """
+    Poll for a task result until the worker persists it.
 
     A spawned worker boots Django before it can process anything, so a fixed
     sleep races the worker instead of waiting for it.

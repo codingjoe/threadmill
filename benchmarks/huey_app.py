@@ -1,4 +1,5 @@
-"""The huey app the comparison benchmarks hand tasks to.
+"""
+The huey app the comparison benchmarks hand tasks to.
 
 The huey consumer CLI imports this module without setting up Django, so it must
 not import Django or any Django application. The Redis storage keeps task

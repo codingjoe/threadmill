@@ -1,4 +1,5 @@
-"""The Celery application the comparison benchmarks hand tasks to.
+"""
+The Celery application the comparison benchmarks hand tasks to.
 
 The Celery worker CLI imports this module without setting up Django, so it must
 not import Django or any Django application.

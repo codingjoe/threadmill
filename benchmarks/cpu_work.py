@@ -1,4 +1,5 @@
-"""The shared contract every framework in the parallelism benchmark follows.
+"""
+The shared contract every framework in the parallelism benchmark follows.
 
 The Celery and dramatiq worker CLIs import their applications without setting up
 Django, so this module must not import Django or any Django application. The work

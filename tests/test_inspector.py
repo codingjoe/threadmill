@@ -81,7 +81,8 @@ def _failed_result() -> TaskResult:
 
 
 def _stats(**overrides: int | datetime.timedelta) -> QueueStats:
-    """Build QueueStats zeroed everywhere except the given overrides.
+    """
+    Build QueueStats zeroed everywhere except the given overrides.
 
     Count overrides (ready/running/deferred/successful/failed) populate
     `counts`; rate overrides (ingress/egress) populate `rates`. An

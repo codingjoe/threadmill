@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class RetryTask(Task):
-    """Task with an optional retry callback for backoff scheduling.
+    """
+    Task with an optional retry callback for backoff scheduling.
 
     Usage:
 
@@ -290,7 +291,8 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         raise NotImplementedError
 
     def requeue(self, task_result: TaskResult, run_after: datetime.datetime) -> None:
-        """Re-queue a failed task result for a retry attempt after `run_after`.
+        """
+        Re-queue a failed task result for a retry attempt after `run_after`.
 
         Cleans up any persisted failed result so the method works both for
         in-flight retries (task still running) and inspector-driven requeues
@@ -332,7 +334,8 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         raise NotImplementedError
 
     def purge(self, queue_name: str) -> None:
-        """Delete every task across all segments of a queue.
+        """
+        Delete every task across all segments of a queue.
 
         Args:
             queue_name: The queue to purge.
