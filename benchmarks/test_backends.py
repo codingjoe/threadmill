@@ -335,9 +335,10 @@ def drain_with_subprocess_worker(
     """Run a worker CLI until the sentinel task queued last was processed."""
     client = redis.Redis.from_url(REDIS_URL)
     client.delete(PROCESSED_KEY)
-    log = tempfile.TemporaryFile()
+    # The worker writes to the log until the stop_workers fixture closes it.
+    log = tempfile.TemporaryFile()  # noqa: SIM115
     # The command is a fixed worker CLI, never caller input.
-    process = subprocess.Popen(  # noqa: S603
+    process = subprocess.Popen(
         argv,
         env=env,
         stdout=log,
@@ -358,15 +359,17 @@ def wait_until_processed(
         if client.get(PROCESSED_KEY):
             return
         if process.poll() is not None:
-            raise AssertionError(
+            message = (
                 f"Worker exited with {process.returncode} before draining its queue:\n"
                 f"{read_log_tail(log)}"
             )
+            raise AssertionError(message)
         time.sleep(0.001)
-    raise AssertionError(
+    message = (
         f"Worker did not drain its queue within {QUEUE_DRAIN_TIMEOUT_SECONDS}s:\n"
         f"{read_log_tail(log)}"
     )
+    raise AssertionError(message)
 
 
 def stop_process(process: subprocess.Popen) -> None:

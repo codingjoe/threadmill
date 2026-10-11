@@ -1,13 +1,15 @@
 import asyncio
 import datetime
 import logging
+import pathlib
 import random
+import sys
 import uuid
 
 from django.tasks import task
 from django.tasks.base import TaskContext
 
-from threadmill.exceptions import AcknowledgementTimeout
+from threadmill.exceptions import AcknowledgementTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ def log_message(message):
 @task()
 def record_execution(path, value):
     """Append one line per execution so tests can detect duplicate processing."""
-    with open(path, "a", encoding="utf-8") as recorded:
+    with pathlib.Path(path).open("a", encoding="utf-8") as recorded:
         recorded.write(f"{value}\n")
 
 
@@ -72,7 +74,7 @@ def compute_workload():
 @task(queue_name="io")
 async def io_workload():
     """Sleep for a random amount of time."""
-    await asyncio.sleep(random.uniform(0.1, 0.5))  # noqa: S311
+    await asyncio.sleep(random.uniform(0.1, 0.5))
 
 
 leak = {}
@@ -87,8 +89,8 @@ def memory_workload():
 @task()
 def random_crash():
     """Raise a random exception."""
-    if random.random() < 0.75:  # noqa: S311
-        exit(1)
+    if random.random() < 0.75:
+        sys.exit(1)
 
 
 def retry_always(context: TaskContext) -> datetime.timedelta:
@@ -103,13 +105,15 @@ def retry_never(context: TaskContext) -> datetime.timedelta | None:
 
 def retry_raise(context: TaskContext) -> datetime.timedelta | None:
     """Raise an exception to test retry callback error handling."""
-    raise RuntimeError("retry callback crashed")
+    message = "retry callback crashed"
+    raise RuntimeError(message)
 
 
 def retry_on_lease_expiry(context: TaskContext) -> datetime.timedelta | None:
     """Retry with a fixed 1-second delay only when the lease expired."""
-    if context.task_result.errors[-1].exception_class is AcknowledgementTimeout:
+    if context.task_result.errors[-1].exception_class is AcknowledgementTimeoutError:
         return datetime.timedelta(seconds=1)
+    return None
 
 
 @task(retry=retry_always)

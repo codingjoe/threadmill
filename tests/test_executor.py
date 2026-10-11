@@ -244,8 +244,12 @@ class TestJsonFormatter:
 
     def test_format__includes_exception_traceback(self) -> None:
         """Include the exception traceback when the record carries exc_info."""
-        try:
+
+        def boom() -> None:
             raise ValueError("boom")
+
+        try:
+            boom()
         except ValueError:
             record = logging.LogRecord(
                 "multiprocessing",

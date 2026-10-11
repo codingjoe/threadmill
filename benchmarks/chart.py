@@ -170,7 +170,8 @@ def with_free_threading_result(
         if result.name == FREE_THREADING_QUEUE
     ]
     if not free_threading:
-        raise SystemExit(f"no {FREE_THREADING_QUEUE} row in the free-threaded run")
+        message = f"no {FREE_THREADING_QUEUE} row in the free-threaded run"
+        raise SystemExit(message)
     return rank(
         [result for result in results if result.name != FREE_THREADING_QUEUE]
         + free_threading
@@ -215,12 +216,16 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
     height = row_centers[-1] + BOTTOM_PADDING
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
-        f'width="{WIDTH}" height="{height}" role="img" '
-        f'aria-label="{describe(results)}.">',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
+            f'width="{WIDTH}" height="{height}" role="img" '
+            f'aria-label="{describe(results)}.">'
+        ),
         "<style>svg{max-width:100%;height:auto}</style>",
-        f'<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="14" '
-        f'fill="{theme.canvas}" stroke="{theme.border}"/>',
+        (
+            f'<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="14" '
+            f'fill="{theme.canvas}" stroke="{theme.border}"/>'
+        ),
         text(28, 46, "Queue throughput", theme=theme, size=19, weight=700),
         text(
             28,
@@ -271,9 +276,10 @@ def build_chart(results: list[QueueResult], theme: Theme) -> str:
 
 if __name__ == "__main__":
     if len(sys.argv) not in {2, 3}:
-        raise SystemExit(
+        usage = (
             f"usage: {sys.argv[0]} <benchmark.json> [<free-threaded-benchmark.json>]"
         )
+        raise SystemExit(usage)
     queues = read_results(pathlib.Path(sys.argv[1]))
     if len(sys.argv) == 3:
         queues = with_free_threading_result(
@@ -281,9 +287,10 @@ if __name__ == "__main__":
         )
     for theme, path in ((LIGHT_THEME, LIGHT_THEME_PATH), (DARK_THEME, DARK_THEME_PATH)):
         path.write_text(build_chart(queues, theme) + "\n")
-        print(f"wrote {path} ({path.stat().st_size} bytes)")
+        sys.stdout.write(f"wrote {path} ({path.stat().st_size} bytes)\n")
     for queue in queues:
-        print(
+        sys.stdout.write(
             f"{display_name(queue.name):20s} {queue.throughput:8,.0f}/s "
-            f"(enqueue {1 / queue.enqueue_seconds:8,.0f}/s, start {queue.start_seconds:.4f}s)"
+            f"(enqueue {1 / queue.enqueue_seconds:8,.0f}/s, "
+            f"start {queue.start_seconds:.4f}s)\n"
         )

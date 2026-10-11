@@ -11,4 +11,5 @@ class StubTaskBackend(ThreadmillTaskBackend):
 
     def acquire(self, *queue_names, count=1, timeout=None, worker=""):
         """Raise a fetch failure for every call."""
-        raise RuntimeError("backend unavailable")
+        message = "backend unavailable"
+        raise RuntimeError(message)

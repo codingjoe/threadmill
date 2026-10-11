@@ -151,6 +151,7 @@ class TaskExecutor:
         if self.max_tasks:
             jitter = random.randint(0, self.max_tasks_jitter)  # noqa: S311
             return max((self.max_tasks + jitter) // self.thread_count, 1)
+        return None
 
     def create_worker_process(self) -> WorkerProcess:
         """Create and start a new worker process."""
@@ -326,7 +327,8 @@ class TaskPrefetcher(threading.Thread):
     def run(self) -> None:
         try:
             self.fill_buffer()
-        except Exception as exception:
+        # Prefetcher failures must reach the consumer, and a thread cannot raise.
+        except Exception as exception:  # noqa: BLE001
             self.completion.set_exception(exception)
         finally:
             if not self.completion.done():

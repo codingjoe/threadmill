@@ -18,7 +18,8 @@ from ...executor import JsonFormatter, TaskExecutor
 def kill_softly(signum, frame):
     """Raise a KeyboardInterrupt to stop the worker gracefully."""
     signame = signal.Signals(signum).name
-    raise KeyboardInterrupt(f"Received {signame} ({signum}), shutting down…")
+    message = f"Received {signame} ({signum}), shutting down…"
+    raise KeyboardInterrupt(message)
 
 
 class WorkerCommand(DjangoBaseCommand):
@@ -130,11 +131,11 @@ class WorkerCommand(DjangoBaseCommand):
         try:
             backend = task_backends[backend]
         except InvalidTaskBackend:
-            raise CommandError(f"Invalid backend: {backend!r}")
+            message = f"Invalid backend: {backend!r}"
+            raise CommandError(message)
         if _non_queues := set(queues) - set(backend.queues):
-            raise CommandError(
-                f"Backend does not support all specified queues: {_non_queues!r}"
-            )
+            message = f"Backend does not support all specified queues: {_non_queues!r}"
+            raise CommandError(message)
         try:
             log_formatter = (
                 JsonFormatter() if log_format is None else logging.Formatter(log_format)
@@ -145,9 +146,11 @@ class WorkerCommand(DjangoBaseCommand):
                 )
             )
         except (TypeError, ValueError) as e:
-            raise CommandError(f"Invalid log format: {log_format!r}") from e
+            message = f"Invalid log format: {log_format!r}"
+            raise CommandError(message) from e
         if prefetch_count is not None and prefetch_count < 0:
-            raise CommandError(f"Invalid prefetch count: {prefetch_count!r}")
+            message = f"Invalid prefetch count: {prefetch_count!r}"
+            raise CommandError(message)
         exe = TaskExecutor(
             backend=backend,
             workers=workers,
@@ -187,18 +190,17 @@ class InspectorCommand(DjangoBaseCommand):
             from ...backends.base import ThreadmillTaskBackend
             from ...inspector.app import InspectorApp
         except ImportError:
-            raise CommandError(
-                "Optional dependency missing. Install: threadmill[inspector]"
-            )
+            message = "Optional dependency missing. Install: threadmill[inspector]"
+            raise CommandError(message)
         try:
             backend = task_backends[backend]
         except InvalidTaskBackend as e:
-            raise CommandError(f"Invalid backend: {backend!r}") from e
+            message = f"Invalid backend: {backend!r}"
+            raise CommandError(message) from e
 
         if not isinstance(backend, ThreadmillTaskBackend):
-            raise CommandError(
-                f"Backend {backend.alias!r} does not support inspection."
-            )
+            message = f"Backend {backend.alias!r} does not support inspection."
+            raise CommandError(message)
 
         InspectorApp(backend=backend).run()
 

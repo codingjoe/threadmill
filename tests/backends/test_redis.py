@@ -190,14 +190,14 @@ class TestRedisBroker:
     def test_error_path__maintain_continues_after_exception(self, caplog):
         """main() logs and continues when any per-queue step raises."""
         broker = RedisBroker(default_task_backend)
-        with caplog.at_level(logging.ERROR):
-            with (
-                patch.object(broker, "_move_queue", side_effect=RuntimeError("mover")),
-                patch.object(
-                    broker, "_reap_running_queue", side_effect=RuntimeError("reaper")
-                ),
-            ):
-                broker.main()
+        with (
+            caplog.at_level(logging.ERROR),
+            patch.object(broker, "_move_queue", side_effect=RuntimeError("mover")),
+            patch.object(
+                broker, "_reap_running_queue", side_effect=RuntimeError("reaper")
+            ),
+        ):
+            broker.main()
         assert "Mover error for queue" in caplog.text
         assert "Running reaper error for queue" in caplog.text
 
@@ -237,7 +237,7 @@ class TestRedisBrokerReap:
             )
             assert (
                 stored.errors[-1].exception_class_path
-                == "threadmill.exceptions.AcknowledgementTimeout"
+                == "threadmill.exceptions.AcknowledgementTimeoutError"
             )
         finally:
             backend.close()
@@ -560,12 +560,12 @@ class TestRedisTaskBackend:
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
-            (acquired,) = backend.acquire(
+            (_acquired,) = backend.acquire(
                 timeout=datetime.timedelta(seconds=1), worker="reaper-test"
             )
 
             # Wait for lease to expire
-            time.sleep(1.1)
+            await asyncio.sleep(1.1)
 
             # Run the broker
             broker = RedisBroker(backend)
@@ -575,7 +575,9 @@ class TestRedisTaskBackend:
             result = backend.get_result(task_result.id)
             assert result.status == TaskResultStatus.FAILED
             assert len(result.errors) == 1
-            assert "AcknowledgementTimeout" in result.errors[0].exception_class_path
+            assert (
+                "AcknowledgementTimeoutError" in result.errors[0].exception_class_path
+            )
             assert result.worker_ids == ["reaper-test"]
             assert result.started_at == result.last_attempted_at
             assert result.started_at is not None
@@ -856,20 +858,24 @@ class TestRedisTaskBackend:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             message = pubsub.get_message(timeout=0.1)
-            if message and message.get("type") == "message":
-                if message["data"] == expected:
-                    return message
-        raise AssertionError(f"no pubsub message {expected!r} received")
+            if (
+                message
+                and message.get("type") == "message"
+                and message["data"] == expected
+            ):
+                return message
+        error_message = f"no pubsub message {expected!r} received"
+        raise AssertionError(error_message)
 
     @staticmethod
     def _drain_subscription(pubsub, *, timeout: float = 2.0):
         """Block until the pubsub connection reports it is subscribed."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if pubsub.get_message(timeout=0.1):
-                if pubsub.subscribed:
-                    return
-        raise AssertionError("pubsub never reached subscribed state")
+            if pubsub.get_message(timeout=0.1) and pubsub.subscribed:
+                return
+        error_message = "pubsub never reached subscribed state"
+        raise AssertionError(error_message)
 
     def test_enqueue__publishes_ingress_telemetry(self):
         """enqueue() publishes an ingress event on the telemetry channel."""
@@ -1567,7 +1573,7 @@ class TestRedisTaskBackend:
                 assert buildup_deltas[2] >= 0.15
 
             backend.enqueue(echo, args=[1])
-            (acquired,) = backend.acquire(timeout=datetime.timedelta(seconds=1))
+            (_acquired,) = backend.acquire(timeout=datetime.timedelta(seconds=1))
             assert len(script.calls) == buildup_end + 1
 
             with pytest.raises(TimeoutError):

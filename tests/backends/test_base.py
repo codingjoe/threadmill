@@ -6,11 +6,7 @@ import time
 import uuid
 
 import pytest
-from django.tasks import (
-    TaskResult,
-    TaskResultStatus,
-    TaskResultStatus as TRS,
-)
+from django.tasks import TaskResult, TaskResultStatus
 from django.tasks.base import TaskContext, TaskError
 from django.tasks.exceptions import InvalidTask
 from django.utils import (
@@ -31,7 +27,7 @@ from threadmill.backends.base import (
     ThreadmillTaskBackend,
     _parse_datetime,
 )
-from threadmill.exceptions import AcknowledgementTimeout
+from threadmill.exceptions import AcknowledgementTimeoutError
 
 
 class BackendDouble(ThreadmillTaskBackend):
@@ -183,7 +179,7 @@ class TestThreadmillTaskBackend:
         result = TaskResult(
             task=task,
             id=str(uuid.uuid7()),
-            status=TRS.READY,
+            status=TaskResultStatus.READY,
             enqueued_at=tz.now(),
             started_at=None,
             finished_at=None,
@@ -300,22 +296,23 @@ class TestParseDateTime:
         assert _parse_datetime("not-a-date") == "not-a-date"
 
 
-class TestAcknowledgementTimeout:
-    """Tests for the AcknowledgementTimeout exception."""
+class TestAcknowledgementTimeoutError:
+    """Tests for the AcknowledgementTimeoutError exception."""
 
     def test_exception_can_be_instantiated(self) -> None:
-        """AcknowledgementTimeout can be instantiated."""
-        exc = AcknowledgementTimeout()
+        """AcknowledgementTimeoutError can be instantiated."""
+        exc = AcknowledgementTimeoutError()
         assert isinstance(exc, Exception)
 
     def test_exception_can_be_used_in_task_error(self) -> None:
-        """AcknowledgementTimeout can be used as a TaskError's exception_class_path."""
+        """AcknowledgementTimeoutError can be used as a TaskError's exception_class_path."""
         error = TaskError(
-            exception_class_path="threadmill.exceptions.AcknowledgementTimeout",
+            exception_class_path="threadmill.exceptions.AcknowledgementTimeoutError",
             traceback="Task processing lease expired.",
         )
         assert (
-            error.exception_class_path == "threadmill.exceptions.AcknowledgementTimeout"
+            error.exception_class_path
+            == "threadmill.exceptions.AcknowledgementTimeoutError"
         )
 
 
@@ -380,7 +377,7 @@ def _task_result_with_retry(task, *, errors=None) -> TaskResult:
     return TaskResult(
         task=task,
         id=str(uuid.uuid7()),
-        status=TRS.FAILED,
+        status=TaskResultStatus.FAILED,
         enqueued_at=now,
         started_at=now,
         finished_at=now,

@@ -43,10 +43,12 @@ class FailingBackend(ThreadmillTaskBackend):
         raise NotImplementedError
 
     def peek(self, *args, **kwargs):
-        raise RuntimeError("peek failed")
+        message = "peek failed"
+        raise RuntimeError(message)
 
     async def queue_stats(self, *, interval=None):
-        raise RuntimeError("queue_stats failed")
+        message = "queue_stats failed"
+        raise RuntimeError(message)
 
 
 class ErroringBackend(RedisTaskBackend):

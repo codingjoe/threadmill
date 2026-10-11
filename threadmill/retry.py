@@ -58,6 +58,7 @@ class ExponentialBackoff:
                 self.max_delay.total_seconds(),
             )
             return datetime.timedelta(seconds=delay_secs)
+        return None
 
     def deconstruct(self):
         return (
