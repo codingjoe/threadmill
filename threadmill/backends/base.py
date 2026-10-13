@@ -313,6 +313,10 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         """
         Yield up to `count` tasks from a queue in the given status segment.
 
+        Pending work comes back in queue order, so the first READY task is the
+        next one a worker picks up. Finished results come back most recently
+        finished first.
+
         Args:
             queue_name: The name of the queue to peek into.
             status: The status of the tasks to yield.

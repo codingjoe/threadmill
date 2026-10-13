@@ -1,3 +1,4 @@
+import collections.abc
 import dataclasses
 import datetime
 
@@ -529,7 +530,7 @@ class TestInspectorApp:
             assert table.row_count == before - 1
 
 
-def _acknowledge_failed() -> str:
+def _acknowledge_failed(*, finished_at: datetime.datetime | None = None) -> str:
     """Enqueue, acquire, and acknowledge a task as FAILED. Return its ID."""
     task_result = default_task_backend.enqueue(echo, args=[1])
     (acquired,) = default_task_backend.acquire(
@@ -537,13 +538,15 @@ def _acknowledge_failed() -> str:
     )
     default_task_backend.acknowledge(
         dataclasses.replace(
-            acquired, status=TaskResultStatus.FAILED, finished_at=timezone.now()
+            acquired,
+            status=TaskResultStatus.FAILED,
+            finished_at=finished_at or timezone.now(),
         )
     )
     return task_result.id
 
 
-def _acknowledge_successful() -> str:
+def _acknowledge_successful(*, finished_at: datetime.datetime | None = None) -> str:
     """Enqueue, acquire, and acknowledge a task as SUCCESSFUL. Return its ID."""
     task_result = default_task_backend.enqueue(echo, args=[1])
     (acquired,) = default_task_backend.acquire(
@@ -551,7 +554,9 @@ def _acknowledge_successful() -> str:
     )
     default_task_backend.acknowledge(
         dataclasses.replace(
-            acquired, status=TaskResultStatus.SUCCESSFUL, finished_at=timezone.now()
+            acquired,
+            status=TaskResultStatus.SUCCESSFUL,
+            finished_at=finished_at or timezone.now(),
         )
     )
     return task_result.id
@@ -573,6 +578,39 @@ async def _select_failed_task(pilot, app) -> tuple[TaskList, TaskResult]:
     assert failed_task is not None, "Failed task not found in task list"
     task_list.selected_task = failed_task
     return task_list, failed_task
+
+
+class TestTaskList:
+    """Tests for the TaskList task table."""
+
+    @pytest.mark.parametrize(
+        ("acknowledge", "tab_id"),
+        [
+            (_acknowledge_successful, "tab-successful"),
+            (_acknowledge_failed, "tab-failed"),
+        ],
+        ids=["successful", "failed"],
+    )
+    async def test_refresh_tasks__list_newest_finished_first(
+        self, acknowledge: collections.abc.Callable[..., str], tab_id: str
+    ) -> None:
+        """List the most recently finished task first in the finished tab."""
+        now = timezone.now()
+        oldest_id = acknowledge(finished_at=now - datetime.timedelta(minutes=5))
+        newest_id = acknowledge(finished_at=now)
+        app = InspectorApp(backend=default_task_backend)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            task_list = app.query_one("#task-list", TaskList)
+            task_list.queue_name = "default"
+            await pilot.pause()
+            task_list.switch_tab(tab_id)
+            await pilot.pause()
+            await pilot.pause()
+            task_list.refresh_tasks()
+            table = app.query_one(f"#table-{tab_id.removeprefix('tab-')}", DataTable)
+            assert [row_key.value for row_key in table.rows] == [newest_id, oldest_id]
 
 
 class TestCheckAction:
