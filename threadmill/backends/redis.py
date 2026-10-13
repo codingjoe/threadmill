@@ -565,11 +565,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def _peek_tasks(
         self, zset_key: str, count: int, *, leased: bool
     ) -> Generator[TaskResult]:
-        """
-        Yield up to `count` stored tasks in queue order.
-
-        Leased tasks are yielded as their lease reports them.
-        """
         pipe = self.client.pipeline()
         for task_id in self.client.zrange(zset_key, 0, count - 1):
             task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
