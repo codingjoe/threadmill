@@ -1871,3 +1871,21 @@ class TestRedisTaskBackend:
             assert backend._idle_backoff is not observed["worker-a"][0]
         finally:
             backend.close()
+
+    def test_client__reconnect_closed_connection(self):
+        """Retry the pipeline on a new connection where the killed client ID is gone."""
+        pipe = default_task_backend.client.pipeline(transaction=False)
+        pipe.client_kill_filter(
+            _id=default_task_backend.client.client_id(), skipme=False
+        )
+        pipe.ping()
+        assert pipe.execute() == [0, True]
+
+    async def test_async_client__reconnect_closed_connection(self):
+        """Retry the pipeline on a new connection where the killed client ID is gone."""
+        pipe = default_task_backend.async_client.pipeline(transaction=False)
+        pipe.client_kill_filter(
+            _id=await default_task_backend.async_client.client_id(), skipme=False
+        )
+        pipe.ping()
+        assert await pipe.execute() == [0, True]
