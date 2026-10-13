@@ -12,6 +12,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
+import redis
 from django.tasks import default_task_backend
 from django.tasks.base import TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
@@ -86,7 +87,7 @@ class RecordingAcquireScript:
 def _make_backend(
     alias: str,
     queues: list[str] | None = None,
-    **options: datetime.timedelta,
+    **options: datetime.timedelta | int,
 ) -> RedisTaskBackend:
     """Build a backend with per-test options and queue names."""
     return RedisTaskBackend(
@@ -1905,5 +1906,55 @@ class TestRedisTaskBackend:
             # The acquiring thread stays isolated from every worker thread.
             assert backend._idle_backoff.miss_count == 0
             assert backend._idle_backoff is not observed["worker-a"][0]
+        finally:
+            backend.close()
+
+    def test_client__reconnect_closed_connection(self):
+        """Retry the pipeline on a new connection where the killed client ID is gone."""
+        pipe = default_task_backend.client.pipeline(transaction=False)
+        pipe.client_kill_filter(
+            _id=default_task_backend.client.client_id(), skipme=False
+        )
+        pipe.ping()
+        assert pipe.execute() == [0, True]
+
+    async def test_async_client__reconnect_closed_connection(self):
+        """Retry the pipeline on a new connection where the killed client ID is gone."""
+        pipe = default_task_backend.async_client.pipeline(transaction=False)
+        pipe.client_kill_filter(
+            _id=await default_task_backend.async_client.client_id(), skipme=False
+        )
+        pipe.ping()
+        assert await pipe.execute() == [0, True]
+
+    def test_init__default_redis_connection_retries(self):
+        """Retry commands three times on both clients without the option."""
+        backend = _make_backend("default_connection_retries_test")
+        try:
+            assert backend.client.get_retry().get_retries() == 3
+            assert backend.async_client.get_retry().get_retries() == 3
+        finally:
+            backend.close()
+
+    def test_init__apply_redis_connection_retries_option(self):
+        """Retry commands as often as the option configures on both clients."""
+        backend = _make_backend("connection_retries_test", redis_connection_retries=5)
+        try:
+            assert backend.client.get_retry().get_retries() == 5
+            assert backend.async_client.get_retry().get_retries() == 5
+        finally:
+            backend.close()
+
+    def test_client__raise_connection_error_without_retries(self):
+        """Raise the closed connection error once the retry budget is spent."""
+        backend = _make_backend(
+            "no_connection_retries_test", redis_connection_retries=0
+        )
+        try:
+            pipe = backend.client.pipeline(transaction=False)
+            pipe.client_kill_filter(_id=backend.client.client_id(), skipme=False)
+            pipe.ping()
+            with pytest.raises(redis.exceptions.ConnectionError):
+                pipe.execute()
         finally:
             backend.close()

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import redis
 import redis.asyncio
+import redis.asyncio.retry
+import redis.retry
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
@@ -232,7 +234,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 f"{type(self).__name__}."
             )
             raise ValueError(message) from e
-        self.client = redis.from_url(redis_url, decode_responses=True)
+        self.redis_connection_retries = self.options.get("redis_connection_retries", 3)
+        self.client = redis.from_url(
+            redis_url,
+            decode_responses=True,
+            retry=redis.retry.Retry(
+                redis.default_backoff(), self.redis_connection_retries
+            ),
+        )
         self._async_client: redis.asyncio.Redis | None = None
         self.redis_url = redis_url
         self.key_prefix = f"threadmill:{{{alias}}}"
@@ -266,7 +275,11 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         """Lazily-created async Redis client, reused across calls."""
         if self._async_client is None:
             self._async_client = redis.asyncio.Redis.from_url(
-                self.redis_url, decode_responses=True
+                self.redis_url,
+                decode_responses=True,
+                retry=redis.asyncio.retry.Retry(
+                    redis.default_backoff(), self.redis_connection_retries
+                ),
             )
         return self._async_client
 
