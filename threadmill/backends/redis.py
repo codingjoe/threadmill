@@ -594,9 +594,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 yield self.deserialize_task_result(stored)
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
-        """Yield up to `count` finished results in finish order."""
         pipe = self.client.pipeline()
-        for result_id in self.client.zrange(zset_key, 0, count - 1):
+        for result_id in self.client.zrange(zset_key, 0, count - 1, desc=True):
             result_key = self.RESULT_KEY.format(
                 prefix=self.key_prefix, result_id=result_id
             )

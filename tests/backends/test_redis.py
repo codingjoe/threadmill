@@ -992,7 +992,12 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def _acknowledge(self, status: TaskResultStatus) -> str:
+    def _acknowledge(
+        self,
+        status: TaskResultStatus,
+        *,
+        finished_at: datetime.datetime | None = None,
+    ) -> str:
         """Enqueue, acquire, and acknowledge a task with the given status."""
         task_result = default_task_backend.enqueue(echo, args=[1])
         (acquired,) = default_task_backend.acquire(
@@ -1000,7 +1005,11 @@ class TestRedisTaskBackend:
         )
         assert acquired.id == task_result.id
         default_task_backend.acknowledge(
-            dataclasses.replace(acquired, status=status, finished_at=timezone.now())
+            dataclasses.replace(
+                acquired,
+                status=status,
+                finished_at=finished_at or timezone.now(),
+            )
         )
         return task_result.id
 
@@ -1107,6 +1116,33 @@ class TestRedisTaskBackend:
         )
         assert [r.id for r in successful] == [successful_id]
         assert [r.id for r in failed] == [failed_id]
+
+    def test_peek__finished_history_newest_first(self):
+        """Peek lists finished results newest first and keeps the newest within count."""
+        now = timezone.now()
+        oldest_id = self._acknowledge(
+            TaskResultStatus.SUCCESSFUL,
+            finished_at=now - datetime.timedelta(minutes=2),
+        )
+        middle_id = self._acknowledge(
+            TaskResultStatus.SUCCESSFUL,
+            finished_at=now - datetime.timedelta(minutes=1),
+        )
+        newest_id = self._acknowledge(TaskResultStatus.SUCCESSFUL, finished_at=now)
+
+        results = list(
+            default_task_backend.peek(
+                queue_name="default", status=TaskResultStatus.SUCCESSFUL, count=10
+            )
+        )
+        truncated = list(
+            default_task_backend.peek(
+                queue_name="default", status=TaskResultStatus.SUCCESSFUL, count=2
+            )
+        )
+
+        assert [r.id for r in results] == [newest_id, middle_id, oldest_id]
+        assert [r.id for r in truncated] == [newest_id, middle_id]
 
     def test_peek__skips_expired_task_data(self):
         """Peek skips queue entries whose task data hash has expired."""
