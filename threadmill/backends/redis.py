@@ -196,9 +196,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
 
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
 
-    COMMAND_RETRIES = 3
-    """Retry a command up to this many times when its connection fails."""
-
     ACQUIRE_SCRIPT = _load_lua("acquire")
     """Lease up to a given number of tasks from the priority queues in one broker call."""
     ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
@@ -237,10 +234,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 f"{type(self).__name__}."
             )
             raise ValueError(message) from e
+        self.redis_connection_retries = self.options.get("redis_connection_retries", 3)
         self.client = redis.from_url(
             redis_url,
             decode_responses=True,
-            retry=redis.retry.Retry(redis.default_backoff(), self.COMMAND_RETRIES),
+            retry=redis.retry.Retry(
+                redis.default_backoff(), self.redis_connection_retries
+            ),
         )
         self._async_client: redis.asyncio.Redis | None = None
         self.redis_url = redis_url
@@ -278,7 +278,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 self.redis_url,
                 decode_responses=True,
                 retry=redis.asyncio.retry.Retry(
-                    redis.default_backoff(), self.COMMAND_RETRIES
+                    redis.default_backoff(), self.redis_connection_retries
                 ),
             )
         return self._async_client
