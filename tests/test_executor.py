@@ -650,6 +650,7 @@ class TestTaskExecutor:
             backend=default_task_backend, workers=1, queues=("default",)
         )
         maintainer = threading.Thread(target=executor.maintain_worker_pool, daemon=True)
+        executor.pool_maintainer = maintainer
         worker = StubPoolWorker(maintainer)
         executor.worker_processes = [worker]
         maintainer.start()
@@ -658,6 +659,15 @@ class TestTaskExecutor:
         executor.shutdown()
 
         assert worker.stopped_during_maintenance is False
+
+    def test_shutdown__skips_pool_maintainer_before_it_starts(self):
+        """Shutdown skips the join while run() has not started the maintainer."""
+        executor = TaskExecutor(backend=default_task_backend, queues=("default",))
+        executor.pool_maintainer = threading.Thread(
+            target=executor.maintain_worker_pool, daemon=True
+        )
+        executor.shutdown()
+        assert executor.shutdown_requested.is_set()
 
     def test_maintain_worker_pool__restarts_dead_workers(self):
         """maintain_worker_pool replaces dead workers with new ones."""
