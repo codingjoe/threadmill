@@ -190,6 +190,29 @@ def _make_prefetcher(
     )
 
 
+class StubPoolWorker:
+    """Worker stub that holds the pool maintainer mid-pass until it is stopped."""
+
+    def __init__(self, maintainer: threading.Thread) -> None:
+        self.maintainer = maintainer
+        self.alive = True
+        self.polled = threading.Event()
+        self.stopping = threading.Event()
+        self.stopped_during_maintenance: bool | None = None
+
+    def is_alive(self) -> bool:
+        """Hold the poll until this worker stops, or half a second has passed."""
+        self.polled.set()
+        self.stopping.wait(timeout=0.5)
+        return self.alive
+
+    def shutdown(self) -> None:
+        """Exit, noting whether the pool maintainer could still replace this worker."""
+        self.stopped_during_maintenance = self.maintainer.is_alive()
+        self.stopping.set()
+        self.alive = False
+
+
 class TestJsonFormatter:
     """Tests for the JsonFormatter class."""
 
@@ -600,11 +623,11 @@ class TestTaskExecutor:
         persisted = default_task_backend.get_result(enqueued.id)
         assert persisted.status == TaskResultStatus.SUCCESSFUL
 
-    def test_shutdown__stops_publishing(self):
-        """Shutdown stops publishing."""
+    def test_shutdown__requests_shutdown(self):
+        """Shutdown sets shutdown_requested."""
         executor = TaskExecutor(backend=default_task_backend, queues=("default",))
         executor.shutdown()
-        assert not executor.is_publishing
+        assert executor.shutdown_requested.is_set()
 
     def test_shutdown__shuts_down_broker(self):
         """Shutdown calls broker.shutdown when a broker is set."""
@@ -621,6 +644,31 @@ class TestTaskExecutor:
         executor.shutdown()
         assert not worker.is_alive()
 
+    def test_shutdown__stops_pool_maintenance_before_workers(self):
+        """Shutdown stops the pool maintainer first, or it replaces exiting workers."""
+        executor = TaskExecutor(
+            backend=default_task_backend, workers=1, queues=("default",)
+        )
+        maintainer = threading.Thread(target=executor.maintain_worker_pool, daemon=True)
+        executor.pool_maintainer = maintainer
+        worker = StubPoolWorker(maintainer)
+        executor.worker_processes = [worker]
+        maintainer.start()
+        assert worker.polled.wait(timeout=2)
+
+        executor.shutdown()
+
+        assert worker.stopped_during_maintenance is False
+
+    def test_shutdown__skips_pool_maintainer_before_it_starts(self):
+        """Shutdown skips the join while run() has not started the maintainer."""
+        executor = TaskExecutor(backend=default_task_backend, queues=("default",))
+        executor.pool_maintainer = threading.Thread(
+            target=executor.maintain_worker_pool, daemon=True
+        )
+        executor.shutdown()
+        assert executor.shutdown_requested.is_set()
+
     def test_maintain_worker_pool__restarts_dead_workers(self):
         """maintain_worker_pool replaces dead workers with new ones."""
         executor = TaskExecutor(
@@ -636,7 +684,7 @@ class TestTaskExecutor:
         )
         maintain_thread.start()
         time.sleep(0.1)
-        executor.is_publishing = False
+        executor.shutdown_requested.set()
         maintain_thread.join(timeout=2)
 
         assert executor.worker_processes[0] is not worker
@@ -677,7 +725,7 @@ class TestTaskExecutor:
                 executor.worker_processes[0] is worker and time.monotonic() < deadline
             ):
                 time.sleep(0.01)
-            executor.is_publishing = False
+            executor.shutdown_requested.set()
             maintain_thread.join(timeout=2)
 
         assert "Unable to start worker-0. Retrying ..." in caplog.text
