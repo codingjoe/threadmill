@@ -12,7 +12,6 @@ import socket
 import sys
 import sysconfig
 import threading
-import time
 import typing
 from concurrent.futures import Future, ThreadPoolExecutor
 from inspect import iscoroutinefunction
@@ -129,7 +128,12 @@ class TaskExecutor:
     prefetch_count: int | None = None
     poll_interval: datetime.timedelta = datetime.timedelta(seconds=0.01)
     poll_max_interval: datetime.timedelta = datetime.timedelta(seconds=1)
-    is_publishing: bool = dataclasses.field(default=True, init=False)
+    shutdown_requested: threading.Event = dataclasses.field(
+        default_factory=threading.Event, init=False
+    )
+    pool_maintainer: threading.Thread | None = dataclasses.field(
+        default=None, init=False
+    )
     worker_processes: list[WorkerProcess] = dataclasses.field(
         default_factory=list, init=False
     )
@@ -189,17 +193,21 @@ class TaskExecutor:
             thread.join()
 
     def shutdown(self) -> None:
-        """Stop queue consumption and terminate all worker processes."""
+        """Stop pool maintenance first, then queue consumption and all workers."""
         logger.info("Shutting down task executor")
+        self.shutdown_requested.set()
+        maintainer = self.pool_maintainer
+        if maintainer is not None and maintainer is not threading.current_thread():
+            maintainer.join()
         if self.broker is not None:
             self.broker.shutdown()
         with ThreadPoolExecutor(max_workers=self.process_count) as executor:
             executor.map(lambda worker: worker.shutdown(), self.worker_processes)
-        self.is_publishing = False
 
     def maintain_worker_pool(self) -> None:
-        """Restart worker processes that have exited."""
-        while self.is_publishing:
+        """Restart worker processes that have exited, until shutdown is requested."""
+        self.pool_maintainer = threading.current_thread()
+        while not self.shutdown_requested.is_set():
             all_dead = True
             for index, worker in enumerate(self.worker_processes):
                 if worker.is_alive():
@@ -218,7 +226,7 @@ class TaskExecutor:
             if all_dead and self.exit_empty:
                 self.shutdown()
                 return
-            time.sleep(1)
+            self.shutdown_requested.wait(1)
 
 
 class WorkerProcess(multiprocessing.Process):
