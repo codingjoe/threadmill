@@ -643,6 +643,49 @@ class TestTaskExecutor:
         assert executor.worker_processes[0].is_alive()
         executor.worker_processes[0].shutdown()
 
+    def test_maintain_worker_pool__retries_failed_start(self, monkeypatch, caplog):
+        """
+        Retry a dead worker when the first restart attempt fails.
+
+        Regression: https://github.com/codingjoe/threadmill/issues/100
+        """
+        executor = TaskExecutor(
+            backend=default_task_backend, workers=1, threads=1, queues=("default",)
+        )
+        worker = executor.create_worker_process()
+        executor.worker_processes = [worker]
+        worker.shutdown()
+        assert not worker.is_alive()
+
+        start = WorkerProcess.start
+        start_attempts = []
+
+        def start_after_failed_attempt(process):
+            start_attempts.append(process)
+            if len(start_attempts) == 1:
+                raise FileNotFoundError(2, "No such file or directory")
+            start(process)
+
+        monkeypatch.setattr(WorkerProcess, "start", start_after_failed_attempt)
+        maintain_thread = threading.Thread(
+            target=executor.maintain_worker_pool, daemon=True
+        )
+        with caplog.at_level(logging.WARNING, logger="multiprocessing"):
+            maintain_thread.start()
+            deadline = time.monotonic() + 5
+            while (
+                executor.worker_processes[0] is worker and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            executor.is_publishing = False
+            maintain_thread.join(timeout=2)
+
+        assert "Unable to start worker-0. Retrying ..." in caplog.text
+        assert not maintain_thread.is_alive()
+        assert executor.worker_processes[0] is not worker
+        assert executor.worker_processes[0].is_alive()
+        executor.worker_processes[0].shutdown()
+
 
 class TestWorkerProcess:
     """Tests for the WorkerProcess class."""

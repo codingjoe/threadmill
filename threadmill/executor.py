@@ -208,7 +208,13 @@ class TaskExecutor:
                 worker.join(timeout=0)
                 if self.exit_empty:
                     continue
-                self.worker_processes[index] = self.create_worker_process()
+                try:
+                    self.worker_processes[index] = self.create_worker_process()
+                except OSError as error:
+                    # Keep the dead worker and retry on the next tick.
+                    logger.warning(
+                        "Unable to start worker-%d. Retrying ...", index, exc_info=error
+                    )
             if all_dead and self.exit_empty:
                 self.shutdown()
                 return
