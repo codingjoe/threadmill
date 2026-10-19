@@ -1,6 +1,5 @@
 import dataclasses
 import datetime
-import io
 import json
 import logging
 import multiprocessing
@@ -21,6 +20,7 @@ from django.tasks import (
     task,
 )
 from django.tasks.exceptions import TaskResultDoesNotExist
+from django.tasks.signals import task_finished
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -917,6 +917,23 @@ class TestWorkerThread:
         assert len(result.errors) == 1
         assert "ValueError" in result.errors[0].exception_class_path
 
+    def test_execute_task_result__sends_task_finished_inside_exception_handler(self):
+        """Send task_finished while receivers can still read the exception."""
+        exception_types = []
+
+        def record_exception_type(sender, task_result, **kwargs):
+            exception_types.append(sys.exc_info()[0])
+
+        task_finished.connect(record_exception_type)
+        try:
+            WorkerThread(
+                worker=_make_worker(), index=0, backend=default_task_backend
+            ).execute_task_result(_task_result(boom))
+        finally:
+            task_finished.disconnect(record_exception_type)
+
+        assert exception_types == [ValueError]
+
     def test_execute_task_result__preserves_worker_ids(self):
         """execute_task_result preserves worker_ids set by acquire."""
         thread = WorkerThread(
@@ -927,33 +944,43 @@ class TestWorkerThread:
         result = thread.execute_task_result(task_result)
         assert result.worker_ids == ["pre-set-worker"]
 
-    def test_execute_task_result__logs_info_records(self, monkeypatch):
-        """Log task start and success records at INFO level."""
-        stream = io.StringIO()
-        monkeypatch.setattr(handler, "stream", stream)
-        configure_logging(JsonFormatter())
-        logging.getLogger().setLevel(logging.INFO)
+    def test_execute_task_result__logs_info_records(self, caplog):
+        """Log task start and finish records via Django's task signals."""
+        caplog.set_level(logging.INFO, logger="django.tasks")
         task_result = _task_result(log_message, "hello")
         WorkerThread(
             worker=_make_worker(), index=0, backend=default_task_backend
         ).execute_task_result(task_result)
 
-        progress_levels = {
-            record["message"]: record["level"]
-            for record in map(json.loads, stream.getvalue().splitlines())
-            if record["logger"] == "multiprocessing"
-        }
-        assert (
-            progress_levels[
-                f"Executing task '{task_result.id}@{log_message.module_path}'"
-            ]
-            == "INFO"
+        django_task_records = [
+            record for record in caplog.records if record.name == "django.tasks"
+        ]
+        assert any(
+            record.levelname == "INFO" and record.getMessage().endswith("state=RUNNING")
+            for record in django_task_records
         )
-        assert (
-            progress_levels[
-                f"Task '{task_result.id}@{log_message.module_path}' succeeded"
-            ]
-            == "INFO"
+        assert any(
+            record.levelname == "INFO"
+            and record.getMessage().endswith("state=SUCCESSFUL")
+            for record in django_task_records
+        )
+
+    def test_execute_task_result__logs_error_record_on_failure(self, caplog):
+        """Log task failure records via Django's task signals."""
+        caplog.set_level(logging.INFO, logger="django.tasks")
+        task_result = _task_result(boom)
+        WorkerThread(
+            worker=_make_worker(), index=0, backend=default_task_backend
+        ).execute_task_result(task_result)
+
+        django_task_records = [
+            record for record in caplog.records if record.name == "django.tasks"
+        ]
+        assert any(
+            record.levelname == "ERROR"
+            and record.getMessage().endswith("state=FAILED")
+            and record.exc_info
+            for record in django_task_records
         )
 
     def test_call_task__calls_function_with_args(self):
