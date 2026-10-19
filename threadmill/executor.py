@@ -457,6 +457,7 @@ class WorkerThread(threading.Thread):
                 task_result.id,
                 task_result.task.module_path,
             )
+            task_finished.send(TaskExecutor, task_result=task_result)
         else:
             task_result = dataclasses.replace(
                 task_result,
@@ -471,7 +472,6 @@ class WorkerThread(threading.Thread):
                 task_result.id,
                 task_result.task.module_path,
             )
-        finally:
             task_finished.send(TaskExecutor, task_result=task_result)
 
         return task_result

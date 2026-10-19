@@ -21,6 +21,7 @@ from django.tasks import (
     task,
 )
 from django.tasks.exceptions import TaskResultDoesNotExist
+from django.tasks.signals import task_finished
 from django.utils import timezone
 
 from tests.testapp.tasks import (
@@ -916,6 +917,23 @@ class TestWorkerThread:
         assert result.status == TaskResultStatus.FAILED
         assert len(result.errors) == 1
         assert "ValueError" in result.errors[0].exception_class_path
+
+    def test_execute_task_result__sends_task_finished_inside_exception_handler(self):
+        """Send task_finished while receivers can still read the exception."""
+        exception_types = []
+
+        def record_exception_type(sender, task_result, **kwargs):
+            exception_types.append(sys.exc_info()[0])
+
+        task_finished.connect(record_exception_type)
+        try:
+            WorkerThread(
+                worker=_make_worker(), index=0, backend=default_task_backend
+            ).execute_task_result(_task_result(boom))
+        finally:
+            task_finished.disconnect(record_exception_type)
+
+        assert exception_types == [ValueError]
 
     def test_execute_task_result__preserves_worker_ids(self):
         """execute_task_result preserves worker_ids set by acquire."""
