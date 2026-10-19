@@ -426,11 +426,6 @@ class WorkerThread(threading.Thread):
 
     def execute_task_result(self, task_result: TaskResult) -> TaskResult:
         """Execute task from task result and update result lifecycle state."""
-        logger.info(
-            "Executing task '%s@%s'",
-            task_result.id,
-            task_result.task.module_path,
-        )
         started_at = timezone.now()
         task_result = dataclasses.replace(
             task_result,
@@ -442,7 +437,7 @@ class WorkerThread(threading.Thread):
 
         try:
             return_value = WorkerThread.call_task(task_result)
-        except Exception as exception:
+        except Exception as exception:  # noqa: BLE001
             task_result = dataclasses.replace(
                 task_result,
                 status=TaskResultStatus.FAILED,
@@ -451,11 +446,6 @@ class WorkerThread(threading.Thread):
                     self.backend.create_task_error(exception),
                 ],
                 finished_at=timezone.now(),
-            )
-            logger.exception(
-                "Task '%s@%s' failed",
-                task_result.id,
-                task_result.task.module_path,
             )
             task_finished.send(TaskExecutor, task_result=task_result)
         else:
@@ -466,11 +456,6 @@ class WorkerThread(threading.Thread):
             )
             object.__setattr__(
                 task_result, "_return_value", normalize_json(return_value)
-            )
-            logger.info(
-                "Task '%s@%s' succeeded",
-                task_result.id,
-                task_result.task.module_path,
             )
             task_finished.send(TaskExecutor, task_result=task_result)
 

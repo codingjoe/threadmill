@@ -1,6 +1,5 @@
 import dataclasses
 import datetime
-import io
 import json
 import logging
 import multiprocessing
@@ -945,33 +944,43 @@ class TestWorkerThread:
         result = thread.execute_task_result(task_result)
         assert result.worker_ids == ["pre-set-worker"]
 
-    def test_execute_task_result__logs_info_records(self, monkeypatch):
-        """Log task start and success records at INFO level."""
-        stream = io.StringIO()
-        monkeypatch.setattr(handler, "stream", stream)
-        configure_logging(JsonFormatter())
-        logging.getLogger().setLevel(logging.INFO)
+    def test_execute_task_result__logs_info_records(self, caplog):
+        """Log task start and finish records via Django's task signals."""
+        caplog.set_level(logging.INFO, logger="django.tasks")
         task_result = _task_result(log_message, "hello")
         WorkerThread(
             worker=_make_worker(), index=0, backend=default_task_backend
         ).execute_task_result(task_result)
 
-        progress_levels = {
-            record["message"]: record["level"]
-            for record in map(json.loads, stream.getvalue().splitlines())
-            if record["logger"] == "multiprocessing"
-        }
-        assert (
-            progress_levels[
-                f"Executing task '{task_result.id}@{log_message.module_path}'"
-            ]
-            == "INFO"
+        django_task_records = [
+            record for record in caplog.records if record.name == "django.tasks"
+        ]
+        assert any(
+            record.levelname == "INFO" and record.getMessage().endswith("state=RUNNING")
+            for record in django_task_records
         )
-        assert (
-            progress_levels[
-                f"Task '{task_result.id}@{log_message.module_path}' succeeded"
-            ]
-            == "INFO"
+        assert any(
+            record.levelname == "INFO"
+            and record.getMessage().endswith("state=SUCCESSFUL")
+            for record in django_task_records
+        )
+
+    def test_execute_task_result__logs_error_record_on_failure(self, caplog):
+        """Log task failure records via Django's task signals."""
+        caplog.set_level(logging.INFO, logger="django.tasks")
+        task_result = _task_result(boom)
+        WorkerThread(
+            worker=_make_worker(), index=0, backend=default_task_backend
+        ).execute_task_result(task_result)
+
+        django_task_records = [
+            record for record in caplog.records if record.name == "django.tasks"
+        ]
+        assert any(
+            record.levelname == "ERROR"
+            and record.getMessage().endswith("state=FAILED")
+            and record.exc_info
+            for record in django_task_records
         )
 
     def test_call_task__calls_function_with_args(self):
