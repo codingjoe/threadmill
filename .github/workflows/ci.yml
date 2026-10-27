@@ -39,7 +39,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv run --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
+      - run: uv run --with=pytest-github-actions-annotate-failures --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -67,7 +67,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv run --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
+      - run: uv run --with=pytest-github-actions-annotate-failures --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
   pytest-extras:
     name: Pytest
     strategy:
@@ -92,7 +92,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv run --extra ${{ matrix.extra }} --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
+      - run: uv run --with=pytest-github-actions-annotate-failures --extra ${{ matrix.extra }} --with django~=${{ matrix.django-version }}.0 pytest -m "not benchmark"
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
