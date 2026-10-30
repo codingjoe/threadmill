@@ -30,3 +30,18 @@ def flush_default_backend():
     yield
     _flush_keys(default_task_backend)
     default_task_backend._async_client = None
+
+
+@pytest.fixture(autouse=True)
+def isolate_metrics_environment(monkeypatch):
+    """Keep unrelated tests from starting an exporter or reading host settings."""
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "none")
+    for name in (
+        "OTEL_SDK_DISABLED",
+        "OTEL_METRIC_EXPORT_INTERVAL",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_SERVICE_NAME",
+    ):
+        monkeypatch.delenv(name, raising=False)

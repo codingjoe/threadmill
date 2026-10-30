@@ -1,5 +1,7 @@
+import asyncio
 import datetime
 import logging
+import math
 import signal
 import sys
 
@@ -12,7 +14,14 @@ from django.tasks import (
     task_backends,
 )
 
+from ...backends.base import ThreadmillTaskBackend
 from ...executor import JsonFormatter, TaskExecutor
+from ...metrics import (
+    configure_metrics,
+    is_metrics_export_enabled,
+    is_metrics_sdk_available,
+)
+from ...queue_metrics import DEFAULT_QUEUE_SAMPLE_INTERVAL_S, QueueMetricsExporter
 
 
 def kill_softly(signum, frame):
@@ -20,6 +29,30 @@ def kill_softly(signum, frame):
     signame = signal.Signals(signum).name
     message = f"Received {signame} ({signum}), shutting down…"
     raise KeyboardInterrupt(message)
+
+
+def require_threadmill_backend(alias: str, *, feature: str) -> ThreadmillTaskBackend:
+    """Return the configured threadmill backend or raise a command error."""
+    try:
+        backend = task_backends[alias]
+    except InvalidTaskBackend as e:
+        message = f"Invalid backend: {alias!r}"
+        raise CommandError(message) from e
+    if not isinstance(backend, ThreadmillTaskBackend):
+        message = f"Backend {backend.alias!r} does not support {feature}."
+        raise CommandError(message)
+    return backend
+
+
+def install_signal_handlers() -> None:
+    """Stop gracefully on the platform's shutdown signals."""
+    match sys.platform:
+        case "win32":
+            signal.signal(signal.SIGBREAK, kill_softly)
+        case _:
+            signal.signal(signal.SIGHUP, kill_softly)
+    signal.signal(signal.SIGTERM, kill_softly)
+    signal.signal(signal.SIGINT, kill_softly)
 
 
 class WorkerCommand(DjangoBaseCommand):
@@ -120,19 +153,9 @@ class WorkerCommand(DjangoBaseCommand):
         log_format,
         **options,
     ):
-        match sys.platform:
-            case "win32":
-                signal.signal(signal.SIGBREAK, kill_softly)
-            case _:
-                signal.signal(signal.SIGHUP, kill_softly)
-        signal.signal(signal.SIGTERM, kill_softly)
-        signal.signal(signal.SIGINT, kill_softly)
+        install_signal_handlers()
         self.stdout.write(self.style.SUCCESS("Starting workers…"))
-        try:
-            backend = task_backends[backend]
-        except InvalidTaskBackend:
-            message = f"Invalid backend: {backend!r}"
-            raise CommandError(message)
+        backend = require_threadmill_backend(backend, feature="task processing")
         if _non_queues := set(queues) - set(backend.queues):
             message = f"Backend does not support all specified queues: {_non_queues!r}"
             raise CommandError(message)
@@ -187,32 +210,92 @@ class InspectorCommand(DjangoBaseCommand):
 
     def handle(self, *, backend, **options):
         try:
-            from ...backends.base import ThreadmillTaskBackend
             from ...inspector.app import InspectorApp
         except ImportError:
             message = "Optional dependency missing. Install: threadmill[inspector]"
             raise CommandError(message)
-        try:
-            backend = task_backends[backend]
-        except InvalidTaskBackend as e:
-            message = f"Invalid backend: {backend!r}"
-            raise CommandError(message) from e
-
-        if not isinstance(backend, ThreadmillTaskBackend):
-            message = f"Backend {backend.alias!r} does not support inspection."
-            raise CommandError(message)
-
+        backend = require_threadmill_backend(backend, feature="inspection")
         InspectorApp(backend=backend).run()
 
 
-class Command(BaseCommand):
-    """Dispatcher for the worker and inspector subcommands."""
+class OpenTelemetryCommand(DjangoBaseCommand):
+    """Export queue counts, backlog, ingress, and egress over OTLP or the console."""
 
-    help = "Run threadmill workers or inspect queues."
+    help = __doc__
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "-b",
+            "--backend",
+            default=DEFAULT_TASK_BACKEND_ALIAS,
+            help="Alias of the tasks backend to export metrics for.",
+        )
+        parser.add_argument(
+            "--interval",
+            type=float,
+            default=DEFAULT_QUEUE_SAMPLE_INTERVAL_S,
+            help="Queue sampling interval in seconds.",
+        )
+        parser.add_argument(
+            "--once",
+            action="store_true",
+            help="Sample the queue once, export, and exit.",
+        )
+
+    def handle(self, *, backend, interval, once, **options):
+        backend = require_threadmill_backend(backend, feature="queue telemetry")
+        if not math.isfinite(interval) or interval <= 0:
+            message = f"Invalid interval: {interval!r}"
+            raise CommandError(message)
+        if not is_metrics_sdk_available():
+            message = (
+                "OpenTelemetry SDK is not installed. Install: threadmill[opentelemetry]"
+            )
+            raise CommandError(message)
+        if not is_metrics_export_enabled():
+            message = (
+                "Metrics export is disabled. Unset OTEL_SDK_DISABLED and set "
+                "OTEL_METRICS_EXPORTER to otlp or console."
+            )
+            raise CommandError(message)
+
+        try:
+            QueueMetricsExporter.require_telemetry_support(backend)
+        except NotImplementedError as e:
+            raise CommandError(str(e)) from e
+        if not once:
+            install_signal_handlers()
+        metrics = configure_metrics(backend_alias=backend.alias)
+        exporter = QueueMetricsExporter(
+            backend=backend, metrics=metrics, interval=interval
+        )
+        broker = None
+        try:
+            if backend.broker_class is not None and not once:
+                broker = backend.broker_class(backend)
+                broker.start()
+            asyncio.run(exporter.sample_once() if once else exporter.run())
+        except KeyboardInterrupt as e:
+            self.stdout.write(self.style.WARNING(str(e)))
+        finally:
+            try:
+                if broker is not None:
+                    broker.shutdown()
+                    if broker.is_alive():
+                        broker.join()
+            finally:
+                metrics.shutdown()
+
+
+class Command(BaseCommand):
+    """Dispatcher for the worker, inspector, and otel subcommands."""
+
+    help = "Run threadmill workers, inspect queues, or export OpenTelemetry metrics."
 
     subcommands = {
         "worker": WorkerCommand,
         "inspector": InspectorCommand,
+        "otel": OpenTelemetryCommand,
     }
 
     def add_arguments(self, parser):

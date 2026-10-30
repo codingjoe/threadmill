@@ -12,6 +12,7 @@ import socket
 import sys
 import sysconfig
 import threading
+import time
 import typing
 from concurrent.futures import Future, ThreadPoolExecutor
 from inspect import iscoroutinefunction
@@ -25,6 +26,8 @@ from django.tasks.base import TaskContext, TaskResultStatus
 from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
+
+from .metrics import Metrics, configure_metrics
 
 if typing.TYPE_CHECKING:
     from .backends.base import Broker, ThreadmillTaskBackend, ThreadmillTaskResult
@@ -265,6 +268,8 @@ class WorkerProcess(multiprocessing.Process):
         self.poll_max_interval = poll_max_interval
         self.log_formatter = log_formatter
         self.task_count = 0
+        self.busy_threads = 0
+        self.metrics: Metrics = Metrics()
         self.lock: threading.Lock | None = None
         self.expired: threading.Event | None = None
         self.prefetcher: TaskPrefetcher | None = None
@@ -272,37 +277,56 @@ class WorkerProcess(multiprocessing.Process):
     def run(self) -> None:
         django.setup()
         configure_logging(self.log_formatter)
-        logger.info("Starting worker process %s", self.name)
-        self.lock = threading.Lock()
-        self.expired = threading.Event()
-        backend = task_backends[self.backend_alias]
-        backend.poll_interval = self.poll_interval
-        backend.poll_max_interval = self.poll_max_interval
-        self.prefetcher = TaskPrefetcher(
-            worker=self, backend=backend, prefetch_count=self.prefetch_count
-        )
-        self.prefetcher.start()
-        consumer_threads = [
-            WorkerThread(worker=self, index=index, backend=backend)
-            for index in range(self.thread_count)
-        ]
-        for consumer_thread in consumer_threads:
-            consumer_thread.start()
-        join_timeout = (
-            backend.result_ttl.total_seconds() if backend.result_ttl else None
-        )
-        for consumer_thread in consumer_threads:
-            consumer_thread.join(join_timeout)
-        self.prefetcher.stop_requested.set()
-        self.prefetcher.join(join_timeout)
-        completion = self.prefetcher.completion
-        if completion.done() and (failure := completion.exception()) is not None:
-            logger.error(
-                "Worker process %s exits after a fetch failure",
-                self.name,
-                exc_info=failure,
+        # Create the provider after the fork; forking copies exporter threads.
+        self.metrics = configure_metrics(backend_alias=self.backend_alias)
+        try:
+            logger.info("Starting worker process %s", self.name)
+            self.lock = threading.Lock()
+            self.expired = threading.Event()
+            self.metrics.record_busy_threads(
+                busy_threads=0, thread_count=self.thread_count
             )
-            raise SystemExit(1)
+            backend = task_backends[self.backend_alias]
+            backend.poll_interval = self.poll_interval
+            backend.poll_max_interval = self.poll_max_interval
+            self.prefetcher = TaskPrefetcher(
+                worker=self, backend=backend, prefetch_count=self.prefetch_count
+            )
+            self.prefetcher.start()
+            consumer_threads = [
+                WorkerThread(worker=self, index=index, backend=backend)
+                for index in range(self.thread_count)
+            ]
+            for consumer_thread in consumer_threads:
+                consumer_thread.start()
+            join_timeout = (
+                backend.result_ttl.total_seconds() if backend.result_ttl else None
+            )
+            for consumer_thread in consumer_threads:
+                consumer_thread.join(join_timeout)
+            self.prefetcher.stop_requested.set()
+            self.prefetcher.join(join_timeout)
+            completion = self.prefetcher.completion
+            if completion.done() and (failure := completion.exception()) is not None:
+                logger.error(
+                    "Worker process %s exits after a fetch failure",
+                    self.name,
+                    exc_info=failure,
+                )
+                raise SystemExit(1)
+        finally:
+            self.metrics.shutdown()
+
+    def update_busy_threads(self, delta: int) -> None:
+        """Adjust the consumer count executing tasks and report it for autoscaling."""
+        with self.lock:
+            self.busy_threads += delta
+            busy_threads = self.busy_threads
+        # todo: an out-of-order record can leave a stale gauge until the next task;
+        # serialize on a sequence number if that skews autoscaling.
+        self.metrics.record_busy_threads(
+            busy_threads=busy_threads, thread_count=self.thread_count
+        )
 
     def record_task(self) -> None:
         """Record one processed task and stop when max_tasks is reached."""
@@ -399,6 +423,7 @@ class WorkerThread(threading.Thread):
         super().__init__(name=f"{socket.gethostname()}:{worker.pid}-{index}")
         self.worker = worker
         self.backend = backend
+        self.metrics = worker.metrics
 
     def run(self) -> None:
         prefetcher = self.worker.prefetcher
@@ -412,6 +437,7 @@ class WorkerThread(threading.Thread):
                     return
                 continue
 
+            self.worker.update_busy_threads(1)
             try:
                 result = self.execute_task_result(task_result)
                 if (
@@ -422,6 +448,7 @@ class WorkerThread(threading.Thread):
                 else:
                     self.backend.acknowledge(result)
             finally:
+                self.worker.update_busy_threads(-1)
                 self.worker.record_task()
 
     def execute_task_result(self, task_result: TaskResult) -> TaskResult:
@@ -435,6 +462,11 @@ class WorkerThread(threading.Thread):
         )
         task_started.send(TaskExecutor, task_result=task_result)
 
+        start_clock = time.perf_counter()
+        self.metrics.record_task_started(
+            queue_name=task_result.task.queue_name,
+            task_module_path=task_result.task.module_path,
+        )
         try:
             return_value = WorkerThread.call_task(task_result)
         except Exception as exception:  # noqa: BLE001
@@ -458,6 +490,13 @@ class WorkerThread(threading.Thread):
                 task_result, "_return_value", normalize_json(return_value)
             )
             task_finished.send(TaskExecutor, task_result=task_result)
+        finally:
+            self.metrics.record_task_finished(
+                queue_name=task_result.task.queue_name,
+                task_module_path=task_result.task.module_path,
+                status=task_result.status.lower(),
+                duration_s=time.perf_counter() - start_clock,
+            )
 
         return task_result
 

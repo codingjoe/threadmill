@@ -119,6 +119,14 @@ TASKS = {
         "BACKEND": "tests.testapp.backends.StubTaskBackend",
         "QUEUES": [DEFAULT_TASK_QUEUE_NAME],
     },
+    "telemetry": {
+        "BACKEND": "tests.testapp.backends.TelemetryTaskBackend",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "extra"],
+    },
+    "telemetry-no-broker": {
+        "BACKEND": "tests.testapp.backends.TelemetryTaskBackendWithoutBroker",
+        "QUEUES": [DEFAULT_TASK_QUEUE_NAME, "extra"],
+    },
 }
 
 # django-rq resolves every queue named in TASKS from this mapping.
