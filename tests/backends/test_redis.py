@@ -993,6 +993,29 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    async def test_worker_telemetry__skips_malformed_direction(self):
+        """worker_telemetry() drops messages with an unknown direction."""
+        backend = _make_backend("worker_telemetry_malformed_test")
+        try:
+            stream = backend.worker_telemetry()
+            pending = asyncio.ensure_future(anext(stream))
+            try:
+                for _attempt in range(50):
+                    if backend.client.pubsub_numsub(backend.telemetry_channel)[0][1]:
+                        break
+                    await asyncio.sleep(0.05)
+                backend.client.publish(backend.telemetry_channel, "sideways:default")
+                backend.client.publish(backend.telemetry_channel, "ingress:default")
+                event = await asyncio.wait_for(pending, timeout=2)
+            finally:
+                await stream.aclose()
+
+            assert event == TelemetryEvent(
+                direction=TelemetryDirection.INGRESS, queue_name="default"
+            )
+        finally:
+            backend.close()
+
     def _acknowledge(
         self,
         status: TaskResultStatus,
@@ -1920,28 +1943,29 @@ class TestRedisTaskBackend:
 
     async def test_async_client__reconnect_closed_connection(self):
         """Retry the pipeline on a new connection where the killed client ID is gone."""
-        pipe = default_task_backend.async_client.pipeline(transaction=False)
-        pipe.client_kill_filter(
-            _id=await default_task_backend.async_client.client_id(), skipme=False
-        )
-        pipe.ping()
-        assert await pipe.execute() == [0, True]
+        async with default_task_backend.async_client() as client:
+            pipe = client.pipeline(transaction=False)
+            pipe.client_kill_filter(_id=await client.client_id(), skipme=False)
+            pipe.ping()
+            assert await pipe.execute() == [0, True]
 
-    def test_init__default_redis_connection_retries(self):
+    async def test_init__default_redis_connection_retries(self):
         """Retry commands three times on both clients without the option."""
         backend = _make_backend("default_connection_retries_test")
         try:
             assert backend.client.get_retry().get_retries() == 3
-            assert backend.async_client.get_retry().get_retries() == 3
+            async with backend.async_client() as client:
+                assert client.get_retry().get_retries() == 3
         finally:
             backend.close()
 
-    def test_init__apply_redis_connection_retries_option(self):
+    async def test_init__apply_redis_connection_retries_option(self):
         """Retry commands as often as the option configures on both clients."""
         backend = _make_backend("connection_retries_test", redis_connection_retries=5)
         try:
             assert backend.client.get_retry().get_retries() == 5
-            assert backend.async_client.get_retry().get_retries() == 5
+            async with backend.async_client() as client:
+                assert client.get_retry().get_retries() == 5
         finally:
             backend.close()
 

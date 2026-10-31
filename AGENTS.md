@@ -54,6 +54,7 @@ Codecov requires 100% patch coverage on PRs (`pyproject.toml`, `.codecov.yml`). 
 ## Architecture notes
 
 - Entry point for end users: `threadmill/management/commands/threadmill.py` (Django management command with `worker` and `inspector` subcommands).
+- Queue stats: `threadmill/views.py` (`QueueStatsView`) serves the KEDA autoscaling endpoint at `threadmill/urls.py`.
 - Core runtime: `threadmill/executor.py` (`TaskExecutor`) — process/thread pool, graceful shutdown, worker recycling, task timeout/backlog.
 - Integration point for queue authors: `threadmill/backends.py` (`AcknowledgeableTaskBackend`) — subclasses implement `acquire` (lock-without-remove) and `acknowledge` (remove + publish). Requires late-ack support from the underlying queue.
 - Test app backend `tests/testapp/backends.py` (`GeneratingTaskBackend`) generates tasks in-process for benchmarks; reset between runs via `default_task_backend.reset()`.
