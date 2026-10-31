@@ -993,6 +993,29 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    async def test_worker_telemetry__skips_malformed_direction(self):
+        """worker_telemetry() drops messages with an unknown direction."""
+        backend = _make_backend("worker_telemetry_malformed_test")
+        try:
+            stream = backend.worker_telemetry()
+            pending = asyncio.ensure_future(anext(stream))
+            try:
+                for _attempt in range(50):
+                    if backend.client.pubsub_numsub(backend.telemetry_channel)[0][1]:
+                        break
+                    await asyncio.sleep(0.05)
+                backend.client.publish(backend.telemetry_channel, "sideways:default")
+                backend.client.publish(backend.telemetry_channel, "ingress:default")
+                event = await asyncio.wait_for(pending, timeout=2)
+            finally:
+                await stream.aclose()
+
+            assert event == TelemetryEvent(
+                direction=TelemetryDirection.INGRESS, queue_name="default"
+            )
+        finally:
+            backend.close()
+
     def _acknowledge(
         self,
         status: TaskResultStatus,

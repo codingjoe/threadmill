@@ -656,16 +656,15 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             pubsub.ignore_subscribe_messages = True
             try:
                 async for message in pubsub.listen():
-                    if (data := message.get("data")) is not None:
-                        direction, _, queue_name = data.partition(":")
-                        try:
-                            event = TelemetryEvent(
-                                direction=TelemetryDirection(direction),
-                                queue_name=queue_name,
-                            )
-                        except ValueError:
-                            continue
-                        yield event
+                    direction, _, queue_name = message["data"].partition(":")
+                    try:
+                        event = TelemetryEvent(
+                            direction=TelemetryDirection(direction),
+                            queue_name=queue_name,
+                        )
+                    except ValueError:
+                        continue
+                    yield event
             finally:
                 await pubsub.unsubscribe(self.telemetry_channel)
                 await pubsub.aclose()
