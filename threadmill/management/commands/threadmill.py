@@ -26,8 +26,6 @@ def kill_softly(signum, frame):
 
 
 class ThreadmillCommand(DjangoBaseCommand):
-    feature = ""
-
     def add_arguments(self, parser):
         parser.add_argument(
             "-b",
@@ -44,7 +42,7 @@ class ThreadmillCommand(DjangoBaseCommand):
             message = f"Invalid backend: {alias!r}"
             raise argparse.ArgumentTypeError(message) from e
         if not isinstance(backend, ThreadmillTaskBackend):
-            message = f"Backend {backend.alias!r} does not support {self.feature}."
+            message = f"Backend {backend.alias!r} does not support this command."
             raise argparse.ArgumentTypeError(message)
         return backend
 
@@ -65,7 +63,6 @@ class ThreadmillCommand(DjangoBaseCommand):
 class WorkerCommand(ThreadmillCommand):
     """Run task workers to process enqueued tasks from the specified backends and queues."""
 
-    feature = "task processing"
     help = __doc__
 
     def add_arguments(self, parser):
@@ -200,7 +197,6 @@ class WorkerCommand(ThreadmillCommand):
 class InspectorCommand(ThreadmillCommand):
     """Launch the textual TUI inspector for task backends and queues."""
 
-    feature = "inspection"
     help = __doc__
 
     def handle(self, *, backend, **options):

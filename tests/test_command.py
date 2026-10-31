@@ -306,7 +306,7 @@ class TestInspectorCommand:
         """A backend without ThreadmillTaskBackend support raises ArgumentTypeError."""
         pytest.importorskip("textual.widgets")
         with pytest.raises(
-            argparse.ArgumentTypeError, match="does not support inspection"
+            argparse.ArgumentTypeError, match="does not support this command"
         ):
             threadmill.InspectorCommand().parse_backend("immediate")
 
