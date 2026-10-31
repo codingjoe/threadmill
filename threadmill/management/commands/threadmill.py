@@ -1,4 +1,3 @@
-import argparse
 import datetime
 import logging
 import signal
@@ -9,11 +8,9 @@ from django.core.management.base import BaseCommand as DjangoBaseCommand
 from django.tasks import (
     DEFAULT_TASK_BACKEND_ALIAS,
     DEFAULT_TASK_QUEUE_NAME,
-    InvalidTaskBackend,
     task_backends,
 )
 
-from ...backends.base import ThreadmillTaskBackend
 from ...exceptions import MissingExtraError
 from ...executor import JsonFormatter, TaskExecutor
 
@@ -30,21 +27,9 @@ class ThreadmillCommand(DjangoBaseCommand):
         parser.add_argument(
             "-b",
             "--backend",
-            type=self.parse_backend,
             default=DEFAULT_TASK_BACKEND_ALIAS,
             help="Alias of the tasks backend.",
         )
-
-    def parse_backend(self, alias: str) -> ThreadmillTaskBackend:
-        try:
-            backend = task_backends[alias]
-        except InvalidTaskBackend as e:
-            message = f"Invalid backend: {alias!r}"
-            raise argparse.ArgumentTypeError(message) from e
-        if not isinstance(backend, ThreadmillTaskBackend):
-            message = f"Backend {backend.alias!r} is not a threadmill backend."
-            raise argparse.ArgumentTypeError(message)
-        return backend
 
     @staticmethod
     def parse_duration(value: str) -> datetime.timedelta:
@@ -155,6 +140,7 @@ class WorkerCommand(ThreadmillCommand):
     ):
         self.install_signal_handlers()
         self.stdout.write(self.style.SUCCESS("Starting workers…"))
+        backend = task_backends[backend]
         if _non_queues := set(queues) - set(backend.queues):
             message = f"Backend does not support all specified queues: {_non_queues!r}"
             raise CommandError(message)
@@ -204,7 +190,7 @@ class InspectorCommand(ThreadmillCommand):
             from ...inspector.app import InspectorApp
         except ImportError as e:
             raise MissingExtraError("inspector") from e
-        InspectorApp(backend=backend).run()
+        InspectorApp(backend=task_backends[backend]).run()
 
 
 class Command(BaseCommand):

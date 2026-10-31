@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.tasks import default_task_backend, task_backends
+from django.tasks import default_task_backend
 
 from tests.testapp.tasks import (
     compute_workload,
@@ -40,7 +40,7 @@ class TestCommand:
         threadmill.WorkerCommand().add_arguments(parser)
         parsed_arguments = parser.parse_args([])
 
-        assert parsed_arguments.backend.alias == "default"
+        assert parsed_arguments.backend == "default"
         assert parsed_arguments.queues == ["default"]
         assert parsed_arguments.threads == 1
         assert parsed_arguments.max_tasks == 0
@@ -294,21 +294,7 @@ class TestInspectorCommand:
         parser = argparse.ArgumentParser()
         threadmill.InspectorCommand().add_arguments(parser)
         args = parser.parse_args([])
-        assert args.backend.alias == "default"
-
-    def test_parse_backend__raises_argument_type_error_for_invalid_backend(self):
-        """An unknown backend alias raises ArgumentTypeError."""
-        pytest.importorskip("textual.widgets")
-        with pytest.raises(argparse.ArgumentTypeError, match="Invalid backend"):
-            threadmill.InspectorCommand().parse_backend("nonexistent")
-
-    def test_parse_backend__raises_argument_type_error_for_unsupported_backend(self):
-        """A backend without ThreadmillTaskBackend support raises ArgumentTypeError."""
-        pytest.importorskip("textual.widgets")
-        with pytest.raises(
-            argparse.ArgumentTypeError, match="is not a threadmill backend"
-        ):
-            threadmill.InspectorCommand().parse_backend("immediate")
+        assert args.backend == "default"
 
     def test_handle__launches_inspector_app(self):
         """A supported backend launches the inspector app."""
@@ -316,7 +302,7 @@ class TestInspectorCommand:
         from threadmill.inspector.app import InspectorApp
 
         with patch.object(InspectorApp, "run"):
-            threadmill.InspectorCommand().handle(backend=task_backends["default"])
+            threadmill.InspectorCommand().handle(backend="default")
 
 
 class TestParentCommand:
