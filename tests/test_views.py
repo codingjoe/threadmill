@@ -11,7 +11,7 @@ from tests.testapp.tasks import echo
 from threadmill.views import QueueStatsView
 
 
-def _request(**params):
+def _create_request(**params):
     return RequestFactory().get("/queue-stats/", params)
 
 
@@ -21,69 +21,68 @@ def _enqueue(*, queue_name: str, count: int) -> None:
         task.enqueue(value)
 
 
-async def test_get__sums_ready_counts_for_requested_queues():
-    """The endpoint sums the ready counts of the requested queues."""
-    _enqueue(queue_name="compute", count=1)
-    _enqueue(queue_name="io", count=2)
+class TestQueueStatsView:
+    """Tests for the queue stats view."""
 
-    response = await QueueStatsView.as_view()(
-        _request(backend=DEFAULT_TASK_BACKEND_ALIAS, queue=["compute", "io"])
-    )
+    async def test_get__sums_ready_counts_for_requested_queues(self):
+        """Sum the ready counts of the requested queues."""
+        _enqueue(queue_name="default", count=5)
+        _enqueue(queue_name="compute", count=1)
+        _enqueue(queue_name="io", count=2)
 
-    assert response.status_code == 200
-    assert json.loads(response.content) == {"ready": 3}
+        response = await QueueStatsView.as_view()(
+            _create_request(backend=DEFAULT_TASK_BACKEND_ALIAS, queue=["compute", "io"])
+        )
 
+        assert response.status_code == 200
+        assert json.loads(response.content) == {"ready": 3}
 
-async def test_get__defaults_to_all_backend_queues():
-    """The endpoint uses every configured queue when none is requested."""
-    _enqueue(queue_name="compute", count=1)
-    _enqueue(queue_name="io", count=2)
+    async def test_get__defaults_to_all_backend_queues(self):
+        """Use every configured queue when none is requested."""
+        _enqueue(queue_name="compute", count=1)
+        _enqueue(queue_name="io", count=2)
 
-    response = await QueueStatsView.as_view()(
-        _request(backend=DEFAULT_TASK_BACKEND_ALIAS)
-    )
+        response = await QueueStatsView.as_view()(
+            _create_request(backend=DEFAULT_TASK_BACKEND_ALIAS)
+        )
 
-    assert response.status_code == 200
-    assert json.loads(response.content) == {"ready": 3}
+        assert response.status_code == 200
+        assert json.loads(response.content) == {"ready": 3}
 
+    async def test_get__defaults_to_default_backend(self):
+        """Use the default backend alias when none is requested."""
+        _enqueue(queue_name="compute", count=3)
 
-async def test_get__defaults_to_default_backend():
-    """The endpoint uses the default backend alias when none is requested."""
-    _enqueue(queue_name="compute", count=3)
+        response = await QueueStatsView.as_view()(_create_request())
 
-    response = await QueueStatsView.as_view()(_request())
+        assert response.status_code == 200
+        assert json.loads(response.content) == {"ready": 3}
 
-    assert response.status_code == 200
-    assert json.loads(response.content) == {"ready": 3}
+    async def test_get__unknown_backend_raises_404(self):
+        """Raise 404 for an unregistered backend alias."""
+        with pytest.raises(Http404):
+            await QueueStatsView.as_view()(_create_request(backend="missing"))
 
+    async def test_get__non_threadmill_backend_raises_404(self):
+        """Raise 404 for registered backends outside Threadmill."""
+        with pytest.raises(Http404):
+            await QueueStatsView.as_view()(_create_request(backend="immediate"))
 
-async def test_get__unknown_backend_raises_404():
-    """An unregistered backend alias is a 404."""
-    with pytest.raises(Http404):
-        await QueueStatsView.as_view()(_request(backend="missing"))
+    async def test_get__backend_without_queue_stats_raises_404(self):
+        """Raise 404 for Threadmill backends without queue stats."""
+        with pytest.raises(Http404):
+            await QueueStatsView.as_view()(_create_request(backend="stub"))
 
-
-async def test_get__non_threadmill_backend_raises_404():
-    """Registered backends outside Threadmill expose no queue stats."""
-    with pytest.raises(Http404):
-        await QueueStatsView.as_view()(_request(backend="immediate"))
-
-
-async def test_get__backend_without_queue_stats_raises_404():
-    """Threadmill backends without queue stats are a 404."""
-    with pytest.raises(Http404):
-        await QueueStatsView.as_view()(_request(backend="stub"))
-
-
-async def test_get__unknown_queue_raises_404():
-    """An unknown queue name is a 404."""
-    with pytest.raises(Http404):
-        await QueueStatsView.as_view()(_request(queue="missing"))
+    async def test_get__unknown_queue_raises_404(self):
+        """Raise 404 for an unknown queue name."""
+        with pytest.raises(Http404):
+            await QueueStatsView.as_view()(_create_request(queue="missing"))
 
 
-@override_settings(ROOT_URLCONF="threadmill.urls")
-def test_urls__queue_stats():
-    """The queue stats URL resolves to the view."""
-    match = resolve("/queue-stats/")
+class TestQueueStatsUrl:
+    """Tests for the queue stats URL."""
 
-    assert match.func.view_class is QueueStatsView
+    @override_settings(ROOT_URLCONF="threadmill.urls")
+    def test_urlpatterns__queue_stats(self):
+        """Resolve the queue stats URL to the view."""
+        assert resolve("/queue-stats/").func.view_class is QueueStatsView
