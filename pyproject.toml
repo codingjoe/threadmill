@@ -36,10 +36,6 @@ dependencies = [ "django>=6.1" ]
 optional-dependencies.inspector = [
   "textual>=8.2.7",
 ]
-optional-dependencies.opentelemetry = [
-  "opentelemetry-exporter-otlp-proto-http>=1.45",
-  "opentelemetry-sdk>=1.45",
-]
 optional-dependencies.redis = [ "redis>=5" ]
 urls.Changelog = "https://github.com/codingjoe/threadmill/releases"
 urls.Documentation = "https://github.com/codingjoe/threadmill/"

@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import datetime
 import logging
 import signal
@@ -212,81 +211,14 @@ class InspectorCommand(ThreadmillCommand):
         InspectorApp(backend=backend).run()
 
 
-class OpenTelemetryCommand(ThreadmillCommand):
-    """Export queue counts, backlog, ingress, and egress over OTLP or the console."""
-
-    feature = "queue telemetry"
-    help = __doc__
-
-    def add_arguments(self, parser):
-        super().add_arguments(parser)
-        parser.add_argument(
-            "--interval",
-            type=self.parse_duration,
-            default=datetime.timedelta(seconds=15),
-            help="Queue sampling interval in seconds.",
-        )
-        parser.add_argument(
-            "--export-interval",
-            type=self.parse_duration,
-            default=datetime.timedelta(seconds=15),
-            help="Metrics export interval in seconds.",
-        )
-        parser.add_argument(
-            "--reconnect-delay",
-            type=self.parse_duration,
-            default=datetime.timedelta(seconds=1),
-            help="Telemetry stream reconnect delay in seconds.",
-        )
-        parser.add_argument(
-            "--once",
-            action="store_true",
-            help="Sample the queue once, export, and exit.",
-        )
-
-    def handle(
-        self,
-        *,
-        backend,
-        interval,
-        export_interval,
-        reconnect_delay,
-        once,
-        **options,
-    ):
-        try:
-            from ...otel import QueueMetricsExporter, configure_metrics
-        except ImportError as e:
-            raise MissingExtraError("opentelemetry") from e
-        if not once:
-            self.install_signal_handlers()
-        metrics = configure_metrics(
-            export_interval=export_interval,
-            backend_alias=backend.alias,
-        )
-        exporter = QueueMetricsExporter(
-            backend=backend,
-            metrics=metrics,
-            interval=interval,
-            reconnect_delay=reconnect_delay,
-        )
-        try:
-            asyncio.run(exporter.sample_once() if once else exporter.run())
-        except KeyboardInterrupt as e:
-            self.stdout.write(self.style.WARNING(str(e)))
-        finally:
-            metrics.shutdown()
-
-
 class Command(BaseCommand):
-    """Dispatcher for the worker, inspector, and otel subcommands."""
+    """Dispatcher for the worker and inspector subcommands."""
 
-    help = "Run threadmill workers, inspect queues, or export OpenTelemetry metrics."
+    help = "Run threadmill workers or inspect queues."
 
     subcommands = {
         "worker": WorkerCommand,
         "inspector": InspectorCommand,
-        "otel": OpenTelemetryCommand,
     }
 
     def add_arguments(self, parser):
