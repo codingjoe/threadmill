@@ -131,6 +131,47 @@ uv add "threadmill[inspector]"
 uv run manage.py threadmill inspector
 ```
 
+### Autoscaling
+
+Threadmill exposes queue stats as JSON for KEDA's `metrics-api` scaler.
+KEDA is a CNCF autoscaler for Kubernetes.
+
+The `ready` value is the number of queued tasks that a worker can pick up now.
+
+Include the URL in your project:
+
+```python
+# urls.py
+from django.urls import include, path
+
+urlpatterns = [
+    path("threadmill/", include("threadmill.urls")),
+]
+```
+
+Create the ScaledObject with the public URL and both queues:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: threadmill-workers
+spec:
+  scaleTargetRef:
+    name: threadmill-workers
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "https://example.com/threadmill/queue-stats/?queue=emails&queue=reports"
+        valueLocation: "ready"
+        targetValue: "1000"
+```
+
+Use one endpoint per worker group.
+Set `backend` to use another backend alias. It defaults to `default`.
+
+Set `targetValue` to the ready backlog one replica can drain during your scale-up window.
+
 ### Redis Backend Options
 
 > [!IMPORTANT]
