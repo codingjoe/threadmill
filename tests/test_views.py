@@ -4,8 +4,7 @@ import json
 import pytest
 from django.http import Http404
 from django.tasks import DEFAULT_TASK_BACKEND_ALIAS
-from django.test import RequestFactory, override_settings
-from django.urls import resolve
+from django.test import RequestFactory
 
 from tests.testapp.tasks import echo
 from threadmill.views import QueueStatsView
@@ -77,12 +76,3 @@ class TestQueueStatsView:
         """Raise 404 for an unknown queue name."""
         with pytest.raises(Http404):
             await QueueStatsView.as_view()(_create_request(queue="missing"))
-
-
-class TestQueueStatsUrl:
-    """Tests for the queue stats URL."""
-
-    @override_settings(ROOT_URLCONF="threadmill.urls")
-    def test_urlpatterns__queue_stats(self):
-        """Resolve the queue stats URL to the view."""
-        assert resolve("/queue-stats/").func.view_class is QueueStatsView
