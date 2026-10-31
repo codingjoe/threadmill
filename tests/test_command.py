@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import CommandError, call_command
-from django.tasks import default_task_backend
+from django.tasks import default_task_backend, task_backends
 
 from tests.testapp.tasks import (
     compute_workload,
@@ -40,25 +40,25 @@ class TestCommand:
         threadmill.WorkerCommand().add_arguments(parser)
         parsed_arguments = parser.parse_args([])
 
-        assert parsed_arguments.backend == "default"
+        assert parsed_arguments.backend.alias == "default"
         assert parsed_arguments.queues == ["default"]
         assert parsed_arguments.threads == 1
         assert parsed_arguments.max_tasks == 0
         assert parsed_arguments.max_tasks_jitter == 0
-        assert parsed_arguments.poll_interval == 0.01
-        assert parsed_arguments.poll_max_interval == 1
+        assert parsed_arguments.poll_interval == datetime.timedelta(seconds=0.01)
+        assert parsed_arguments.poll_max_interval == datetime.timedelta(seconds=1)
         assert parsed_arguments.prefetch_count is None
         assert parsed_arguments.log_format is None
 
-    def test_add_arguments__parse_poll_intervals_as_floats(self):
-        """Parse poll options as floats."""
+    def test_add_arguments__parse_poll_intervals_as_timedeltas(self):
+        """Parse poll options as timedeltas."""
         parser = argparse.ArgumentParser()
         threadmill.WorkerCommand().add_arguments(parser)
         parsed_arguments = parser.parse_args(
             ["--poll-interval", "0.05", "--poll-max-interval", "0.2"]
         )
-        assert parsed_arguments.poll_interval == 0.05
-        assert parsed_arguments.poll_max_interval == 0.2
+        assert parsed_arguments.poll_interval == datetime.timedelta(seconds=0.05)
+        assert parsed_arguments.poll_max_interval == datetime.timedelta(seconds=0.2)
 
     def test_add_arguments__parse_prefetch_count(self):
         """Parse the prefetch count option as an int."""
@@ -153,8 +153,8 @@ class TestCommand:
                 "threadmill",
                 "worker",
                 verbosity=0,
-                poll_interval=0.05,
-                poll_max_interval=0.2,
+                poll_interval=datetime.timedelta(seconds=0.05),
+                poll_max_interval=datetime.timedelta(seconds=0.2),
             )
         executor = run.call_args.args[0]
         assert executor.poll_interval == datetime.timedelta(seconds=0.05)
@@ -294,19 +294,21 @@ class TestInspectorCommand:
         parser = argparse.ArgumentParser()
         threadmill.InspectorCommand().add_arguments(parser)
         args = parser.parse_args([])
-        assert args.backend == "default"
+        assert args.backend.alias == "default"
 
-    def test_handle__raises_command_error_for_invalid_backend(self):
-        """An unknown backend alias raises CommandError."""
+    def test_parse_backend__raises_argument_type_error_for_invalid_backend(self):
+        """An unknown backend alias raises ArgumentTypeError."""
         pytest.importorskip("textual.widgets")
-        with pytest.raises(CommandError, match="Invalid backend"):
-            threadmill.InspectorCommand().handle(backend="nonexistent")
+        with pytest.raises(argparse.ArgumentTypeError, match="Invalid backend"):
+            threadmill.InspectorCommand().parse_backend("nonexistent")
 
-    def test_handle__raises_command_error_for_unsupported_backend(self):
-        """A backend without ThreadmillTaskBackend support raises CommandError."""
+    def test_parse_backend__raises_argument_type_error_for_unsupported_backend(self):
+        """A backend without ThreadmillTaskBackend support raises ArgumentTypeError."""
         pytest.importorskip("textual.widgets")
-        with pytest.raises(CommandError, match="does not support inspection"):
-            threadmill.InspectorCommand().handle(backend="immediate")
+        with pytest.raises(
+            argparse.ArgumentTypeError, match="does not support inspection"
+        ):
+            threadmill.InspectorCommand().parse_backend("immediate")
 
     def test_handle__launches_inspector_app(self):
         """A supported backend launches the inspector app."""
@@ -314,7 +316,7 @@ class TestInspectorCommand:
         from threadmill.inspector.app import InspectorApp
 
         with patch.object(InspectorApp, "run"):
-            threadmill.InspectorCommand().handle(backend="default")
+            threadmill.InspectorCommand().handle(backend=task_backends["default"])
 
 
 class TestParentCommand:

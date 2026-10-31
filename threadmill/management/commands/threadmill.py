@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import logging
 import signal
@@ -12,6 +13,8 @@ from django.tasks import (
     task_backends,
 )
 
+from ...backends.base import ThreadmillTaskBackend
+from ...exceptions import MissingExtraError
 from ...executor import JsonFormatter, TaskExecutor
 
 
@@ -22,18 +25,51 @@ def kill_softly(signum, frame):
     raise KeyboardInterrupt(message)
 
 
-class WorkerCommand(DjangoBaseCommand):
-    """Run task workers to process enqueued tasks from the specified backends and queues."""
-
-    help = __doc__
+class ThreadmillCommand(DjangoBaseCommand):
+    feature = ""
 
     def add_arguments(self, parser):
         parser.add_argument(
             "-b",
             "--backend",
+            type=self.parse_backend,
             default=DEFAULT_TASK_BACKEND_ALIAS,
-            help="Alias of the tasks backend to use.",
+            help="Alias of the tasks backend.",
         )
+
+    def parse_backend(self, alias: str) -> ThreadmillTaskBackend:
+        try:
+            backend = task_backends[alias]
+        except InvalidTaskBackend as e:
+            message = f"Invalid backend: {alias!r}"
+            raise argparse.ArgumentTypeError(message) from e
+        if not isinstance(backend, ThreadmillTaskBackend):
+            message = f"Backend {backend.alias!r} does not support {self.feature}."
+            raise argparse.ArgumentTypeError(message)
+        return backend
+
+    @staticmethod
+    def parse_duration(value: str) -> datetime.timedelta:
+        return datetime.timedelta(seconds=float(value))
+
+    def install_signal_handlers(self) -> None:
+        match sys.platform:
+            case "win32":
+                signal.signal(signal.SIGBREAK, kill_softly)
+            case _:
+                signal.signal(signal.SIGHUP, kill_softly)
+        signal.signal(signal.SIGTERM, kill_softly)
+        signal.signal(signal.SIGINT, kill_softly)
+
+
+class WorkerCommand(ThreadmillCommand):
+    """Run task workers to process enqueued tasks from the specified backends and queues."""
+
+    feature = "task processing"
+    help = __doc__
+
+    def add_arguments(self, parser):
+        super().add_arguments(parser)
         parser.add_argument(
             "-q",
             "--queues",
@@ -80,14 +116,14 @@ class WorkerCommand(DjangoBaseCommand):
         )
         parser.add_argument(
             "--poll-interval",
-            type=float,
-            default=0.01,
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=0.01),
             help="Base wait between idle acquire attempts in seconds.",
         )
         parser.add_argument(
             "--poll-max-interval",
-            type=float,
-            default=1,
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=1),
             help="Maximum wait between idle acquire attempts in seconds.",
         )
         parser.add_argument(
@@ -120,19 +156,8 @@ class WorkerCommand(DjangoBaseCommand):
         log_format,
         **options,
     ):
-        match sys.platform:
-            case "win32":
-                signal.signal(signal.SIGBREAK, kill_softly)
-            case _:
-                signal.signal(signal.SIGHUP, kill_softly)
-        signal.signal(signal.SIGTERM, kill_softly)
-        signal.signal(signal.SIGINT, kill_softly)
+        self.install_signal_handlers()
         self.stdout.write(self.style.SUCCESS("Starting workers…"))
-        try:
-            backend = task_backends[backend]
-        except InvalidTaskBackend:
-            message = f"Invalid backend: {backend!r}"
-            raise CommandError(message)
         if _non_queues := set(queues) - set(backend.queues):
             message = f"Backend does not support all specified queues: {_non_queues!r}"
             raise CommandError(message)
@@ -158,8 +183,8 @@ class WorkerCommand(DjangoBaseCommand):
             max_tasks=max_tasks,
             max_tasks_jitter=max_tasks_jitter,
             prefetch_count=prefetch_count,
-            poll_interval=datetime.timedelta(seconds=poll_interval),
-            poll_max_interval=datetime.timedelta(seconds=poll_max_interval),
+            poll_interval=poll_interval,
+            poll_max_interval=poll_max_interval,
             exit_empty=exit_empty,
             queues=queues,
             log_formatter=log_formatter,
@@ -172,36 +197,17 @@ class WorkerCommand(DjangoBaseCommand):
             exe.shutdown()
 
 
-class InspectorCommand(DjangoBaseCommand):
+class InspectorCommand(ThreadmillCommand):
     """Launch the textual TUI inspector for task backends and queues."""
 
+    feature = "inspection"
     help = __doc__
-
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "-b",
-            "--backend",
-            default=DEFAULT_TASK_BACKEND_ALIAS,
-            help="Alias of the tasks backend to inspect.",
-        )
 
     def handle(self, *, backend, **options):
         try:
-            from ...backends.base import ThreadmillTaskBackend
             from ...inspector.app import InspectorApp
-        except ImportError:
-            message = "Optional dependency missing. Install: threadmill[inspector]"
-            raise CommandError(message)
-        try:
-            backend = task_backends[backend]
-        except InvalidTaskBackend as e:
-            message = f"Invalid backend: {backend!r}"
-            raise CommandError(message) from e
-
-        if not isinstance(backend, ThreadmillTaskBackend):
-            message = f"Backend {backend.alias!r} does not support inspection."
-            raise CommandError(message)
-
+        except ImportError as e:
+            raise MissingExtraError("inspector") from e
         InspectorApp(backend=backend).run()
 
 
@@ -223,4 +229,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         subcommand_name = options.pop("subcommand")
-        self.subcommands[subcommand_name]().execute(*args, **options)
+        try:
+            self.subcommands[subcommand_name]().execute(*args, **options)
+        except MissingExtraError as e:
+            raise CommandError(str(e)) from e
