@@ -1920,28 +1920,29 @@ class TestRedisTaskBackend:
 
     async def test_async_client__reconnect_closed_connection(self):
         """Retry the pipeline on a new connection where the killed client ID is gone."""
-        pipe = default_task_backend.async_client.pipeline(transaction=False)
-        pipe.client_kill_filter(
-            _id=await default_task_backend.async_client.client_id(), skipme=False
-        )
-        pipe.ping()
-        assert await pipe.execute() == [0, True]
+        async with default_task_backend.async_client() as client:
+            pipe = client.pipeline(transaction=False)
+            pipe.client_kill_filter(_id=await client.client_id(), skipme=False)
+            pipe.ping()
+            assert await pipe.execute() == [0, True]
 
-    def test_init__default_redis_connection_retries(self):
+    async def test_init__default_redis_connection_retries(self):
         """Retry commands three times on both clients without the option."""
         backend = _make_backend("default_connection_retries_test")
         try:
             assert backend.client.get_retry().get_retries() == 3
-            assert backend.async_client.get_retry().get_retries() == 3
+            async with backend.async_client() as client:
+                assert client.get_retry().get_retries() == 3
         finally:
             backend.close()
 
-    def test_init__apply_redis_connection_retries_option(self):
+    async def test_init__apply_redis_connection_retries_option(self):
         """Retry commands as often as the option configures on both clients."""
         backend = _make_backend("connection_retries_test", redis_connection_retries=5)
         try:
             assert backend.client.get_retry().get_retries() == 5
-            assert backend.async_client.get_retry().get_retries() == 5
+            async with backend.async_client() as client:
+                assert client.get_retry().get_retries() == 5
         finally:
             backend.close()
 

@@ -242,7 +242,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 redis.default_backoff(), self.redis_connection_retries
             ),
         )
-        self._async_client: redis.asyncio.Redis | None = None
         self.redis_url = redis_url
         self.key_prefix = f"threadmill:{{{alias}}}"
         self.telemetry_channel = self.TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
@@ -270,7 +269,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             self._idle_backoffs.backoff = backoff
         return backoff
 
-    def _create_async_client(self) -> redis.asyncio.Redis:
+    def async_client(self) -> redis.asyncio.Redis:
         return redis.asyncio.Redis.from_url(
             self.redis_url,
             decode_responses=True,
@@ -278,13 +277,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 redis.default_backoff(), self.redis_connection_retries
             ),
         )
-
-    @property
-    def async_client(self) -> redis.asyncio.Redis:
-        """Lazily-created async Redis client, reused across calls."""
-        if self._async_client is None:
-            self._async_client = self._create_async_client()
-        return self._async_client
 
     def _compute_score(self, priority: int, enqueued_at: datetime.datetime) -> float:
         """
@@ -626,7 +618,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     async def queue_stats(
         self, *, interval: datetime.timedelta = datetime.timedelta(seconds=60)
     ) -> BackendTelemetry:
-        async with self._create_async_client() as client:
+        async with self.async_client() as client:
             pipe = client.pipeline()
             for queue_name in self.queues:
                 pipe.zcard(self._segment_key(TaskResultStatus.READY, queue_name))
@@ -658,27 +650,26 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     async def worker_telemetry(
         self,
     ) -> collections.abc.AsyncGenerator[TelemetryEvent]:
-        client = self.async_client
-        pubsub = client.pubsub()
-        await pubsub.subscribe(self.telemetry_channel)
-        pubsub.ignore_subscribe_messages = True
-        try:
-            async for message in pubsub.listen():
-                if (data := message.get("data")) is not None:
-                    direction, _, queue_name = data.partition(":")
-                    try:
-                        event = TelemetryEvent(
-                            direction=TelemetryDirection(direction),
-                            queue_name=queue_name,
-                        )
-                    except ValueError:
-                        continue
-                    yield event
-        finally:
-            await pubsub.unsubscribe(self.telemetry_channel)
-            await pubsub.aclose()
+        async with self.async_client() as client:
+            pubsub = client.pubsub()
+            await pubsub.subscribe(self.telemetry_channel)
+            pubsub.ignore_subscribe_messages = True
+            try:
+                async for message in pubsub.listen():
+                    if (data := message.get("data")) is not None:
+                        direction, _, queue_name = data.partition(":")
+                        try:
+                            event = TelemetryEvent(
+                                direction=TelemetryDirection(direction),
+                                queue_name=queue_name,
+                            )
+                        except ValueError:
+                            continue
+                        yield event
+            finally:
+                await pubsub.unsubscribe(self.telemetry_channel)
+                await pubsub.aclose()
 
     def close(self) -> None:
         """Close the Redis connections."""
         self.client.close()
-        self._async_client = None
