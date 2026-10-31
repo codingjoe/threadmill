@@ -6,8 +6,6 @@ from django.tasks import (
 )
 from django.views import View
 
-from .backends.base import ThreadmillTaskBackend
-
 
 class QueueStatsView(View):
     async def get(self, request: HttpRequest) -> JsonResponse:
@@ -17,9 +15,10 @@ class QueueStatsView(View):
             ]
         except InvalidTaskBackend as exception:
             raise Http404 from exception
-        if not isinstance(backend, ThreadmillTaskBackend):
-            raise Http404
-        telemetry = await backend.queue_stats()
+        try:
+            telemetry = await backend.queue_stats()
+        except (AttributeError, NotImplementedError) as exception:
+            raise Http404 from exception
         try:
             return JsonResponse(
                 {
@@ -29,5 +28,5 @@ class QueueStatsView(View):
                     )
                 }
             )
-        except KeyError as exception:
+        except (AttributeError, KeyError) as exception:
             raise Http404 from exception
