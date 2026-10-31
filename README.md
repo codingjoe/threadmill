@@ -133,128 +133,32 @@ uv run manage.py threadmill inspector
 
 ### OpenTelemetry metrics
 
-Install the `opentelemetry` extra to export task, worker, and queue metrics over OTLP:
+Install the optional metrics extra:
 
 ```console
 uv add "threadmill[opentelemetry]"
 ```
 
-The extra ships the OTLP/HTTP exporter. For OTLP/gRPC, install
-`opentelemetry-exporter-otlp-proto-grpc` and set `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`.
-
-Workers export task and thread metrics once the extra is installed. Queue state
-comes from a dedicated process:
-
-```console
-uv run manage.py threadmill otel --backend default --interval 15
-```
-
-| Option            | Default   | Description                              |
-| ----------------- | --------- | ---------------------------------------- |
-| `-b`, `--backend` | `default` | Alias of the task backend to export.     |
-| `--interval`      | `15`      | Queue sampling interval in seconds.      |
-| `--once`          | off       | Sample the queue once, export, and exit. |
-
-The command requires a backend that implements `queue_stats()` and
-`worker_telemetry()`; `RedisTaskBackend` does. It records point-in-time counts
-for every queue segment, a derived backlog gauge, and ingress and egress
-counters from the backend pub/sub stream.
-
-Run `threadmill otel` in its own Deployment with one replica.
-Do not run it as a sidecar of the worker Deployment: a sidecar stops when the
-workers scale to zero and takes the autoscaling signal with it.
-
-Unless `--once` is set, the command also runs the backend broker. The broker
-promotes due deferred and retry tasks to the ready segment and reaps expired
-leases, so the backlog gauge still reflects work while every worker is scaled
-to zero. Give the otel Deployment write access to the queue keys in Redis. With
-a read-only ACL, deferred tasks stay unpromoted and the backlog gauge never
-rises.
-
-#### Configuration
-
-Configuration follows the OpenTelemetry specification:
-
-| Variable                              | Purpose                         |
-| ------------------------------------- | ------------------------------- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`         | Collector endpoint              |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Metrics-specific endpoint       |
-| `OTEL_EXPORTER_OTLP_PROTOCOL`         | `http/protobuf` or `grpc`       |
-| `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | Metrics-specific protocol       |
-| `OTEL_EXPORTER_OTLP_HEADERS`          | Authentication headers          |
-| `OTEL_METRICS_EXPORTER`               | `otlp`, `console`, or `none`    |
-| `OTEL_METRIC_EXPORT_INTERVAL`         | Export interval in milliseconds |
-| `OTEL_SERVICE_NAME`                   | Resource service name           |
-| `OTEL_RESOURCE_ATTRIBUTES`            | Extra resource attributes       |
-| `OTEL_SDK_DISABLED`                   | `true` disables all export      |
-
-Defaults:
-
-- The export interval is 15000 milliseconds when `OTEL_METRIC_EXPORT_INTERVAL` is unset or invalid.
-- The service name is `threadmill`.
-- The resource carries `process.pid` and `threadmill.backend.alias`.
-- `OTEL_METRICS_EXPORTER=none` and `OTEL_SDK_DISABLED=true` disable export.
-
-#### Metrics
-
-| Metric                           | Type      | Unit       | Attributes                                             | Purpose                                                |
-| -------------------------------- | --------- | ---------- | ------------------------------------------------------ | ------------------------------------------------------ |
-| `threadmill.task.started`        | Counter   | `{task}`   | `threadmill.queue.name`, `threadmill.task.module_path` | Task attempts started                                  |
-| `threadmill.task.finished`       | Counter   | `{task}`   | queue, task module path, `threadmill.task.status`      | Task attempts finished                                 |
-| `threadmill.task.duration`       | Histogram | `s`        | queue, task module path, status                        | Execution duration                                     |
-| `threadmill.worker.busy_threads` | Gauge     | `{thread}` | `threadmill.worker.thread_count`                       | Busy threads in one worker process                     |
-| `threadmill.queue.tasks`         | Gauge     | `{task}`   | queue, `threadmill.queue.segment`                      | Point-in-time segment counts                           |
-| `threadmill.queue.backlog`       | Gauge     | `{task}`   | queue                                                  | `ready + running`, the autoscaling signal              |
-| `threadmill.queue.ingress`       | Counter   | `{task}`   | queue                                                  | Enqueues observed through pub/sub                      |
-| `threadmill.queue.egress`        | Counter   | `{task}`   | queue                                                  | Acknowledgements and requeues observed through pub/sub |
-
-Queue segment values are `ready`, `running`, `deferred`, `successful`, and `failed`.
-Backlog includes running tasks, because prefetched tasks leave the ready set and
-stay leased in the running set. The histogram uses explicit bucket boundaries in
-seconds.
-
-The OpenTelemetry Collector's Prometheus exporter converts dots to underscores
-and appends `_total` to counters. The `{task}` unit adds no suffix. Use these
-names in Prometheus:
-
-- `threadmill_queue_tasks`
-- `threadmill_queue_backlog`
-- `threadmill_queue_ingress_total`
-- `threadmill_queue_egress_total`
-- `threadmill_task_started_total`
-- `threadmill_task_finished_total`
-- `threadmill_task_duration_seconds_bucket`
-- `threadmill_worker_busy_threads`
-
-#### Collector and KEDA
-
-Export to a Collector that exposes a Prometheus endpoint:
-
-```yaml
-receivers:
-  otlp:
-    protocols:
-      http:
-        endpoint: 0.0.0.0:4318
-
-exporters:
-  prometheus:
-    endpoint: 0.0.0.0:9464
-
-service:
-  pipelines:
-    metrics:
-      receivers: [otlp]
-      exporters: [prometheus]
-```
-
-Point the exporter at the Collector:
+Set the Collector endpoint. This is the address that receives the metrics.
 
 ```console
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.monitoring.svc:4318
 ```
 
-Scale the worker Deployment from queue backlog with a KEDA Prometheus trigger:
+The Collector receives OTLP metrics.
+Prometheus scrapes the Collector.
+KEDA queries Prometheus.
+
+Run the exporter in its own Deployment with one replica:
+
+```console
+uv run manage.py threadmill otel --backend default
+```
+
+The exporter records the queue backlog as `threadmill.queue.backlog`.
+Use this metric to scale the worker Deployment.
+
+For example, use a KEDA Prometheus trigger:
 
 ```yaml
 triggers:

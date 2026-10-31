@@ -1,7 +1,7 @@
+import argparse
 import asyncio
 import datetime
 import logging
-import math
 import signal
 import sys
 
@@ -15,13 +15,8 @@ from django.tasks import (
 )
 
 from ...backends.base import ThreadmillTaskBackend
+from ...exceptions import MissingExtraError
 from ...executor import JsonFormatter, TaskExecutor
-from ...metrics import (
-    configure_metrics,
-    is_metrics_export_enabled,
-    is_metrics_sdk_available,
-)
-from ...queue_metrics import DEFAULT_QUEUE_SAMPLE_INTERVAL_S, QueueMetricsExporter
 
 
 def kill_softly(signum, frame):
@@ -31,42 +26,51 @@ def kill_softly(signum, frame):
     raise KeyboardInterrupt(message)
 
 
-def require_threadmill_backend(alias: str, *, feature: str) -> ThreadmillTaskBackend:
-    """Return the configured threadmill backend or raise a command error."""
-    try:
-        backend = task_backends[alias]
-    except InvalidTaskBackend as e:
-        message = f"Invalid backend: {alias!r}"
-        raise CommandError(message) from e
-    if not isinstance(backend, ThreadmillTaskBackend):
-        message = f"Backend {backend.alias!r} does not support {feature}."
-        raise CommandError(message)
-    return backend
-
-
-def install_signal_handlers() -> None:
-    """Stop gracefully on the platform's shutdown signals."""
-    match sys.platform:
-        case "win32":
-            signal.signal(signal.SIGBREAK, kill_softly)
-        case _:
-            signal.signal(signal.SIGHUP, kill_softly)
-    signal.signal(signal.SIGTERM, kill_softly)
-    signal.signal(signal.SIGINT, kill_softly)
-
-
-class WorkerCommand(DjangoBaseCommand):
-    """Run task workers to process enqueued tasks from the specified backends and queues."""
-
-    help = __doc__
+class ThreadmillCommand(DjangoBaseCommand):
+    feature = ""
 
     def add_arguments(self, parser):
         parser.add_argument(
             "-b",
             "--backend",
+            type=self.parse_backend,
             default=DEFAULT_TASK_BACKEND_ALIAS,
-            help="Alias of the tasks backend to use.",
+            help="Alias of the tasks backend.",
         )
+
+    def parse_backend(self, alias: str) -> ThreadmillTaskBackend:
+        try:
+            backend = task_backends[alias]
+        except InvalidTaskBackend as e:
+            message = f"Invalid backend: {alias!r}"
+            raise argparse.ArgumentTypeError(message) from e
+        if not isinstance(backend, ThreadmillTaskBackend):
+            message = f"Backend {backend.alias!r} does not support {self.feature}."
+            raise argparse.ArgumentTypeError(message)
+        return backend
+
+    @staticmethod
+    def parse_duration(value: str) -> datetime.timedelta:
+        return datetime.timedelta(seconds=float(value))
+
+    def install_signal_handlers(self) -> None:
+        match sys.platform:
+            case "win32":
+                signal.signal(signal.SIGBREAK, kill_softly)
+            case _:
+                signal.signal(signal.SIGHUP, kill_softly)
+        signal.signal(signal.SIGTERM, kill_softly)
+        signal.signal(signal.SIGINT, kill_softly)
+
+
+class WorkerCommand(ThreadmillCommand):
+    """Run task workers to process enqueued tasks from the specified backends and queues."""
+
+    feature = "task processing"
+    help = __doc__
+
+    def add_arguments(self, parser):
+        super().add_arguments(parser)
         parser.add_argument(
             "-q",
             "--queues",
@@ -113,14 +117,14 @@ class WorkerCommand(DjangoBaseCommand):
         )
         parser.add_argument(
             "--poll-interval",
-            type=float,
-            default=0.01,
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=0.01),
             help="Base wait between idle acquire attempts in seconds.",
         )
         parser.add_argument(
             "--poll-max-interval",
-            type=float,
-            default=1,
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=1),
             help="Maximum wait between idle acquire attempts in seconds.",
         )
         parser.add_argument(
@@ -153,9 +157,8 @@ class WorkerCommand(DjangoBaseCommand):
         log_format,
         **options,
     ):
-        install_signal_handlers()
+        self.install_signal_handlers()
         self.stdout.write(self.style.SUCCESS("Starting workers…"))
-        backend = require_threadmill_backend(backend, feature="task processing")
         if _non_queues := set(queues) - set(backend.queues):
             message = f"Backend does not support all specified queues: {_non_queues!r}"
             raise CommandError(message)
@@ -181,8 +184,8 @@ class WorkerCommand(DjangoBaseCommand):
             max_tasks=max_tasks,
             max_tasks_jitter=max_tasks_jitter,
             prefetch_count=prefetch_count,
-            poll_interval=datetime.timedelta(seconds=poll_interval),
-            poll_max_interval=datetime.timedelta(seconds=poll_max_interval),
+            poll_interval=poll_interval,
+            poll_max_interval=poll_max_interval,
             exit_empty=exit_empty,
             queues=queues,
             log_formatter=log_formatter,
@@ -195,46 +198,45 @@ class WorkerCommand(DjangoBaseCommand):
             exe.shutdown()
 
 
-class InspectorCommand(DjangoBaseCommand):
+class InspectorCommand(ThreadmillCommand):
     """Launch the textual TUI inspector for task backends and queues."""
 
+    feature = "inspection"
     help = __doc__
-
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "-b",
-            "--backend",
-            default=DEFAULT_TASK_BACKEND_ALIAS,
-            help="Alias of the tasks backend to inspect.",
-        )
 
     def handle(self, *, backend, **options):
         try:
             from ...inspector.app import InspectorApp
-        except ImportError:
-            message = "Optional dependency missing. Install: threadmill[inspector]"
-            raise CommandError(message)
-        backend = require_threadmill_backend(backend, feature="inspection")
+        except ImportError as e:
+            raise MissingExtraError("inspector") from e
         InspectorApp(backend=backend).run()
 
 
-class OpenTelemetryCommand(DjangoBaseCommand):
+class OpenTelemetryCommand(ThreadmillCommand):
     """Export queue counts, backlog, ingress, and egress over OTLP or the console."""
 
+    feature = "queue telemetry"
     help = __doc__
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            "-b",
-            "--backend",
-            default=DEFAULT_TASK_BACKEND_ALIAS,
-            help="Alias of the tasks backend to export metrics for.",
-        )
+        super().add_arguments(parser)
         parser.add_argument(
             "--interval",
-            type=float,
-            default=DEFAULT_QUEUE_SAMPLE_INTERVAL_S,
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=15),
             help="Queue sampling interval in seconds.",
+        )
+        parser.add_argument(
+            "--export-interval",
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=15),
+            help="Metrics export interval in seconds.",
+        )
+        parser.add_argument(
+            "--reconnect-delay",
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=1),
+            help="Telemetry stream reconnect delay in seconds.",
         )
         parser.add_argument(
             "--once",
@@ -242,49 +244,38 @@ class OpenTelemetryCommand(DjangoBaseCommand):
             help="Sample the queue once, export, and exit.",
         )
 
-    def handle(self, *, backend, interval, once, **options):
-        backend = require_threadmill_backend(backend, feature="queue telemetry")
-        if not math.isfinite(interval) or interval <= 0:
-            message = f"Invalid interval: {interval!r}"
-            raise CommandError(message)
-        if not is_metrics_sdk_available():
-            message = (
-                "OpenTelemetry SDK is not installed. Install: threadmill[opentelemetry]"
-            )
-            raise CommandError(message)
-        if not is_metrics_export_enabled():
-            message = (
-                "Metrics export is disabled. Unset OTEL_SDK_DISABLED and set "
-                "OTEL_METRICS_EXPORTER to otlp or console."
-            )
-            raise CommandError(message)
-
+    def handle(
+        self,
+        *,
+        backend,
+        interval,
+        export_interval,
+        reconnect_delay,
+        once,
+        **options,
+    ):
         try:
-            QueueMetricsExporter.require_telemetry_support(backend)
-        except NotImplementedError as e:
-            raise CommandError(str(e)) from e
+            from ...otel import QueueMetricsExporter, configure_metrics
+        except ImportError as e:
+            raise MissingExtraError("opentelemetry") from e
         if not once:
-            install_signal_handlers()
-        metrics = configure_metrics(backend_alias=backend.alias)
-        exporter = QueueMetricsExporter(
-            backend=backend, metrics=metrics, interval=interval
+            self.install_signal_handlers()
+        metrics = configure_metrics(
+            export_interval=export_interval,
+            backend_alias=backend.alias,
         )
-        broker = None
+        exporter = QueueMetricsExporter(
+            backend=backend,
+            metrics=metrics,
+            interval=interval,
+            reconnect_delay=reconnect_delay,
+        )
         try:
-            if backend.broker_class is not None and not once:
-                broker = backend.broker_class(backend)
-                broker.start()
             asyncio.run(exporter.sample_once() if once else exporter.run())
         except KeyboardInterrupt as e:
             self.stdout.write(self.style.WARNING(str(e)))
         finally:
-            try:
-                if broker is not None:
-                    broker.shutdown()
-                    if broker.is_alive():
-                        broker.join()
-            finally:
-                metrics.shutdown()
+            metrics.shutdown()
 
 
 class Command(BaseCommand):
@@ -306,4 +297,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         subcommand_name = options.pop("subcommand")
-        self.subcommands[subcommand_name]().execute(*args, **options)
+        try:
+            self.subcommands[subcommand_name]().execute(*args, **options)
+        except MissingExtraError as e:
+            raise CommandError(str(e)) from e

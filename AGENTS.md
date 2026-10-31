@@ -21,7 +21,6 @@ uv run pytest benchmarks/test_scaling.py -m benchmark   # process vs thread scal
 uvx prek run --all-files
 uv run manage.py threadmill worker         # run the worker pool
 uv run manage.py threadmill inspector    # launch the textual TUI inspector
-uv run manage.py threadmill otel           # export queue metrics over OTLP (opentelemetry extra)
 ```
 
 CI additionally pins Django per matrix step: `uv run --with django~=6.1.0 pytest -m "not benchmark"`.
@@ -54,10 +53,9 @@ Codecov requires 100% patch coverage on PRs (`pyproject.toml`, `.codecov.yml`). 
 
 ## Architecture notes
 
-- Entry point for end users: `threadmill/management/commands/threadmill.py` (Django management command with `worker`, `inspector`, and `otel` subcommands).
+- Entry point for end users: `threadmill/management/commands/threadmill.py` (Django management command with `worker` and `inspector` subcommands).
 - Core runtime: `threadmill/executor.py` (`TaskExecutor`) — process/thread pool, graceful shutdown, worker recycling, task timeout/backlog.
 - Integration point for queue authors: `threadmill/backends.py` (`AcknowledgeableTaskBackend`) — subclasses implement `acquire` (lock-without-remove) and `acknowledge` (remove + publish). Requires late-ack support from the underlying queue.
-- Metrics: `threadmill/metrics.py` owns the OpenTelemetry provider and the `Metrics` recorder; `threadmill/queue_metrics.py` (`QueueMetricsExporter`) samples `queue_stats()` and consumes `worker_telemetry()`. The `otel` command runs in its own Deployment so queue metrics survive worker scale-to-zero.
 - Test app backend `tests/testapp/backends.py` (`GeneratingTaskBackend`) generates tasks in-process for benchmarks; reset between runs via `default_task_backend.reset()`.
 
 ## Pre-commit

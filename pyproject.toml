@@ -60,8 +60,6 @@ test = [
   "django-tasks-rq",
   "dramatiq[redis]>=2.2.1",
   "huey",
-  "opentelemetry-exporter-otlp-proto-http>=1.45",
-  "opentelemetry-sdk>=1.45",
   "pytest",
   "pytest-asyncio",
   "pytest-benchmark",

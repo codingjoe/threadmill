@@ -23,7 +23,6 @@ from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_finished
 from django.utils import timezone
 
-from tests.testapp.metrics import RecordingMetrics
 from tests.testapp.tasks import (
     boom,
     boom_no_retry,
@@ -123,16 +122,6 @@ def _prefetched_thread(
     prefetcher.completion.set_result(None)
     worker.prefetcher = prefetcher
     return WorkerThread(worker=worker, index=0, backend=backend)
-
-
-def _record_metrics(monkeypatch) -> RecordingMetrics:
-    """Replace the worker metrics factory with a recording recorder."""
-    recorder = RecordingMetrics()
-    monkeypatch.setattr(
-        "threadmill.executor.configure_metrics",
-        lambda *, backend_alias=None: recorder,
-    )
-    return recorder
 
 
 class StubPrefetchBackend:
@@ -823,59 +812,6 @@ class TestWorkerProcess:
         assert not run_thread.is_alive()
         assert handler.formatter is worker.log_formatter
 
-    def test_run__records_startup_gauge_and_shuts_down_metrics(self, monkeypatch):
-        """Report an idle pool on startup and flush the provider on exit."""
-        recorder = _record_metrics(monkeypatch)
-        monkeypatch.setattr(
-            "threadmill.executor.WorkerProcess.task_wait_timeout",
-            datetime.timedelta(seconds=0.01),
-        )
-        worker = _make_worker()
-        worker.shutdown_requested.set()
-
-        worker.run()
-
-        assert recorder.calls_named("busy_threads") == [
-            {"busy_threads": 0, "thread_count": 1}
-        ]
-        assert recorder.shutdown_called
-
-    def test_run__shuts_down_metrics_after_fetch_failure(self, monkeypatch):
-        """Flush the provider even when the prefetcher fails the process."""
-        recorder = _record_metrics(monkeypatch)
-        monkeypatch.setattr(
-            "threadmill.executor.WorkerProcess.task_wait_timeout",
-            datetime.timedelta(seconds=0.01),
-        )
-        worker = WorkerProcess(
-            thread_count=1,
-            backend_alias="stub",
-            queues=("default",),
-            log_formatter=JsonFormatter(),
-        )
-
-        with pytest.raises(SystemExit) as exit_info:
-            worker.run()
-
-        assert exit_info.value.code == 1
-        assert recorder.shutdown_called
-
-    def test_update_busy_threads__records_each_transition(self):
-        """Report the occupied slot count after every adjustment."""
-        worker = _make_worker()
-        worker.lock = threading.Lock()
-        recorder = RecordingMetrics()
-        worker.metrics = recorder
-
-        worker.update_busy_threads(1)
-        worker.update_busy_threads(-1)
-
-        assert worker.busy_threads == 0
-        assert recorder.calls_named("busy_threads") == [
-            {"busy_threads": 1, "thread_count": 1},
-            {"busy_threads": 0, "thread_count": 1},
-        ]
-
     def test_run__exits_when_prefetcher_fails(self, monkeypatch):
         """Exit with SystemExit(1) after the prefetcher recorded a fetch failure."""
         monkeypatch.setattr(
@@ -1007,73 +943,6 @@ class TestWorkerThread:
         task_result = dataclasses.replace(task_result, worker_ids=["pre-set-worker"])
         result = thread.execute_task_result(task_result)
         assert result.worker_ids == ["pre-set-worker"]
-
-    def test_init__reads_worker_metrics(self):
-        """Capture the worker's recorder when the thread is created."""
-        worker = _make_worker()
-        recorder = RecordingMetrics()
-        worker.metrics = recorder
-
-        thread = WorkerThread(worker=worker, index=0, backend=default_task_backend)
-
-        assert thread.metrics is recorder
-
-    def test_execute_task_result__records_successful_outcome(self):
-        """Report one started attempt and a successful finish with its duration."""
-        worker = _make_worker()
-        recorder = RecordingMetrics()
-        worker.metrics = recorder
-        thread = WorkerThread(worker=worker, index=0, backend=default_task_backend)
-        task_result = _task_result(echo, 42)
-
-        result = thread.execute_task_result(task_result)
-
-        module_path = task_result.task.module_path
-        assert recorder.calls_named("task_started") == [
-            {"queue_name": "default", "task_module_path": module_path}
-        ]
-        (finished,) = recorder.calls_named("task_finished")
-        assert finished["queue_name"] == "default"
-        assert finished["task_module_path"] == module_path
-        assert finished["status"] == "successful"
-        assert finished["duration_s"] >= 0
-        assert result.status is TaskResultStatus.SUCCESSFUL
-
-    def test_execute_task_result__records_failed_outcome(self):
-        """Report a failed finish with the lowered status."""
-        worker = _make_worker()
-        recorder = RecordingMetrics()
-        worker.metrics = recorder
-        thread = WorkerThread(worker=worker, index=0, backend=default_task_backend)
-
-        result = thread.execute_task_result(_task_result(boom))
-
-        (finished,) = recorder.calls_named("task_finished")
-        assert finished["status"] == "failed"
-        assert result.status is TaskResultStatus.FAILED
-
-    def test_run__records_busy_thread_transitions(self):
-        """Report an occupied slot before the task and an idle one after it."""
-        enqueued = default_task_backend.enqueue(echo, args=[1])
-        (acquired,) = default_task_backend.acquire(
-            timeout=datetime.timedelta(seconds=1), worker="test-worker"
-        )
-        thread = _prefetched_thread(acquired)
-        recorder = RecordingMetrics()
-        thread.metrics = recorder
-        thread.worker.metrics = recorder
-
-        thread.run()
-
-        assert recorder.calls_named("busy_threads") == [
-            {"busy_threads": 1, "thread_count": 1},
-            {"busy_threads": 0, "thread_count": 1},
-        ]
-        assert recorder.calls_named("task_started")
-        assert (
-            default_task_backend.get_result(enqueued.id).status
-            is TaskResultStatus.SUCCESSFUL
-        )
 
     def test_execute_task_result__logs_info_records(self, caplog):
         """Log task start and finish records via Django's task signals."""
