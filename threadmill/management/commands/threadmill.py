@@ -42,7 +42,7 @@ class ThreadmillCommand(DjangoBaseCommand):
             message = f"Invalid backend: {alias!r}"
             raise argparse.ArgumentTypeError(message) from e
         if not isinstance(backend, ThreadmillTaskBackend):
-            message = f"Backend {backend.alias!r} does not support this command."
+            message = f"Backend {backend.alias!r} is not a threadmill backend."
             raise argparse.ArgumentTypeError(message)
         return backend
 
