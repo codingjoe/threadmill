@@ -1,3 +1,4 @@
+import dataclasses
 import time
 import uuid
 from unittest import mock
@@ -36,6 +37,18 @@ def _task_result(task, *args) -> TaskResult:
     )
 
 
+def _finished_task_result(task, *args) -> TaskResult:
+    """Build a SUCCESSFUL `TaskResult` with attempt timestamps."""
+    started_at = timezone.now()
+    return dataclasses.replace(
+        _task_result(task, *args),
+        status=TaskResultStatus.SUCCESSFUL,
+        started_at=started_at,
+        last_attempted_at=started_at,
+        finished_at=timezone.now(),
+    )
+
+
 @pytest.fixture
 def stale_connection():
     """Open a database connection and mark it as expired."""
@@ -63,7 +76,7 @@ class TestCloseTaskDatabaseConnection:
         with mock.patch.object(
             stale_connection, "close", wraps=stale_connection.close
         ) as spy:
-            task_finished.send(TaskExecutor, task_result=_task_result(echo))
+            task_finished.send(TaskExecutor, task_result=_finished_task_result(echo))
 
         spy.assert_called_once()
 

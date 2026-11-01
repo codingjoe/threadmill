@@ -26,6 +26,11 @@ from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
 
+try:
+    from sentry_sdk import metrics as sentry_metrics
+except ImportError:
+    sentry_metrics = None
+
 if typing.TYPE_CHECKING:
     from .backends.base import Broker, ThreadmillTaskBackend, ThreadmillTaskResult
 
@@ -128,6 +133,7 @@ class TaskExecutor:
     prefetch_count: int | None = None
     poll_interval: datetime.timedelta = datetime.timedelta(seconds=0.01)
     poll_max_interval: datetime.timedelta = datetime.timedelta(seconds=1)
+    sample_interval: datetime.timedelta = datetime.timedelta(seconds=10)
     shutdown_requested: threading.Event = dataclasses.field(
         default_factory=threading.Event, init=False
     )
@@ -184,6 +190,12 @@ class TaskExecutor:
             target=self.maintain_worker_pool, daemon=True
         )
         threads = [self.pool_maintainer]
+        if sentry_metrics is not None:
+            threads.append(
+                threading.Thread(
+                    target=self.report_metrics, name="threadmill-metrics", daemon=True
+                )
+            )
         if self.backend.broker_class:
             self.broker = self.backend.broker_class(self.backend)
             threads.append(self.broker)
@@ -231,6 +243,33 @@ class TaskExecutor:
                 self.shutdown()
                 return
             self.shutdown_requested.wait(1)
+
+    def report_metrics(self) -> None:
+        """Sample queue depth and worker counts into Sentry until shutdown."""
+        while not self.shutdown_requested.is_set():
+            sentry_metrics.gauge(
+                "threadmill.worker.count",
+                self.process_count,
+                attributes={"pool": "process"},
+            )
+            sentry_metrics.gauge(
+                "threadmill.worker.count",
+                self.process_count * self.thread_count,
+                attributes={"pool": "thread"},
+            )
+            telemetry = asyncio.run(self.backend.queue_stats())
+            for queue_name, stats in telemetry.queues.items():
+                for status, depth in (
+                    ("ready", stats.counts.ready),
+                    ("running", stats.counts.running),
+                    ("deferred", stats.counts.deferred),
+                ):
+                    sentry_metrics.gauge(
+                        "threadmill.queue.depth",
+                        depth,
+                        attributes={"queue": queue_name, "status": status},
+                    )
+            self.shutdown_requested.wait(self.sample_interval.total_seconds())
 
 
 class WorkerProcess(multiprocessing.Process):
