@@ -131,6 +131,26 @@ uv add "threadmill[inspector]"
 uv run manage.py threadmill inspector
 ```
 
+### Sentry Metrics
+
+Threadmill emits [Sentry application metrics][sentry-metrics] when `sentry-sdk`
+is installed. Install the extra:
+
+```console
+uv add "threadmill[sentry]"
+```
+
+| Metric                     | Type         | Attributes                                        | Meaning                                                  |
+| -------------------------- | ------------ | ------------------------------------------------- | -------------------------------------------------------- |
+| `threadmill.queue.depth`   | gauge        | `queue`, `status` (ready, running, deferred)      | Tasks in a queue with status ready, running, or deferred |
+| `threadmill.queue.ingress` | counter      | `queue`                                           | Tasks that enter a queue                                 |
+| `threadmill.queue.egress`  | counter      | `queue`                                           | Tasks that finish an attempt                             |
+| `threadmill.worker.count`  | gauge        | `pool` (process, thread)                          | Worker processes and threads in the pool                 |
+| `threadmill.task.duration` | distribution | `task`, `outcome` (successful, failed), `attempt` | Duration of one task attempt in milliseconds             |
+
+A task duration is recorded in the worker that runs the attempt.
+The SDK drops all metrics when it is not initialized.
+
 ### Autoscaling
 
 Threadmill exposes queue stats as JSON for KEDA's `metrics-api` scaler.
@@ -280,3 +300,4 @@ def fetch_github_api(url: str): ...
 [![Sponsors](https://django.the-box.sh/sponsors/codingjoe/threadmill.svg)](https://github.com/sponsors/codingjoe)
 
 [django-tasks]: https://docs.djangoproject.com/en/stable/topics/tasks/
+[sentry-metrics]: https://docs.sentry.io/platforms/python/metrics/

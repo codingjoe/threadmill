@@ -538,6 +538,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe.publish(self.telemetry_channel, f"ingress:{task_result.task.queue_name}")
         pipe.execute()
 
+        task_enqueued.send(self.__class__, task_result=task_result)
+
     def dequeue(self, task_result: TaskResult) -> None:
         self.client.zrem(
             self._segment_key(task_result.status, task_result.task.queue_name),

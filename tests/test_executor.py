@@ -33,8 +33,13 @@ from tests.testapp.tasks import (
     log_message,
     record_execution,
 )
+from threadmill import executor as executor_module
 from threadmill.backends.base import (
+    BackendTelemetry,
     Broker,
+    QueueCounts,
+    QueueRates,
+    QueueStats,
     ThreadmillTaskBackend,
     ThreadmillTaskResult,
 )
@@ -395,6 +400,46 @@ def _wait_for_result(task_id: str) -> TaskResult:
             time.sleep(0.01)
 
 
+class StubQueueStatsBackend:
+    """Backend stub returning a fixed queue telemetry snapshot."""
+
+    def __init__(self, telemetry: BackendTelemetry) -> None:
+        self.telemetry = telemetry
+
+    async def queue_stats(self) -> BackendTelemetry:
+        """Return the configured telemetry snapshot."""
+        return self.telemetry
+
+
+class StubSentryMetrics:
+    """Record Sentry gauges without an initialized SDK."""
+
+    def __init__(self) -> None:
+        self.gauges: list[tuple] = []
+
+    def gauge(self, name, value, *, attributes=None) -> None:
+        """Record one gauge value."""
+        self.gauges.append((name, value, attributes))
+
+
+class StubShutdownEvent:
+    """Report a shutdown request after the first loop iteration."""
+
+    def __init__(self) -> None:
+        self.checks = 0
+        self.timeouts: list[float] = []
+
+    def is_set(self) -> bool:
+        """Return False once, then True."""
+        self.checks += 1
+        return self.checks > 1
+
+    def wait(self, timeout: float) -> bool:
+        """Record the sample interval."""
+        self.timeouts.append(timeout)
+        return False
+
+
 class TestTaskExecutor:
     """Tests for the TaskExecutor dataclass and its methods."""
 
@@ -733,6 +778,47 @@ class TestTaskExecutor:
         assert executor.worker_processes[0] is not worker
         assert executor.worker_processes[0].is_alive()
         executor.worker_processes[0].shutdown()
+
+    def test_report_metrics__samples_pool_and_queue_counts(self, monkeypatch):
+        """Emit pool and per-queue counts once per sample interval."""
+        backend = StubQueueStatsBackend(
+            BackendTelemetry(
+                queues={
+                    "default": QueueStats(
+                        counts=QueueCounts(
+                            ready=5, running=2, deferred=1, successful=0, failed=0
+                        ),
+                        rates=QueueRates(
+                            interval=datetime.timedelta(seconds=60),
+                            ingress=0,
+                            egress=0,
+                        ),
+                    )
+                }
+            )
+        )
+        executor = TaskExecutor(
+            backend=backend,
+            workers=2,
+            threads=3,
+            queues=("default",),
+            sample_interval=datetime.timedelta(seconds=7),
+        )
+        sentry_metrics = StubSentryMetrics()
+        shutdown_requested = StubShutdownEvent()
+        monkeypatch.setattr(executor_module, "sentry_metrics", sentry_metrics)
+        executor.shutdown_requested = shutdown_requested
+
+        executor.report_metrics()
+
+        assert sentry_metrics.gauges == [
+            ("threadmill.worker.count", 2, {"pool": "process"}),
+            ("threadmill.worker.count", 6, {"pool": "thread"}),
+            ("threadmill.queue.depth", 5, {"queue": "default", "status": "ready"}),
+            ("threadmill.queue.depth", 2, {"queue": "default", "status": "running"}),
+            ("threadmill.queue.depth", 1, {"queue": "default", "status": "deferred"}),
+        ]
+        assert shutdown_requested.timeouts == [7.0]
 
 
 class TestWorkerProcess:

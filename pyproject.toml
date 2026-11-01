@@ -37,6 +37,7 @@ optional-dependencies.inspector = [
   "textual>=8.2.7",
 ]
 optional-dependencies.redis = [ "redis>=5" ]
+optional-dependencies.sentry = [ "sentry-sdk>=2.44" ]
 urls.Changelog = "https://github.com/codingjoe/threadmill/releases"
 urls.Documentation = "https://github.com/codingjoe/threadmill/"
 urls.Funding = "https://github.com/sponsors/codingjoe"
@@ -62,6 +63,7 @@ test = [
   "pytest-cov",
   "pytest-django",
   "redis>=5",
+  "sentry-sdk>=2.44",
 ]
 
 [tool.setuptools_scm]

@@ -109,6 +109,15 @@ class WorkerCommand(ThreadmillCommand):
             help="Maximum wait between idle acquire attempts in seconds.",
         )
         parser.add_argument(
+            "--sample-interval",
+            type=self.parse_duration,
+            default=datetime.timedelta(seconds=30),
+            help=(
+                "Interval between queue depth and worker count samples in seconds."
+                " Defaults to 30."
+            ),
+        )
+        parser.add_argument(
             "--exit-empty",
             action="store_true",
             help="Drain the task queue and exit with 0.",
@@ -134,6 +143,7 @@ class WorkerCommand(ThreadmillCommand):
         prefetch_count,
         poll_interval,
         poll_max_interval,
+        sample_interval,
         exit_empty,
         log_format,
         **options,
@@ -168,6 +178,7 @@ class WorkerCommand(ThreadmillCommand):
             prefetch_count=prefetch_count,
             poll_interval=poll_interval,
             poll_max_interval=poll_max_interval,
+            sample_interval=sample_interval,
             exit_empty=exit_empty,
             queues=queues,
             log_formatter=log_formatter,
