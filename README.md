@@ -145,9 +145,10 @@ uv add "threadmill[sentry]"
 | `threadmill.queue.depth`   | gauge        | `queue`, `status` (ready, running, deferred)      | Tasks in a queue with status ready, running, or deferred |
 | `threadmill.queue.ingress` | counter      | `queue`                                           | Tasks that enter a queue                                 |
 | `threadmill.queue.egress`  | counter      | `queue`                                           | Tasks that finish an attempt                             |
-| `threadmill.worker.count`  | gauge        | `pool` (process, thread)                          | Worker processes and threads in the pool                 |
+| `threadmill.worker.count`  | gauge        | `pool` (process, thread)                          | Live worker processes and threads in the pool            |
 | `threadmill.task.duration` | distribution | `task`, `outcome` (successful, failed), `attempt` | Duration of one task attempt in milliseconds             |
 
+Worker counts update when the pool starts, replaces a process, or shuts down.
 A task duration is recorded in the worker that runs the attempt.
 The SDK drops all metrics when it is not initialized.
 

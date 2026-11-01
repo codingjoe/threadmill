@@ -113,7 +113,7 @@ class WorkerCommand(ThreadmillCommand):
             type=self.parse_duration,
             default=datetime.timedelta(seconds=30),
             help=(
-                "Interval between queue depth and worker count samples in seconds."
+                "Interval between queue depth samples in seconds."
                 " Defaults to 30. Set to 0 to disable sampling."
             ),
         )

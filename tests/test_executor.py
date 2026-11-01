@@ -422,6 +422,17 @@ class StubSentryMetrics:
         self.gauges.append((name, value, attributes))
 
 
+class StubWorker:
+    """Worker process double that reports liveness."""
+
+    def __init__(self, *, alive: bool) -> None:
+        self.alive = alive
+
+    def is_alive(self) -> bool:
+        """Return the configured liveness."""
+        return self.alive
+
+
 class StubShutdownEvent:
     """Report a shutdown request after the first loop iteration."""
 
@@ -779,8 +790,8 @@ class TestTaskExecutor:
         assert executor.worker_processes[0].is_alive()
         executor.worker_processes[0].shutdown()
 
-    def test_report_metrics__samples_pool_and_queue_counts(self, monkeypatch):
-        """Emit pool and per-queue counts once per sample interval."""
+    def test_report_queue_depth__reports_counts(self, monkeypatch):
+        """Emit per-queue counts once per sample interval."""
         backend = StubQueueStatsBackend(
             BackendTelemetry(
                 queues={
@@ -809,18 +820,16 @@ class TestTaskExecutor:
         monkeypatch.setattr(executor_module, "sentry_metrics", sentry_metrics)
         executor.shutdown_requested = shutdown_requested
 
-        executor.report_metrics()
+        executor.report_queue_depth()
 
         assert sentry_metrics.gauges == [
-            ("threadmill.worker.count", 2, {"pool": "process"}),
-            ("threadmill.worker.count", 6, {"pool": "thread"}),
             ("threadmill.queue.depth", 5, {"queue": "default", "status": "ready"}),
             ("threadmill.queue.depth", 2, {"queue": "default", "status": "running"}),
             ("threadmill.queue.depth", 1, {"queue": "default", "status": "deferred"}),
         ]
         assert shutdown_requested.timeouts == [7.0]
 
-    def test_report_metrics__zero_interval_disables_sampling(self, monkeypatch):
+    def test_report_queue_depth__zero_interval_disables_sampling(self, monkeypatch):
         """Skip sampling when the interval is zero."""
         executor = TaskExecutor(
             backend=StubQueueStatsBackend(BackendTelemetry(queues={})),
@@ -830,9 +839,32 @@ class TestTaskExecutor:
         sentry_metrics = StubSentryMetrics()
         monkeypatch.setattr(executor_module, "sentry_metrics", sentry_metrics)
 
-        executor.report_metrics()
+        executor.report_queue_depth()
 
         assert sentry_metrics.gauges == []
+
+    def test_report_worker_counts__reports_live_processes(self, monkeypatch):
+        """Report only live worker processes and their threads."""
+        executor = TaskExecutor(
+            backend=StubQueueStatsBackend(BackendTelemetry(queues={})),
+            workers=3,
+            threads=2,
+            queues=("default",),
+        )
+        sentry_metrics = StubSentryMetrics()
+        monkeypatch.setattr(executor_module, "sentry_metrics", sentry_metrics)
+        executor.worker_processes = [
+            StubWorker(alive=True),
+            StubWorker(alive=False),
+            StubWorker(alive=True),
+        ]
+
+        executor.report_worker_counts()
+
+        assert sentry_metrics.gauges == [
+            ("threadmill.worker.count", 2, {"pool": "process"}),
+            ("threadmill.worker.count", 4, {"pool": "thread"}),
+        ]
 
     def test_shutdown__reports_zero_worker_counts(self, monkeypatch):
         """Report zero workers when the pool shuts down."""
