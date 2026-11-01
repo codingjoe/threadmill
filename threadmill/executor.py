@@ -246,30 +246,31 @@ class TaskExecutor:
 
     def report_metrics(self) -> None:
         """Sample queue depth and worker counts into Sentry until shutdown."""
-        while not self.shutdown_requested.is_set():
-            sentry_metrics.gauge(
-                "threadmill.worker.count",
-                self.process_count,
-                attributes={"pool": "process"},
-            )
-            sentry_metrics.gauge(
-                "threadmill.worker.count",
-                self.process_count * self.thread_count,
-                attributes={"pool": "thread"},
-            )
-            telemetry = asyncio.run(self.backend.queue_stats())
-            for queue_name, stats in telemetry.queues.items():
-                for status, depth in (
-                    ("ready", stats.counts.ready),
-                    ("running", stats.counts.running),
-                    ("deferred", stats.counts.deferred),
-                ):
-                    sentry_metrics.gauge(
-                        "threadmill.queue.depth",
-                        depth,
-                        attributes={"queue": queue_name, "status": status},
-                    )
-            self.shutdown_requested.wait(self.sample_interval.total_seconds())
+        if self.sample_interval > datetime.timedelta(0):
+            while not self.shutdown_requested.is_set():
+                sentry_metrics.gauge(
+                    "threadmill.worker.count",
+                    self.process_count,
+                    attributes={"pool": "process"},
+                )
+                sentry_metrics.gauge(
+                    "threadmill.worker.count",
+                    self.process_count * self.thread_count,
+                    attributes={"pool": "thread"},
+                )
+                telemetry = asyncio.run(self.backend.queue_stats())
+                for queue_name, stats in telemetry.queues.items():
+                    for status, depth in (
+                        ("ready", stats.counts.ready),
+                        ("running", stats.counts.running),
+                        ("deferred", stats.counts.deferred),
+                    ):
+                        sentry_metrics.gauge(
+                            "threadmill.queue.depth",
+                            depth,
+                            attributes={"queue": queue_name, "status": status},
+                        )
+                self.shutdown_requested.wait(self.sample_interval.total_seconds())
 
 
 class WorkerProcess(multiprocessing.Process):
