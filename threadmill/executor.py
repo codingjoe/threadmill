@@ -140,7 +140,7 @@ class TaskExecutor:
     prefetch_count: int | None = None
     poll_interval: datetime.timedelta = datetime.timedelta(seconds=0.01)
     poll_max_interval: datetime.timedelta = datetime.timedelta(seconds=1)
-    sample_interval: datetime.timedelta = datetime.timedelta(seconds=10)
+    sample_interval: datetime.timedelta = datetime.timedelta(seconds=30)
     shutdown_requested: threading.Event = dataclasses.field(
         default_factory=threading.Event, init=False
     )

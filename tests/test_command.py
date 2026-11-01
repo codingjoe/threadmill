@@ -47,7 +47,7 @@ class TestCommand:
         assert parsed_arguments.max_tasks_jitter == 0
         assert parsed_arguments.poll_interval == datetime.timedelta(seconds=0.01)
         assert parsed_arguments.poll_max_interval == datetime.timedelta(seconds=1)
-        assert parsed_arguments.sample_interval == datetime.timedelta(seconds=10)
+        assert parsed_arguments.sample_interval == datetime.timedelta(seconds=30)
         assert parsed_arguments.prefetch_count is None
         assert parsed_arguments.log_format is None
 

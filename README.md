@@ -148,13 +148,6 @@ uv add "threadmill[sentry]"
 | `threadmill.worker.count`  | gauge        | `pool` (process, thread)                          | Worker processes and threads in the pool                 |
 | `threadmill.task.duration` | distribution | `task`, `outcome` (successful, failed), `attempt` | Duration of one task attempt in milliseconds             |
 
-The worker pool samples queue depth and worker counts every 10 seconds by
-default. Set `--sample-interval` to change the interval:
-
-```console
-uv run manage.py threadmill worker --sample-interval 5
-```
-
 A task duration is recorded in the worker that runs the attempt.
 The SDK drops all metrics when it is not initialized.
 
