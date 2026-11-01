@@ -2,13 +2,10 @@ from django.db import close_old_connections
 from django.dispatch import receiver
 from django.tasks.signals import task_enqueued, task_finished, task_started
 
-try:
-    from sentry_sdk import metrics as sentry_metrics
-except ImportError:
-    sentry_metrics = None
-
 from .backends.base import ThreadmillTaskBackend
-from .executor import TaskExecutor
+from .executor import TaskExecutor, _import_sentry_metrics
+
+sentry_metrics = _import_sentry_metrics()
 
 
 @receiver([task_started, task_finished], sender=TaskExecutor)
@@ -29,7 +26,7 @@ def record_task_enqueued(sender, task_result, **kwargs):
 
 @receiver(task_finished, sender=TaskExecutor)
 def record_task_finished(sender, task_result, **kwargs):
-    """Record one finished task attempt and its duration."""
+    """Emit one egress count and one duration observation per attempt."""
     if sentry_metrics is not None:
         sentry_metrics.count(
             "threadmill.queue.egress",

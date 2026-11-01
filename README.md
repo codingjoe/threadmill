@@ -140,16 +140,21 @@ is installed. Install the extra:
 uv add "threadmill[sentry]"
 ```
 
-| Metric                     | Type         | Attributes                   | Meaning                                                  |
-| -------------------------- | ------------ | ---------------------------- | -------------------------------------------------------- |
-| `threadmill.queue.depth`   | gauge        | `queue`, `status`            | Tasks in a queue with status ready, running, or deferred |
-| `threadmill.queue.ingress` | counter      | `queue`                      | Tasks that enter a queue                                 |
-| `threadmill.queue.egress`  | counter      | `queue`                      | Tasks that finish an attempt                             |
-| `threadmill.worker.count`  | gauge        | `pool`                       | Worker processes and threads in the pool                 |
-| `threadmill.task.duration` | distribution | `task`, `outcome`, `attempt` | Duration of one task attempt in milliseconds             |
+| Metric                     | Type         | Attributes                                        | Meaning                                                  |
+| -------------------------- | ------------ | ------------------------------------------------- | -------------------------------------------------------- |
+| `threadmill.queue.depth`   | gauge        | `queue`, `status` (ready, running, deferred)      | Tasks in a queue with status ready, running, or deferred |
+| `threadmill.queue.ingress` | counter      | `queue`                                           | Tasks that enter a queue                                 |
+| `threadmill.queue.egress`  | counter      | `queue`                                           | Tasks that finish an attempt                             |
+| `threadmill.worker.count`  | gauge        | `pool` (process, thread)                          | Worker processes and threads in the pool                 |
+| `threadmill.task.duration` | distribution | `task`, `outcome` (successful, failed), `attempt` | Duration of one task attempt in milliseconds             |
 
 The worker pool samples queue depth and worker counts every 10 seconds by
-default. Set `--sample-interval` to change the interval.
+default. Set `--sample-interval` to change the interval:
+
+```console
+uv run manage.py threadmill worker --sample-interval 5
+```
+
 A task duration is recorded in the worker that runs the attempt.
 The SDK drops all metrics when it is not initialized.
 

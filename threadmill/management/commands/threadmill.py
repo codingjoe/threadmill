@@ -112,7 +112,7 @@ class WorkerCommand(ThreadmillCommand):
             "--sample-interval",
             type=self.parse_duration,
             default=datetime.timedelta(seconds=10),
-            help="Interval between queue depth samples in seconds.",
+            help="Interval between queue depth and worker count samples in seconds.",
         )
         parser.add_argument(
             "--exit-empty",

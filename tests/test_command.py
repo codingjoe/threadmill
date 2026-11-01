@@ -47,6 +47,7 @@ class TestCommand:
         assert parsed_arguments.max_tasks_jitter == 0
         assert parsed_arguments.poll_interval == datetime.timedelta(seconds=0.01)
         assert parsed_arguments.poll_max_interval == datetime.timedelta(seconds=1)
+        assert parsed_arguments.sample_interval == datetime.timedelta(seconds=10)
         assert parsed_arguments.prefetch_count is None
         assert parsed_arguments.log_format is None
 
@@ -136,6 +137,14 @@ class TestCommand:
             )
         assert run.call_args.args[0].prefetch_count == 7
 
+    def test_add_arguments__parse_sample_interval_as_timedelta(self):
+        """Parse the queue sampling interval as a timedelta."""
+        parser = argparse.ArgumentParser()
+        threadmill.WorkerCommand().add_arguments(parser)
+        parsed_arguments = parser.parse_args(["--sample-interval", "0.5"])
+
+        assert parsed_arguments.sample_interval == datetime.timedelta(seconds=0.5)
+
     def test_call_command__prefetch_count__raise_command_error(self):
         """Reject a negative prefetch count with a CommandError."""
         with pytest.raises(CommandError, match=re.escape("Invalid prefetch count: -1")):
@@ -167,6 +176,18 @@ class TestCommand:
         executor = run.call_args.args[0]
         assert executor.poll_interval == datetime.timedelta(seconds=0.01)
         assert executor.poll_max_interval == datetime.timedelta(seconds=1)
+
+    def test_call_command__sample_interval(self):
+        """Pass the queue sampling interval to the task executor."""
+        with patch.object(threadmill.TaskExecutor, "run", autospec=True) as run:
+            call_command(
+                "threadmill",
+                "worker",
+                verbosity=0,
+                sample_interval=datetime.timedelta(seconds=5),
+            )
+
+        assert run.call_args.args[0].sample_interval == datetime.timedelta(seconds=5)
 
     @pytest.mark.benchmark
     def test_call_command__benchmark_compute(

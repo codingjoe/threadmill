@@ -17,6 +17,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from inspect import iscoroutinefunction
 from queue import Empty, Full
 from traceback import format_exception
+from types import ModuleType
 
 import django
 from django.core.serializers.json import DjangoJSONEncoder
@@ -26,10 +27,16 @@ from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
 
-try:
-    from sentry_sdk import metrics as sentry_metrics
-except ImportError:
-    sentry_metrics = None
+
+def _import_sentry_metrics() -> ModuleType | None:
+    try:
+        from sentry_sdk import metrics
+    except ImportError:
+        return None
+    return metrics
+
+
+sentry_metrics = _import_sentry_metrics()
 
 if typing.TYPE_CHECKING:
     from .backends.base import Broker, ThreadmillTaskBackend, ThreadmillTaskResult
