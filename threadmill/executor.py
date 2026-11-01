@@ -189,11 +189,14 @@ class TaskExecutor:
         self.pool_maintainer = threading.Thread(
             target=self.maintain_worker_pool, daemon=True
         )
+        self.report_worker_counts()
         threads = [self.pool_maintainer]
         if sentry_metrics is not None:
             threads.append(
                 threading.Thread(
-                    target=self.report_metrics, name="threadmill-metrics", daemon=True
+                    target=self.report_queue_depth,
+                    name="threadmill-queue-depth",
+                    daemon=True,
                 )
             )
         if self.backend.broker_class:
@@ -220,11 +223,14 @@ class TaskExecutor:
             self.broker.shutdown()
         with ThreadPoolExecutor(max_workers=self.process_count) as executor:
             executor.map(lambda worker: worker.shutdown(), self.worker_processes)
+        if self.pool_maintainer is not None:
+            self.report_worker_counts()
 
     def maintain_worker_pool(self) -> None:
         """Restart worker processes that have exited, until shutdown is requested."""
         while not self.shutdown_requested.is_set():
             all_dead = True
+            replaced = False
             for index, worker in enumerate(self.worker_processes):
                 if worker.is_alive():
                     all_dead = False
@@ -239,25 +245,33 @@ class TaskExecutor:
                     logger.warning(
                         "Unable to start worker-%d. Retrying ...", index, exc_info=error
                     )
+                replaced = True
+            if replaced:
+                self.report_worker_counts()
             if all_dead and self.exit_empty:
                 self.shutdown()
                 return
             self.shutdown_requested.wait(1)
 
-    def report_metrics(self) -> None:
-        """Sample queue depth and worker counts into Sentry until shutdown."""
+    def report_worker_counts(self) -> None:
+        """Record the live worker process and thread counts."""
+        if sentry_metrics is not None:
+            process_count = sum(worker.is_alive() for worker in self.worker_processes)
+            sentry_metrics.gauge(
+                "threadmill.worker.count",
+                process_count,
+                attributes={"pool": "process"},
+            )
+            sentry_metrics.gauge(
+                "threadmill.worker.count",
+                process_count * self.thread_count,
+                attributes={"pool": "thread"},
+            )
+
+    def report_queue_depth(self) -> None:
+        """Sample queue depth into Sentry until shutdown."""
         if self.sample_interval > datetime.timedelta(0):
             while not self.shutdown_requested.is_set():
-                sentry_metrics.gauge(
-                    "threadmill.worker.count",
-                    self.process_count,
-                    attributes={"pool": "process"},
-                )
-                sentry_metrics.gauge(
-                    "threadmill.worker.count",
-                    self.process_count * self.thread_count,
-                    attributes={"pool": "thread"},
-                )
                 telemetry = asyncio.run(self.backend.queue_stats())
                 for queue_name, stats in telemetry.queues.items():
                     for status, depth in (
