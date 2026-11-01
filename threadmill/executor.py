@@ -140,9 +140,6 @@ class TaskExecutor:
     pool_maintainer: threading.Thread | None = dataclasses.field(
         default=None, init=False
     )
-    queue_depth_reporter: threading.Thread | None = dataclasses.field(
-        default=None, init=False
-    )
     worker_processes: list[WorkerProcess] = dataclasses.field(
         default_factory=list, init=False
     )
@@ -195,12 +192,13 @@ class TaskExecutor:
         )
         threads = [self.pool_maintainer]
         if sentry_metrics is not None:
-            self.queue_depth_reporter = threading.Thread(
-                target=self.report_queue_depth,
-                name="threadmill-queue-depth",
-                daemon=True,
+            threads.append(
+                threading.Thread(
+                    target=self.report_queue_depth,
+                    name="threadmill-queue-depth",
+                    daemon=True,
+                )
             )
-            threads.append(self.queue_depth_reporter)
         if self.backend.broker_class:
             self.broker = self.backend.broker_class(self.backend)
             threads.append(self.broker)
@@ -214,12 +212,6 @@ class TaskExecutor:
         """Stop pool maintenance first, then queue consumption and all workers."""
         logger.info("Shutting down task executor")
         self.shutdown_requested.set()
-        if (
-            self.queue_depth_reporter is not None
-            and self.queue_depth_reporter.is_alive()
-            and self.queue_depth_reporter is not threading.current_thread()
-        ):
-            self.queue_depth_reporter.join()
         if (
             self.pool_maintainer is not None
             and self.pool_maintainer.is_alive()
