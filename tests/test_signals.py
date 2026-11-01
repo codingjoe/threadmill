@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 from django.db import DEFAULT_DB_ALIAS, connections
-from django.tasks import TaskResult, TaskResultStatus
+from django.tasks import TaskResult, TaskResultStatus, task_backends
 from django.tasks.backends.immediate import ImmediateBackend
 from django.tasks.signals import task_enqueued, task_finished, task_started
 from django.utils import timezone
@@ -150,6 +150,12 @@ class TestTaskMetrics:
     def test_task_enqueued__ignores_non_threadmill_backends(self, sentry_metrics):
         """Ignore tasks enqueued on backends that Threadmill does not run."""
         task_enqueued.send(ImmediateBackend, task_result=_task_result(echo))
+
+        assert sentry_metrics.counts == []
+
+    def test_task_enqueued__ignores_instance_senders(self, sentry_metrics):
+        """Ignore senders that are not backend classes."""
+        task_enqueued.send(task_backends["immediate"], task_result=_task_result(echo))
 
         assert sentry_metrics.counts == []
 
