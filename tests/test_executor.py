@@ -820,6 +820,20 @@ class TestTaskExecutor:
         ]
         assert shutdown_requested.timeouts == [7.0]
 
+    def test_report_metrics__zero_interval_disables_sampling(self, monkeypatch):
+        """Skip sampling when the interval is zero."""
+        executor = TaskExecutor(
+            backend=StubQueueStatsBackend(BackendTelemetry(queues={})),
+            queues=("default",),
+            sample_interval=datetime.timedelta(0),
+        )
+        sentry_metrics = StubSentryMetrics()
+        monkeypatch.setattr(executor_module, "sentry_metrics", sentry_metrics)
+
+        executor.report_metrics()
+
+        assert sentry_metrics.gauges == []
+
 
 class TestWorkerProcess:
     """Tests for the WorkerProcess class."""
