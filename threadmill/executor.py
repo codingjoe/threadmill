@@ -186,10 +186,10 @@ class TaskExecutor:
         self.worker_processes = [
             self.create_worker_process() for _ in range(self.process_count)
         ]
-        self.report_worker_counts()
         self.pool_maintainer = threading.Thread(
             target=self.maintain_worker_pool, daemon=True
         )
+        self.report_worker_counts()
         threads = [self.pool_maintainer]
         if sentry_metrics is not None:
             threads.append(
