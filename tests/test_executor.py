@@ -834,6 +834,23 @@ class TestTaskExecutor:
 
         assert sentry_metrics.gauges == []
 
+    def test_shutdown__reports_zero_worker_counts(self, monkeypatch):
+        """Report zero workers when the pool shuts down."""
+        executor = TaskExecutor(
+            backend=StubQueueStatsBackend(BackendTelemetry(queues={})),
+            queues=("default",),
+        )
+        sentry_metrics = StubSentryMetrics()
+        monkeypatch.setattr(executor_module, "sentry_metrics", sentry_metrics)
+        executor.pool_maintainer = threading.current_thread()
+
+        executor.shutdown()
+
+        assert sentry_metrics.gauges == [
+            ("threadmill.worker.count", 0, {"pool": "process"}),
+            ("threadmill.worker.count", 0, {"pool": "thread"}),
+        ]
+
 
 class TestWorkerProcess:
     """Tests for the WorkerProcess class."""
