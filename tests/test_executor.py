@@ -440,16 +440,6 @@ class StubShutdownEvent:
         return False
 
 
-class TestImportSentryMetrics:
-    """Tests for the optional Sentry SDK import."""
-
-    def test_import_sentry_metrics__returns_none_without_sdk(self, monkeypatch):
-        """Return None when sentry-sdk is not installed."""
-        monkeypatch.setitem(sys.modules, "sentry_sdk", None)
-
-        assert executor_module._import_sentry_metrics() is None
-
-
 class TestTaskExecutor:
     """Tests for the TaskExecutor dataclass and its methods."""
 

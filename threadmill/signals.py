@@ -3,9 +3,7 @@ from django.dispatch import receiver
 from django.tasks.signals import task_enqueued, task_finished, task_started
 
 from .backends.base import ThreadmillTaskBackend
-from .executor import TaskExecutor, _import_sentry_metrics
-
-sentry_metrics = _import_sentry_metrics()
+from .executor import TaskExecutor, sentry_metrics
 
 
 @receiver([task_started, task_finished], sender=TaskExecutor)
