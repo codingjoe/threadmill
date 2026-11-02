@@ -133,6 +133,8 @@ uv run manage.py threadmill inspector
 
 ### Sentry Metrics
 
+![Sentry Dashboard with metric graphs](https://github.com/codingjoe/threadmill/raw/main/docs/images/Sentry-metrics.png)
+
 Threadmill emits [Sentry application metrics][sentry-metrics] when `sentry-sdk`
 is installed. Install the extra:
 
