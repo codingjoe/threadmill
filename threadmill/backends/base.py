@@ -52,19 +52,37 @@ class RetryTask(Task):
 
     @classmethod
     def _reconstruct(cls, kwargs):
-        if retry_path := kwargs.pop("retry", None):
+        retry_path = kwargs.pop("retry", None)
+        if retry_path is not None:
+            kwargs["retry"] = cls._import_retry(retry_path, kwargs["func"])
+        return super()._reconstruct(kwargs)
+
+    @staticmethod
+    def _import_retry(retry_path, func_path):
+        """Import a stored retry callback, falling back to the task definition."""
+        try:
             try:
                 path, pos_args, kw_args = retry_path
             except ValueError:
-                kwargs["retry"] = import_string(retry_path)
-            else:
-                kwargs["retry"] = import_string(path)(*pos_args, **kw_args)
-        return super()._reconstruct(kwargs)
+                return import_string(retry_path)
+            return import_string(path)(*pos_args, **kw_args)
+        except ImportError:
+            return getattr(import_string(func_path), "retry", None)
 
     def __reduce__(self):
         reconstructor, (kwargs,) = super().__reduce__()
         kwargs["retry"] = self.retry_path
         return (reconstructor, (kwargs,))
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class UnreadablePayload:
+    """A stored payload that could not be read back into a task result."""
+
+    task_id: str
+    queue_name: str
+    payload: str
+    error: BaseException
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -210,12 +228,15 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
 
     @classmethod
     def deserialize_task_result(cls, data: str) -> TaskResult:
+        """Read a stored payload back into a task result."""
+
         def _object_hook(d: dict) -> dict | TaskResult:
             if "task" in d and isinstance(d["task"], dict) and "func" in d["task"]:
                 task_data = d["task"]
                 task_data["run_after"] = _parse_datetime(task_data["run_after"])
-                d["task"] = cls.task_class._reconstruct(task_data)
-                d["status"] = TaskResultStatus(d["status"])
+                status = TaskResultStatus(d["status"])
+                d["task"] = cls._reconstruct_task(task_data, status)
+                d["status"] = status
                 d["errors"] = [TaskError(**error) for error in d["errors"]]
                 return_value = d.pop("_return_value", None)
                 for key, value in d.items():
@@ -226,6 +247,58 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
             return d
 
         return json.loads(data, object_hook=_object_hook)
+
+    @classmethod
+    def _reconstruct_task(cls, task_data: dict, status: TaskResultStatus) -> Task:
+        """Rebuild the stored task, allowing a gone function only for FAILED records."""
+        try:
+            return cls.task_class._reconstruct(task_data)
+        except (ImportError, ValueError) as exception:
+            missing_reference = isinstance(exception, ImportError) or isinstance(
+                exception.__cause__, (ImportError, AttributeError)
+            )
+            if status is not TaskResultStatus.FAILED or not missing_reference:
+                raise
+            return cls._create_missing_task(task_data)
+
+    @classmethod
+    def _create_missing_task(cls, task_data: dict) -> Task:
+        """Build a placeholder task for a FAILED record whose function is gone."""
+        func_path = task_data["func"]
+
+        def missing_task(*args, **kwargs):
+            message = f"Task {func_path!r} is no longer in the code base."
+            raise RuntimeError(message)
+
+        module_path, _, qualname = func_path.rpartition(".")
+        missing_task.__module__ = module_path
+        missing_task.__qualname__ = qualname
+        task_data = {**task_data, "func": missing_task}
+        task_data.pop("retry", None)
+        return cls.task_class(**task_data)
+
+    @classmethod
+    def rebuild_failed_task_result(
+        cls, data: str, error: BaseException, *, finished_at: datetime.datetime
+    ) -> TaskResult | None:
+        """Rebuild a stored payload as a FAILED result, or None when it cannot be read."""
+        try:
+            payload = json.loads(data)
+            if not isinstance(payload, dict):
+                return None
+            task_data = payload.get("task")
+            if not isinstance(task_data, dict) or "func" not in task_data:
+                return None
+            task_data.pop("retry", None)
+            payload["status"] = TaskResultStatus.FAILED.name
+            payload["finished_at"] = finished_at.isoformat()
+            payload["errors"] = [
+                *payload.get("errors", []),
+                dataclasses.asdict(cls.create_task_error(error)),
+            ]
+            return cls.deserialize_task_result(json.dumps(payload))
+        except AttributeError, ImportError, KeyError, TypeError, ValueError:
+            return None
 
     def validate_task(self, task: RetryTask) -> None:
         super().validate_task(task)
