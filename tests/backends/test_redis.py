@@ -188,6 +188,30 @@ class TestRedisBroker:
         )
         assert acquired.id == task_result.id
 
+    def test_mover__logs_dropped_task_without_payload(self, caplog):
+        """Mover logs the ID of a deferred task whose stored payload is missing."""
+        backend = _make_backend("mover_drop_test")
+        broker = RedisBroker(backend)
+        try:
+            task_result = backend.enqueue(
+                replace(
+                    echo,
+                    run_after=timezone.now() - datetime.timedelta(seconds=10),
+                ),
+                args=[1],
+            )
+            backend.client.delete(
+                backend.TASK_KEY.format(
+                    prefix=backend.key_prefix, task_id=task_result.id
+                )
+            )
+            with caplog.at_level(logging.WARNING):
+                broker._move_queue("default")
+            assert task_result.id in caplog.text
+            assert "without a stored payload" in caplog.text
+        finally:
+            backend.close()
+
     def test_error_path__maintain_continues_after_exception(self, caplog):
         """main() logs and continues when any per-queue step raises."""
         broker = RedisBroker(default_task_backend)
@@ -878,6 +902,21 @@ class TestRedisTaskBackend:
         error_message = "pubsub never reached subscribed state"
         raise AssertionError(error_message)
 
+    def test_enqueue__keep_payload_without_expiry(self):
+        """enqueue() stores a deferred task payload without a TTL."""
+        backend = _make_backend("enqueue_keep_payload_test")
+        try:
+            task_result = backend.enqueue(
+                replace(echo, run_after=timezone.now() + datetime.timedelta(days=30)),
+                args=[1],
+            )
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.ttl(task_key) == -1
+        finally:
+            backend.close()
+
     def test_enqueue__publishes_ingress_telemetry(self):
         """enqueue() publishes an ingress event on the telemetry channel."""
         backend = RedisTaskBackend(
@@ -935,6 +974,22 @@ class TestRedisTaskBackend:
         finally:
             pubsub.unsubscribe(backend.telemetry_channel)
             pubsub.close()
+            backend.close()
+
+    def test_requeue__keep_payload_without_expiry(self):
+        """requeue() stores the retry payload without a TTL."""
+        backend = _make_backend("requeue_keep_payload_test")
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="requeue-keep-test"
+            )
+            backend.requeue(acquired, timezone.now() + datetime.timedelta(days=30))
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.ttl(task_key) == -1
+        finally:
             backend.close()
 
     def test_requeue__publishes_ingress_telemetry(self):
@@ -1431,6 +1486,22 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    def test_dequeue__deletes_ready_task_payload(self) -> None:
+        """dequeue() deletes the stored payload of a ready task."""
+        backend = _make_backend("dequeue_payload_test")
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+            assert backend.client.exists(task_key)
+
+            backend.dequeue(task_result)
+
+            assert not backend.client.exists(task_key)
+        finally:
+            backend.close()
+
     def test_dequeue__removes_failed_task_from_results(self) -> None:
         """dequeue() removes a failed task from the failed zset."""
         backend = RedisTaskBackend(
@@ -1462,10 +1533,14 @@ class TestRedisTaskBackend:
                 )
             )
             failed_key = backend._segment_key(TaskResultStatus.FAILED, "default")
+            result_key = backend.RESULT_KEY.format(
+                prefix=backend.key_prefix, result_id=failed.id
+            )
 
             backend.dequeue(failed)
 
             assert backend.client.zscore(failed_key, failed.id) is None
+            assert not backend.client.exists(result_key)
         finally:
             backend.close()
 
@@ -1548,6 +1623,50 @@ class TestRedisTaskBackend:
                 )
                 == []
             )
+        finally:
+            backend.close()
+
+    def test_purge__deletes_task_and_result_payloads(self) -> None:
+        """purge() deletes the payload of every pending and finished task."""
+        backend = _make_backend("purge_payload_test")
+        try:
+            deferred = backend.enqueue(
+                replace(echo, run_after=timezone.now() + datetime.timedelta(hours=1)),
+                args=[1],
+            )
+            running = backend.enqueue(echo, args=[2])
+            backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="purge-payload"
+            )
+            finished = []
+            for status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+                backend.enqueue(echo, args=[3])
+                (acquired,) = backend.acquire(
+                    timeout=datetime.timedelta(seconds=1), worker="purge-payload-2"
+                )
+                backend.acknowledge(
+                    dataclasses.replace(
+                        acquired, status=status, finished_at=timezone.now()
+                    )
+                )
+                finished.append(acquired)
+            ready = backend.enqueue(echo, args=[4])
+
+            for task_id in (deferred.id, running.id, ready.id):
+                assert backend.client.exists(
+                    backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=task_id)
+                )
+            for task_id in (item.id for item in finished):
+                assert backend.client.exists(
+                    backend.RESULT_KEY.format(
+                        prefix=backend.key_prefix, result_id=task_id
+                    )
+                )
+
+            backend.purge("default")
+
+            assert backend.client.keys(f"{backend.key_prefix}:task:*") == []
+            assert backend.client.keys(f"{backend.key_prefix}:result:*") == []
         finally:
             backend.close()
 

@@ -92,14 +92,20 @@ class RedisBroker(Broker):
             prefix=self.backend.key_prefix, queue_name=queue_name
         )
         queue_key = self.backend._segment_key(TaskResultStatus.READY, queue_name)
-        self._mover_script(
+        if dropped := self._mover_script(
             keys=[deferred_key, queue_key],
             args=[
                 str(time.time() * 1000),
                 f"{self.backend.key_prefix}:task:",
                 str(self.backend.batch_size),
             ],
-        )
+        ):
+            logger.warning(
+                "Dropped %d deferred task(s) of queue %r without a stored payload: %s",
+                len(dropped),
+                queue_name,
+                ", ".join(dropped),
+            )
 
     def _reap_running_queue(self, queue_name: str) -> None:
         """Claim tasks whose processing lease has expired from the running set."""
@@ -200,6 +206,10 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     """Lease up to a given number of tasks from the priority queues in one broker call."""
     ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
     """Remove from running, persist the result, and clean up."""
+    DEQUEUE_SCRIPT = _load_lua("dequeue")
+    """Delete one task together with its payload."""
+    PURGE_SCRIPT = _load_lua("purge")
+    """Delete every task and its payload for one queue."""
 
     def _segment_key(self, status: TaskResultStatus, queue_name: str) -> str:
         return self.SEGMENT_KEY.format(
@@ -257,6 +267,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self._idle_backoffs = threading.local()
         self._acquire_script = self.client.register_script(self.ACQUIRE_SCRIPT)
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
+        self._dequeue_script = self.client.register_script(self.DEQUEUE_SCRIPT)
+        self._purge_script = self.client.register_script(self.PURGE_SCRIPT)
 
     @property
     def _idle_backoff(self) -> _IdleBackoff:
@@ -321,9 +333,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         score = self._compute_score(task.priority, enqueued_at)
         serialized = self.serialize_task_result(task_result)
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_result.id)
-        task_data_ttl = int(
-            self.lease_ttl.total_seconds() * 3 + self.result_ttl.total_seconds()
-        )
 
         pipe = self.client.pipeline()
         pipe.hset(
@@ -333,7 +342,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 "score": str(score),
             },
         )
-        pipe.expire(task_key, task_data_ttl)
         pipe.publish(self.telemetry_channel, f"ingress:{task.queue_name}")
 
         if task.run_after is not None:
@@ -517,14 +525,12 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         )
         score = self._compute_score(task_result.task.priority, task_result.enqueued_at)
         run_after_ms = run_after.timestamp() * 1000
-        task_data_ttl = int(
-            self.lease_ttl.total_seconds() * 3 + self.result_ttl.total_seconds()
-        )
 
         pipe = self.client.pipeline()
         pipe.zrem(running_key, task_result.id)
         pipe.zrem(failed_key, task_result.id)
         pipe.delete(result_key)
+        pipe.delete(task_key)
         pipe.hset(
             task_key,
             mapping={
@@ -533,7 +539,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 **dict.fromkeys(self.LEASE_FIELDS, ""),
             },
         )
-        pipe.expire(task_key, task_data_ttl)
         pipe.zadd(deferred_key, {task_result.id: run_after_ms})
         pipe.publish(self.telemetry_channel, f"ingress:{task_result.task.queue_name}")
         pipe.execute()
@@ -541,17 +546,31 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         task_enqueued.send(self.__class__, task_result=task_result)
 
     def dequeue(self, task_result: TaskResult) -> None:
-        self.client.zrem(
-            self._segment_key(task_result.status, task_result.task.queue_name),
-            task_result.id,
+        self._dequeue_script(
+            keys=[
+                self._segment_key(task_result.status, task_result.task.queue_name),
+                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_result.id),
+                self.RESULT_KEY.format(
+                    prefix=self.key_prefix, result_id=task_result.id
+                ),
+            ],
+            args=[task_result.id],
         )
 
     def purge(self, queue_name: str) -> None:
-        pattern = f"{self.key_prefix}:{queue_name}:*"
-        pipe = self.client.pipeline()
-        for key in self.client.scan_iter(match=pattern):
-            pipe.delete(key)
-        pipe.execute()
+        self._purge_script(
+            keys=[
+                self._segment_key(TaskResultStatus.READY, queue_name),
+                self._segment_key(TaskResultStatus.RUNNING, queue_name),
+                self.DEFERRED_KEY.format(prefix=self.key_prefix, queue_name=queue_name),
+                self._segment_key(TaskResultStatus.SUCCESSFUL, queue_name),
+                self._segment_key(TaskResultStatus.FAILED, queue_name),
+            ],
+            args=[
+                f"{self.key_prefix}:task:",
+                f"{self.key_prefix}:result:",
+            ],
+        )
 
     def peek(
         self,
