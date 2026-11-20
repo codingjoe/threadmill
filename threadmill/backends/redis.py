@@ -521,19 +521,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 "Stale task reference handler failed for task %r", stale.task_id
             )
 
-    def discard_task(self, task_id: str, *, queue_name: str) -> None:
-        """Remove a task whose payload cannot be read from every queue segment."""
-        pipe = self.client.pipeline()
-        pipe.zrem(self._segment_key(TaskResultStatus.RUNNING, queue_name), task_id)
-        pipe.zrem(self._segment_key(TaskResultStatus.READY, queue_name), task_id)
-        pipe.zrem(
-            self.DEFERRED_KEY.format(prefix=self.key_prefix, queue_name=queue_name),
-            task_id,
-        )
-        pipe.delete(self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id))
-        pipe.publish(self.telemetry_channel, f"egress:{queue_name}")
-        pipe.execute()
-
     def discard_unreadable_task(
         self,
         task_id: str,
@@ -542,7 +529,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         error: BaseException,
         data: str,
     ) -> None:
-        """Remove a task whose stored payload cannot be read."""
+        """Report and remove a task whose stored payload cannot be read."""
         if self.is_stale_task_reference(error):
             self._run_stale_task_reference_handler(
                 StaleTaskReference(
@@ -562,7 +549,15 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 queue_name,
                 exc_info=error,
             )
-        self.discard_task(task_id, queue_name=queue_name)
+        self._dequeue_script(
+            keys=[
+                self._segment_key(TaskResultStatus.RUNNING, queue_name),
+                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id),
+                self.RESULT_KEY.format(prefix=self.key_prefix, result_id=task_id),
+            ],
+            args=[task_id],
+        )
+        self.client.publish(self.telemetry_channel, f"egress:{queue_name}")
 
     def acknowledge(self, task_result: TaskResult) -> None:
         serialized = self.serialize_task_result(task_result)
