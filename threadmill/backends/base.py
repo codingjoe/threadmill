@@ -69,8 +69,8 @@ class RetryTask(Task):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class UnreadablePayload:
-    """A stored payload that could not be read back into a task result."""
+class StaleTaskReference:
+    """A stored task whose function no longer imports after a deploy."""
 
     task_id: str
     queue_name: str

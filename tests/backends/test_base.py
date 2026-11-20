@@ -29,7 +29,7 @@ from threadmill.backends.base import (
 )
 from threadmill.exceptions import AcknowledgementTimeoutError
 
-_GONE_TASK_PATH = "tests.testapp.tasks.gone_from_the_code_base"
+_STALE_TASK_PATH = "tests.testapp.tasks.gone_from_the_code_base"
 
 
 class BackendDouble(ThreadmillTaskBackend):
@@ -245,18 +245,18 @@ class TestThreadmillTaskBackend:
                 _task_result_with_retry(boom_with_retry)
             )
         )
-        data["task"]["retry"] = _GONE_TASK_PATH
+        data["task"]["retry"] = _STALE_TASK_PATH
         restored = ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
         assert restored.task.retry is retry_always
 
-    def test_deserialize_task_result__raise_for_gone_func(self) -> None:
-        """Raise for a record whose task function is gone."""
+    def test_deserialize_task_result__raise_for_stale_task_reference(self) -> None:
+        """Raise for a stored task whose function no longer imports."""
         data = json.loads(
             ThreadmillTaskBackend.serialize_task_result(
                 _task_result_with_retry(boom_with_retry)
             )
         )
-        data["task"]["func"] = _GONE_TASK_PATH
+        data["task"]["func"] = _STALE_TASK_PATH
         with pytest.raises(ValueError, match="to point to a Task instance"):
             ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
 

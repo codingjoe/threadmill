@@ -31,9 +31,9 @@ from threadmill.backends.base import (
     QueueCounts,
     QueueRates,
     QueueStats,
+    StaleTaskReference,
     TelemetryDirection,
     TelemetryEvent,
-    UnreadablePayload,
 )
 from threadmill.backends.redis import (
     RedisBroker,
@@ -142,21 +142,21 @@ def _assert_discarded(
         assert backend.client.zscore(key, task_id) is None
 
 
-RECEIVED_PAYLOADS: list[UnreadablePayload] = []
+RECEIVED_STALE_TASKS: list[StaleTaskReference] = []
 
 
-def _record_unreadable_payload(unreadable: UnreadablePayload) -> None:
+def _record_stale_task(stale: StaleTaskReference) -> None:
     """Record a handler call for assertions."""
-    RECEIVED_PAYLOADS.append(unreadable)
+    RECEIVED_STALE_TASKS.append(stale)
 
 
-def _raise_unreadable_payload(unreadable: UnreadablePayload) -> None:
+def _raise_stale_task(stale: StaleTaskReference) -> None:
     """Raise from the handler to exercise the error path."""
     message = "handler failed"
     raise RuntimeError(message)
 
 
-_GONE_CALLBACK = "tests.testapp.tasks.gone_from_the_code_base"
+_STALE_TASK_PATH = "tests.testapp.tasks.gone_from_the_code_base"
 
 
 def _corrupt_payload(
@@ -353,10 +353,10 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap__discards_task_when_payload_function_is_gone(self):
-        """A claimed payload whose task function is gone is removed, not dropped silently."""
+    def test_reap__discards_stale_task_reference(self, caplog):
+        """A claimed task whose function moved or was deleted is removed."""
         backend = _make_backend(
-            "reap_gone_func_test", lease_ttl=datetime.timedelta(seconds=1)
+            "reap_stale_task_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
@@ -364,21 +364,23 @@ class TestRedisBrokerReap:
                 timeout=datetime.timedelta(seconds=1), worker="worker-1"
             )
             assert acquired is not None
-            _corrupt_payload(backend, task_result.id, task={"func": _GONE_CALLBACK})
+            _corrupt_payload(backend, task_result.id, task={"func": _STALE_TASK_PATH})
             _expire_lease(backend, task_result.id)
 
-            RedisBroker(backend)._reap_running_queue("default")
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+                RedisBroker(backend)._reap_running_queue("default")
 
+            assert "is a stale task reference" in caplog.text
             _assert_discarded(backend, task_result.id)
             with pytest.raises(TaskResultDoesNotExist):
                 backend.get_result(task_result.id)
         finally:
             backend.close()
 
-    def test_reap__recovers_gone_retry_callback(self):
+    def test_reap__reads_retry_from_task_definition(self):
         """A stale retry path is read from the task definition and still retries."""
         backend = _make_backend(
-            "reap_gone_retry_test", lease_ttl=datetime.timedelta(seconds=1)
+            "reap_stale_retry_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
             task_result = backend.enqueue(echo_retry_on_lease_expiry, args=[42])
@@ -386,7 +388,7 @@ class TestRedisBrokerReap:
                 timeout=datetime.timedelta(seconds=1), worker="worker-1"
             )
             assert acquired is not None
-            _corrupt_payload(backend, task_result.id, task={"retry": _GONE_CALLBACK})
+            _corrupt_payload(backend, task_result.id, task={"retry": _STALE_TASK_PATH})
             _expire_lease(backend, task_result.id)
 
             RedisBroker(backend)._reap_running_queue("default")
@@ -424,7 +426,7 @@ class TestRedisBrokerReap:
             with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert "payload cannot be read; removing it" in caplog.text
+            assert "payload cannot be read" in caplog.text
             _assert_discarded(backend, task_result.id)
             with pytest.raises(TaskResultDoesNotExist):
                 backend.get_result(task_result.id)
@@ -484,39 +486,41 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def test_acquire__discards_unreadable_payload_and_keeps_batch(self, caplog):
-        """One gone task function is removed alone and the rest of the batch is returned."""
-        backend = _make_backend("acquire_poison_test")
+    def test_acquire__discards_stale_task_reference_and_keeps_batch(self, caplog):
+        """One stale task reference is removed alone and the rest of the batch is returned."""
+        backend = _make_backend("acquire_stale_task_test")
         try:
             first = backend.enqueue(echo, args=[1])
-            poison = backend.enqueue(echo, args=[2])
+            stale = backend.enqueue(echo, args=[2])
             last = backend.enqueue(echo, args=[3])
-            _corrupt_payload(backend, poison.id, task={"func": _GONE_CALLBACK})
+            _corrupt_payload(backend, stale.id, task={"func": _STALE_TASK_PATH})
 
             with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 acquired = backend.acquire(
                     count=3,
                     timeout=datetime.timedelta(seconds=1),
-                    worker="poison-test",
+                    worker="stale-task-test",
                 )
 
             assert [result.id for result in acquired] == [first.id, last.id]
-            assert "payload cannot be read" in caplog.text
-            _assert_discarded(backend, poison.id)
+            assert "is a stale task reference" in caplog.text
+            _assert_discarded(backend, stale.id)
             with pytest.raises(TaskResultDoesNotExist):
-                backend.get_result(poison.id)
+                backend.get_result(stale.id)
         finally:
             backend.close()
 
     def test_acquire__discards_malformed_payload_and_keeps_batch(self, caplog):
         """A malformed payload is logged and removed while the batch continues."""
+        RECEIVED_STALE_TASKS.clear()
         backend = _make_backend("acquire_malformed_test")
+        backend.stale_task_reference_handler = _record_stale_task
         try:
-            poison = backend.enqueue(echo, args=[1])
+            malformed = backend.enqueue(echo, args=[1])
             healthy = backend.enqueue(echo, args=[2])
-            _corrupt_payload(backend, poison.id, data="{not json")
+            _corrupt_payload(backend, malformed.id, data="{not json")
 
-            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
                 acquired = backend.acquire(
                     count=2,
                     timeout=datetime.timedelta(seconds=1),
@@ -525,61 +529,67 @@ class TestRedisTaskBackend:
 
             assert [result.id for result in acquired] == [healthy.id]
             assert "payload cannot be read" in caplog.text
-            _assert_discarded(backend, poison.id)
+            assert RECEIVED_STALE_TASKS == []
+            _assert_discarded(backend, malformed.id)
         finally:
+            RECEIVED_STALE_TASKS.clear()
             backend.close()
 
-    def test_acquire__polls_again_when_whole_batch_is_unreadable(self):
-        """Keep polling when every leased payload was unreadable."""
-        backend = _make_backend("acquire_all_poison_test")
+    def test_acquire__polls_again_when_whole_batch_cannot_be_read(self):
+        """Keep polling when every leased payload cannot be read."""
+        backend = _make_backend("acquire_all_malformed_test")
         try:
-            poison = backend.enqueue(echo, args=[1])
-            _corrupt_payload(backend, poison.id, data="{not json")
+            malformed = backend.enqueue(echo, args=[1])
+            _corrupt_payload(backend, malformed.id, data="{not json")
 
             with pytest.raises(TimeoutError):
                 backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="all-poison-test"
+                    timeout=datetime.timedelta(seconds=1), worker="all-malformed-test"
                 )
 
-            _assert_discarded(backend, poison.id)
+            _assert_discarded(backend, malformed.id)
         finally:
             backend.close()
 
-    def test_acquire__runs_configured_payload_handler(self):
-        """A configured handler receives the record of an unreadable payload."""
-        RECEIVED_PAYLOADS.clear()
+    def test_acquire__runs_stale_task_reference_handler(self):
+        """A configured handler receives the record of a stale task reference."""
+        RECEIVED_STALE_TASKS.clear()
         backend = _make_backend(
             "acquire_handler_test",
-            unreadable_payload_handler=(
-                "tests.backends.test_redis._record_unreadable_payload"
+            stale_task_reference_handler=(
+                "tests.backends.test_redis._record_stale_task"
             ),
         )
         try:
-            assert backend.unreadable_payload_handler is _record_unreadable_payload
-            poison = backend.enqueue(echo, args=[1])
-            _corrupt_payload(backend, poison.id, data="{not json")
+            assert backend.stale_task_reference_handler is _record_stale_task
+            stale = backend.enqueue(echo, args=[1])
+            _corrupt_payload(backend, stale.id, task={"func": _STALE_TASK_PATH})
+            expected_payload = backend.client.hget(
+                backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=stale.id),
+                "data",
+            )
 
             with pytest.raises(TimeoutError):
                 backend.acquire(
                     timeout=datetime.timedelta(seconds=1), worker="handler-test"
                 )
 
-            (unreadable,) = RECEIVED_PAYLOADS
-            assert unreadable.task_id == poison.id
-            assert unreadable.queue_name == "default"
-            assert unreadable.payload == "{not json"
-            assert isinstance(unreadable.error, ValueError)
+            (reference,) = RECEIVED_STALE_TASKS
+            assert reference.task_id == stale.id
+            assert reference.queue_name == "default"
+            assert reference.payload == expected_payload
+            assert isinstance(reference.error, ValueError)
         finally:
-            RECEIVED_PAYLOADS.clear()
+            RECEIVED_STALE_TASKS.clear()
             backend.close()
 
-    def test_acquire__discards_when_handler_raises(self, caplog):
+    def test_acquire__discards_when_stale_task_reference_handler_raises(self, caplog):
         """A handler failure is logged and the task is still removed."""
         backend = _make_backend("acquire_handler_error_test")
-        backend.unreadable_payload_handler = _raise_unreadable_payload
+        backend.stale_task_reference_handler = _raise_stale_task
         try:
-            poison = backend.enqueue(echo, args=[1])
-            _corrupt_payload(backend, poison.id, task={"func": _GONE_CALLBACK})
+            stale = backend.enqueue(echo, args=[1])
+            _corrupt_payload(backend, stale.id, task={"func": _STALE_TASK_PATH})
 
             with (
                 caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"),
@@ -590,8 +600,8 @@ class TestRedisTaskBackend:
                     worker="handler-error-test",
                 )
 
-            assert "Unreadable payload handler failed" in caplog.text
-            _assert_discarded(backend, poison.id)
+            assert "Stale task reference handler failed" in caplog.text
+            _assert_discarded(backend, stale.id)
         finally:
             backend.close()
 
@@ -1302,9 +1312,9 @@ class TestRedisTaskBackend:
 
     def test_peek__ready_skips_unreadable_payload(self, caplog):
         """Peek READY skips a payload it cannot read and yields the rest."""
-        poison = default_task_backend.enqueue(echo, args=[1])
+        malformed = default_task_backend.enqueue(echo, args=[1])
         default_task_backend.enqueue(echo, args=[2])
-        _corrupt_payload(default_task_backend, poison.id, data="{not json")
+        _corrupt_payload(default_task_backend, malformed.id, data="{not json")
 
         with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
             results = list(

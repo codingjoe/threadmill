@@ -199,30 +199,30 @@ Set `targetValue` to the ready backlog one replica can drain during your scale-u
 The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 `TASKS` configuration:
 
-| Option                       | Default                   | Description                                                                                   |
-| ---------------------------- | ------------------------- | --------------------------------------------------------------------------------------------- |
-| `lease_ttl`                  | `timedelta(hours=1)`      | Max time from acquisition to acknowledgement before the task is retried or marked FAILED.     |
-| `result_ttl`                 | `timedelta(days=1)`       | How long task results are retained before automatic removal.                                  |
-| `broker_interval`            | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                                        |
-| `batch_size`                 | `100`                     | Max tasks to move or reap per broker pass.                                                    |
-| `poll_interval`              | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll.                       |
-| `poll_max_interval`          | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                                       |
-| `redis_connection_retries`   | `3`                       | Retries per command when its Redis connection fails before the error surfaces.                |
-| `unreadable_payload_handler` | `None`                    | Dotted path to a callable that receives each `UnreadablePayload` record. Defaults to logging. |
+| Option                         | Default                   | Description                                                                                    |
+| ------------------------------ | ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `lease_ttl`                    | `timedelta(hours=1)`      | Max time from acquisition to acknowledgement before the task is retried or marked FAILED.      |
+| `result_ttl`                   | `timedelta(days=1)`       | How long task results are retained before automatic removal.                                   |
+| `broker_interval`              | `timedelta(seconds=1)`    | Interval between background broker maintenance passes.                                         |
+| `batch_size`                   | `100`                     | Max tasks to move or reap per broker pass.                                                     |
+| `poll_interval`                | `timedelta(seconds=0.01)` | Base wait between idle acquire attempts, doubled after each empty poll.                        |
+| `poll_max_interval`            | `timedelta(seconds=1)`    | Max wait between idle acquire attempts.                                                        |
+| `redis_connection_retries`     | `3`                       | Retries per command when its Redis connection fails before the error surfaces.                 |
+| `stale_task_reference_handler` | `None`                    | Dotted path to a callable that receives each `StaleTaskReference` record. Defaults to logging. |
 
 A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeoutError` error, or is marked FAILED when nothing retries it.
-A stored payload whose task function no longer imports is logged and removed
-from the queue. The retry callback is read from the task definition, so a stale
-stored path does not fail the task. Any other unreadable payload is logged and
+A task whose function moved or was deleted during a deploy before the queue
+drained is a stale task reference. It is reported to the handler and removed from
+the queue. The retry callback is read from the task definition, so a stale stored
+path does not fail the task. Any other payload that cannot be read is logged and
 removed as well. A payload read never stops the worker process.
 
-Pass `unreadable_payload_handler` to receive every unreadable payload:
+Pass `stale_task_reference_handler` to receive each stale task reference:
 
 ```python
-def handle_unreadable_payload(unreadable):
-    # unreadable.task_id, unreadable.queue_name,
-    # unreadable.payload, unreadable.error
+def handle_stale_task_reference(stale):
+    # stale.task_id, stale.queue_name, stale.payload, stale.error
     ...
 
 
@@ -230,13 +230,13 @@ TASKS = {
     "default": {
         "BACKEND": "threadmill.backends.redis.RedisTaskBackend",
         "OPTIONS": {
-            "unreadable_payload_handler": "myapp.tasks.handle_unreadable_payload",
+            "stale_task_reference_handler": "myapp.tasks.handle_stale_task_reference",
         },
     },
 }
 ```
 
-A handler that raises is logged. The task is still finalized.
+A handler that raises is logged. The task is still removed.
 Keep `lease_ttl` above your worst-case runtime and above the time a task waits in a
 prefetch buffer. A task that outlives its lease can still run, so a retry can run
 at the same time. The acknowledgement of the lease holder wins. The late result

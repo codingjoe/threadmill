@@ -28,11 +28,11 @@ from threadmill.backends.base import (
     QueueCounts,
     QueueRates,
     QueueStats,
+    StaleTaskReference,
     TelemetryDirection,
     TelemetryEvent,
     ThreadmillTaskBackend,
     ThreadmillTaskResult,
-    UnreadablePayload,
 )
 from threadmill.exceptions import AcknowledgementTimeoutError
 
@@ -144,7 +144,7 @@ class RedisBroker(Broker):
                 lease_token=lease_token,
             )
         except Exception as exception:  # noqa: BLE001
-            self.backend.fail_unreadable_task(
+            self.backend.discard_unreadable_task(
                 task_id,
                 queue_name=queue_name,
                 error=exception,
@@ -280,13 +280,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
         self._dequeue_script = self.client.register_script(self.DEQUEUE_SCRIPT)
         self._purge_script = self.client.register_script(self.PURGE_SCRIPT)
-        handler_path = self.options.get("unreadable_payload_handler")
-        self.unreadable_payload_handler: collections.abc.Callable[
-            [UnreadablePayload], None
+        handler_path = self.options.get("stale_task_reference_handler")
+        self.stale_task_reference_handler: collections.abc.Callable[
+            [StaleTaskReference], None
         ] = (
             import_string(handler_path)
             if handler_path
-            else self._log_unreadable_payload
+            else self._log_stale_task_reference
         )
 
     @property
@@ -426,7 +426,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     # Reading a stored payload is one rule: a gone task function,
                     # a malformed document, or a document from another version.
                     except Exception as exception:  # noqa: BLE001
-                        self.fail_unreadable_task(
+                        self.discard_unreadable_task(
                             task_id,
                             queue_name=queue_names[int(queue_index)],
                             error=exception,
@@ -496,22 +496,29 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         )
 
     @staticmethod
-    def _log_unreadable_payload(unreadable: UnreadablePayload) -> None:
-        """Report a stored payload that cannot be read back into a task result."""
-        logger.error(
-            "Task %r payload cannot be read: %s",
-            unreadable.task_id,
-            unreadable.error,
-            exc_info=unreadable.error,
+    def is_stale_task_reference(exception: BaseException) -> bool:
+        """Return True when a stored task no longer imports its task function."""
+        return isinstance(exception, ValueError) and isinstance(
+            exception.__cause__, (ImportError, AttributeError)
         )
 
-    def _run_unreadable_payload_handler(self, unreadable: UnreadablePayload) -> None:
+    @staticmethod
+    def _log_stale_task_reference(stale: StaleTaskReference) -> None:
+        """Report a task whose function no longer imports."""
+        logger.error(
+            "Task %r is a stale task reference: %s",
+            stale.task_id,
+            stale.error,
+            exc_info=stale.error,
+        )
+
+    def _run_stale_task_reference_handler(self, stale: StaleTaskReference) -> None:
         """Call the configured handler, keeping a handler failure from stranding the task."""
         try:
-            self.unreadable_payload_handler(unreadable)
+            self.stale_task_reference_handler(stale)
         except Exception:
             logger.exception(
-                "Unreadable payload handler failed for task %r", unreadable.task_id
+                "Stale task reference handler failed for task %r", stale.task_id
             )
 
     def discard_task(self, task_id: str, *, queue_name: str) -> None:
@@ -527,7 +534,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe.publish(self.telemetry_channel, f"egress:{queue_name}")
         pipe.execute()
 
-    def fail_unreadable_task(
+    def discard_unreadable_task(
         self,
         task_id: str,
         *,
@@ -535,17 +542,26 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         error: BaseException,
         data: str,
     ) -> None:
-        """Report a task whose stored payload cannot be read and remove it."""
-        self._run_unreadable_payload_handler(
-            UnreadablePayload(
-                task_id=task_id, queue_name=queue_name, payload=data, error=error
+        """Remove a task whose stored payload cannot be read."""
+        if self.is_stale_task_reference(error):
+            self._run_stale_task_reference_handler(
+                StaleTaskReference(
+                    task_id=task_id, queue_name=queue_name, payload=data, error=error
+                )
             )
-        )
-        logger.warning(
-            "Task %r payload cannot be read; removing it from queue %r",
-            task_id,
-            queue_name,
-        )
+            logger.warning(
+                "Task %r is a stale task reference; removing it from queue %r",
+                task_id,
+                queue_name,
+            )
+        else:
+            logger.warning(
+                "Task %r payload cannot be read: %s; removing it from queue %r",
+                task_id,
+                error,
+                queue_name,
+                exc_info=error,
+            )
         self.discard_task(task_id, queue_name=queue_name)
 
     def acknowledge(self, task_result: TaskResult) -> None:
