@@ -6,14 +6,17 @@
 -- ARGV[1]  -- current time in milliseconds (all scores <= this are due)
 -- ARGV[2]  -- task key prefix (e.g. "threadmill:default:task:")
 -- ARGV[3]  -- maximum number of tasks to move per call (batch size)
--- Returns: number of tasks moved
+-- Returns: list of IDs dropped because their stored payload is missing
 
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, tonumber(ARGV[3]))
+local dropped = {}
 for _, task_id in ipairs(due) do
   redis.call('ZREM', KEYS[1], task_id)
   local score = redis.call('HGET', ARGV[2] .. task_id, 'score')
   if score then
     redis.call('ZADD', KEYS[2], score, task_id)
+  else
+    table.insert(dropped, task_id)
   end
 end
-return #due
+return dropped
