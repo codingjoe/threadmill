@@ -10,8 +10,15 @@ from django.tasks import task
 from django.tasks.base import TaskContext
 
 from threadmill.exceptions import AcknowledgementTimeoutError
+from threadmill.retry import ExponentialBackoff
 
 logger = logging.getLogger(__name__)
+
+EXPONENTIAL_BACKOFF = ExponentialBackoff(
+    base_delay=datetime.timedelta(seconds=2),
+    max_delay=datetime.timedelta(minutes=5),
+    max_retries=3,
+)
 
 
 @task()
@@ -137,4 +144,10 @@ def boom_retry_raises():
 @task(retry=retry_on_lease_expiry)
 def echo_retry_on_lease_expiry(value):
     """Return the given value, retrying only when the lease expired."""
+    return value
+
+
+@task(retry=EXPONENTIAL_BACKOFF)
+def echo_with_backoff(value):
+    """Return the given value with an exponential backoff retry."""
     return value

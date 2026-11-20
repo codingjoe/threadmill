@@ -1,4 +1,3 @@
-import dataclasses
 import datetime
 import json
 import logging
@@ -219,15 +218,6 @@ class TestThreadmillTaskBackend:
         restored = ThreadmillTaskBackend.deserialize_task_result(data)
         assert restored.task.retry is None
 
-    def test_deserialize_task_result__roundtrips_deconstructible_retry(self) -> None:
-        """deserialize_task_result restores a deconstructible retry callable."""
-        task = RetryTask(func=echo.func, retry=DeconstructibleRetry(seconds=5))
-        result = _task_result_with_retry(task)
-        data = ThreadmillTaskBackend.serialize_task_result(result)
-        restored = ThreadmillTaskBackend.deserialize_task_result(data)
-        assert isinstance(restored.task.retry, DeconstructibleRetry)
-        assert restored.task.retry.seconds == 5
-
     def test_deserialize_task_result__preserves_errors(self) -> None:
         """deserialize_task_result preserves accumulated errors."""
         error = TaskError(
@@ -248,8 +238,8 @@ class TestThreadmillTaskBackend:
         restored = ThreadmillTaskBackend.deserialize_task_result(data)
         assert restored._return_value == 42
 
-    def test_deserialize_task_result__recovers_gone_retry_path(self) -> None:
-        """Read a stale retry path from the task definition instead."""
+    def test_deserialize_task_result__reads_retry_from_task_definition(self) -> None:
+        """Read the retry callback from the task definition, ignoring the stored path."""
         data = json.loads(
             ThreadmillTaskBackend.serialize_task_result(
                 _task_result_with_retry(boom_with_retry)
@@ -259,79 +249,16 @@ class TestThreadmillTaskBackend:
         restored = ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
         assert restored.task.retry is retry_always
 
-    def test_deserialize_task_result__replaces_gone_func_in_failed_record(self) -> None:
-        """Read a FAILED record whose task function is gone with a placeholder task."""
+    def test_deserialize_task_result__raise_for_gone_func(self) -> None:
+        """Raise for a record whose task function is gone."""
         data = json.loads(
             ThreadmillTaskBackend.serialize_task_result(
                 _task_result_with_retry(boom_with_retry)
             )
         )
-        data["task"]["func"] = _GONE_TASK_PATH
-        restored = ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
-        assert restored.status is TaskResultStatus.FAILED
-        assert restored.task.module_path == _GONE_TASK_PATH
-        with pytest.raises(RuntimeError, match="no longer in the code base"):
-            restored.task.func()
-
-    def test_deserialize_task_result__replaces_gone_func_and_retry(self) -> None:
-        """Read a FAILED record whose task function and retry callback are gone."""
-        data = json.loads(
-            ThreadmillTaskBackend.serialize_task_result(
-                _task_result_with_retry(boom_with_retry)
-            )
-        )
-        data["task"]["func"] = _GONE_TASK_PATH
-        data["task"]["retry"] = _GONE_TASK_PATH
-        restored = ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
-        assert restored.task.module_path == _GONE_TASK_PATH
-        assert restored.task.retry is None
-
-    def test_deserialize_task_result__raise_for_gone_func_in_pending_record(
-        self,
-    ) -> None:
-        """Raise for a pending record whose task function is gone."""
-        result = dataclasses.replace(
-            _task_result_with_retry(boom_with_retry), status=TaskResultStatus.READY
-        )
-        data = json.loads(ThreadmillTaskBackend.serialize_task_result(result))
         data["task"]["func"] = _GONE_TASK_PATH
         with pytest.raises(ValueError, match="to point to a Task instance"):
             ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
-
-    def test_rebuild_failed_task_result__appends_read_error(self) -> None:
-        """Rebuild a readable payload as a FAILED result carrying the read error."""
-        data = ThreadmillTaskBackend.serialize_task_result(
-            _task_result_with_retry(echo)
-        )
-        restored = ThreadmillTaskBackend.rebuild_failed_task_result(
-            data, ImportError("gone"), finished_at=timezone.now()
-        )
-        assert restored is not None
-        assert restored.status is TaskResultStatus.FAILED
-        assert restored.errors[-1].exception_class_path == "builtins.ImportError"
-
-    def test_rebuild_failed_task_result__uses_placeholder_for_gone_func(self) -> None:
-        """Rebuild a gone-func payload with a placeholder task and the read error."""
-        data = json.loads(
-            ThreadmillTaskBackend.serialize_task_result(_task_result_with_retry(echo))
-        )
-        data["task"]["func"] = _GONE_TASK_PATH
-        restored = ThreadmillTaskBackend.rebuild_failed_task_result(
-            json.dumps(data), ValueError("gone"), finished_at=timezone.now()
-        )
-        assert restored is not None
-        assert restored.task.module_path == _GONE_TASK_PATH
-        assert restored.status is TaskResultStatus.FAILED
-
-    @pytest.mark.parametrize("data", ["{not json", "{}", "[]"], ids=str)
-    def test_rebuild_failed_task_result__return_none_for_malformed_data(self, data):
-        """Return None when the payload cannot become a task result."""
-        assert (
-            ThreadmillTaskBackend.rebuild_failed_task_result(
-                data, ValueError("boom"), finished_at=timezone.now()
-            )
-            is None
-        )
 
 
 class TestRetryTask:

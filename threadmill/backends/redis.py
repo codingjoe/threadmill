@@ -17,7 +17,6 @@ import redis.asyncio
 import redis.asyncio.retry
 import redis.retry
 from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
-from django.tasks.base import TaskError
 from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
 from django.utils import timezone
@@ -144,14 +143,6 @@ class RedisBroker(Broker):
                 queue_name=queue_name,
                 error=exception,
                 data=data,
-                worker=worker,
-                lease_started_at=started_at,
-                lease_token=lease_token,
-                errors=[
-                    self.backend.create_task_error(
-                        AcknowledgementTimeoutError("Task processing lease expired.")
-                    )
-                ],
             )
             return
         now = timezone.now()
@@ -432,9 +423,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                             queue_name=queue_names[int(queue_index)],
                             error=exception,
                             data=data,
-                            worker=worker,
-                            lease_started_at=now,
-                            lease_token=lease_token,
                         )
                     else:
                         task_results.append(
@@ -538,48 +526,19 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         queue_name: str,
         error: BaseException,
         data: str,
-        worker: str | None,
-        lease_started_at: datetime.datetime | None,
-        lease_token: str | None,
-        errors: Sequence[TaskError] = (),
     ) -> None:
-        """
-        Report a task whose stored payload cannot be read and finalize it.
-
-        A payload that still names its task function is rebuilt as a FAILED
-        result. Any other payload is removed from the queue after the handler ran.
-        """
+        """Report a task whose stored payload cannot be read and remove it."""
         self._run_unreadable_payload_handler(
             UnreadablePayload(
                 task_id=task_id, queue_name=queue_name, payload=data, error=error
             )
         )
-        if (
-            task_result := self.rebuild_failed_task_result(
-                data, error, finished_at=timezone.now()
-            )
-        ) is None:
-            logger.warning(
-                "Task %r payload cannot be rebuilt; removing it from queue %r",
-                task_id,
-                queue_name,
-            )
-            self.discard_task(task_id, queue_name=queue_name)
-            return
-        task_result = dataclasses.replace(
-            task_result, errors=[*task_result.errors, *errors]
+        logger.warning(
+            "Task %r payload cannot be read; removing it from queue %r",
+            task_id,
+            queue_name,
         )
-        self.acknowledge(
-            dataclasses.replace(
-                self._apply_lease(
-                    task_result,
-                    worker=worker,
-                    lease_started_at=lease_started_at,
-                    lease_token=lease_token,
-                ),
-                status=TaskResultStatus.FAILED,
-            )
-        )
+        self.discard_task(task_id, queue_name=queue_name)
 
     def acknowledge(self, task_result: TaskResult) -> None:
         serialized = self.serialize_task_result(task_result)

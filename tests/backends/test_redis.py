@@ -329,8 +329,8 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap__fails_task_when_payload_function_is_gone(self):
-        """A claimed payload whose task function is gone is failed, not dropped."""
+    def test_reap__discards_task_when_payload_function_is_gone(self):
+        """A claimed payload whose task function is gone is removed, not dropped silently."""
         backend = _make_backend(
             "reap_gone_func_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -345,15 +345,9 @@ class TestRedisBrokerReap:
 
             RedisBroker(backend)._reap_running_queue("default")
 
-            failed = backend.get_result(task_result.id)
-            assert failed.status is TaskResultStatus.FAILED
-            assert failed.task.module_path == _GONE_CALLBACK
-            assert [error.exception_class_path for error in failed.errors] == [
-                "builtins.ValueError",
-                "threadmill.exceptions.AcknowledgementTimeoutError",
-            ]
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, task_result.id) is None
+            _assert_discarded(backend, task_result.id)
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
         finally:
             backend.close()
 
@@ -390,7 +384,7 @@ class TestRedisBrokerReap:
         ids=["malformed", "not-a-result", "not-an-object"],
     )
     def test_reap__discards_task_when_payload_cannot_be_read(self, corruption, caplog):
-        """A payload the reaper cannot rebuild is logged and removed from the queue."""
+        """A payload the reaper cannot read is logged and removed from the queue."""
         backend = _make_backend(
             "reap_discard_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -406,15 +400,15 @@ class TestRedisBrokerReap:
             with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert "payload cannot be rebuilt; removing it" in caplog.text
+            assert "payload cannot be read; removing it" in caplog.text
             _assert_discarded(backend, task_result.id)
             with pytest.raises(TaskResultDoesNotExist):
                 backend.get_result(task_result.id)
         finally:
             backend.close()
 
-    def test_reap__fails_task_with_unknown_status(self):
-        """A readable payload with an unknown status is rebuilt as FAILED."""
+    def test_reap__discards_task_with_unknown_status(self):
+        """A readable payload with an unknown status is logged and removed."""
         backend = _make_backend(
             "reap_unknown_status_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -429,9 +423,7 @@ class TestRedisBrokerReap:
 
             RedisBroker(backend)._reap_running_queue("default")
 
-            failed = backend.get_result(task_result.id)
-            assert failed.status is TaskResultStatus.FAILED
-            assert failed.errors[0].exception_class_path == "builtins.ValueError"
+            _assert_discarded(backend, task_result.id)
         finally:
             backend.close()
 
@@ -468,8 +460,8 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def test_acquire__fails_unreadable_payload_and_keeps_batch(self, caplog):
-        """One gone task function fails alone and the rest of the batch is returned."""
+    def test_acquire__discards_unreadable_payload_and_keeps_batch(self, caplog):
+        """One gone task function is removed alone and the rest of the batch is returned."""
         backend = _make_backend("acquire_poison_test")
         try:
             first = backend.enqueue(echo, args=[1])
@@ -486,18 +478,9 @@ class TestRedisTaskBackend:
 
             assert [result.id for result in acquired] == [first.id, last.id]
             assert "payload cannot be read" in caplog.text
-            failed = backend.get_result(poison.id)
-            assert failed.status is TaskResultStatus.FAILED
-            assert failed.task.module_path == _GONE_CALLBACK
-            assert failed.errors[0].exception_class_path == "builtins.ValueError"
-            assert [
-                result.id
-                for result in backend.peek(
-                    queue_name="default", status=TaskResultStatus.FAILED, count=10
-                )
-            ] == [poison.id]
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, poison.id) is None
+            _assert_discarded(backend, poison.id)
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(poison.id)
         finally:
             backend.close()
 
@@ -566,8 +549,8 @@ class TestRedisTaskBackend:
             RECEIVED_PAYLOADS.clear()
             backend.close()
 
-    def test_acquire__finalizes_when_handler_raises(self, caplog):
-        """A handler failure is logged and the task still reaches FAILED."""
+    def test_acquire__discards_when_handler_raises(self, caplog):
+        """A handler failure is logged and the task is still removed."""
         backend = _make_backend("acquire_handler_error_test")
         backend.unreadable_payload_handler = _raise_unreadable_payload
         try:
@@ -584,7 +567,7 @@ class TestRedisTaskBackend:
                 )
 
             assert "Unreadable payload handler failed" in caplog.text
-            assert backend.get_result(poison.id).status is TaskResultStatus.FAILED
+            _assert_discarded(backend, poison.id)
         finally:
             backend.close()
 

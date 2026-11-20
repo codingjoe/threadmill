@@ -212,12 +212,10 @@ The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 
 A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeoutError` error, or is marked FAILED when nothing retries it.
-A stored payload is rebuilt as a FAILED result when its task function is gone
-from the code base. The read error is recorded beside the task, so the result
-shows on the Failed tab and can be requeued. A retry callback path that no longer
-imports is read from the task definition instead, so it does not fail the task.
-A payload that cannot be rebuilt, such as malformed JSON, is logged and removed
-from the queue. A payload read never stops the worker process.
+A stored payload whose task function no longer imports is logged and removed
+from the queue. The retry callback is read from the task definition, so a stale
+stored path does not fail the task. Any other unreadable payload is logged and
+removed as well. A payload read never stops the worker process.
 
 Pass `unreadable_payload_handler` to receive every unreadable payload:
 
