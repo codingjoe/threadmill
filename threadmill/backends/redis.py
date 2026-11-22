@@ -172,7 +172,10 @@ class ThreadmillFunctionCommands:
         self, *, segment_key: str, task_data_key: str, result_key: str, task_id: str
     ) -> int | Awaitable[int]:
         """
-        Delete a task and its payload when its segment entry is removed.
+        Delete a task from its segment together with its payload.
+
+        The payload is kept when the segment entry is already gone, so a late
+        result or a requeued task survives.
 
         Args:
             segment_key: Status segment that holds the task ID.
