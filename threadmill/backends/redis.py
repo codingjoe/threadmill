@@ -126,8 +126,6 @@ class RedisBroker(Broker):
         try:
             task_result = self.backend.get_leased_task(task_id)
         except (ImportError, ValueError) as exception:
-            if not self.backend.is_stale_task_reference(exception):
-                raise
             self.backend.discard_unreadable_task(
                 task_id, queue_name=queue_name, error=exception
             )
@@ -399,11 +397,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 for task_id, data, lease_token, queue_index in result:
                     try:
                         task_result = self.deserialize_task_result(data)
-                    # A gone task function or retry callback is the deploy case.
-                    # Anything else is corrupt data and must fail loudly.
+                    # A gone task reference or a malformed document is dropped.
                     except (ImportError, ValueError) as exception:
-                        if not self.is_stale_task_reference(exception):
-                            raise
                         self.discard_unreadable_task(
                             task_id,
                             queue_name=queue_names[int(queue_index)],
@@ -470,15 +465,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 if worker is not None
                 else task_result.worker_ids
             ),
-        )
-
-    @staticmethod
-    def is_stale_task_reference(exception: BaseException) -> bool:
-        """Return True when a stored task function or retry callback is gone."""
-        if isinstance(exception, ImportError):
-            return True
-        return isinstance(exception, ValueError) and isinstance(
-            exception.__cause__, (ImportError, AttributeError)
         )
 
     def discard_unreadable_task(

@@ -384,19 +384,39 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    @pytest.mark.parametrize(
-        "corruption",
-        [
-            {"data": "{not json"},
-            {"data": "{}"},
-            {"data": "[]"},
-        ],
-        ids=["malformed", "not-a-result", "not-an-object"],
-    )
-    def test_reap__raise_for_malformed_payload(self, corruption):
-        """A payload that is not a task result fails the reaper pass."""
+    def test_reap__discards_task_when_payload_cannot_be_read(self, caplog):
+        """A payload that raises a value error is logged and removed."""
         backend = _make_backend(
             "reap_malformed_test", lease_ttl=datetime.timedelta(seconds=1)
+        )
+        try:
+            task_result = backend.enqueue(echo, args=[42])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="worker-1"
+            )
+            assert acquired is not None
+            _corrupt_payload(backend, task_result.id, data="{not json")
+            _expire_lease(backend, task_result.id)
+
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+                RedisBroker(backend)._reap_running_queue("default")
+
+            assert "payload cannot be read" in caplog.text
+            _assert_discarded(backend, task_result.id)
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [{"data": "{}"}, {"data": "[]"}],
+        ids=["not-a-result", "not-an-object"],
+    )
+    def test_reap__raise_for_non_value_payload(self, corruption):
+        """A payload that raises outside the value errors fails the reaper pass."""
+        backend = _make_backend(
+            "reap_non_value_test", lease_ttl=datetime.timedelta(seconds=1)
         )
         try:
             task_result = backend.enqueue(echo, args=[42])
@@ -407,21 +427,16 @@ class TestRedisBrokerReap:
             _corrupt_payload(backend, task_result.id, **corruption)
             _expire_lease(backend, task_result.id)
 
-            with pytest.raises((AttributeError, ValueError)):
+            with pytest.raises(AttributeError):
                 RedisBroker(backend)._reap_running_queue("default")
 
             running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
             assert backend.client.zscore(running_key, task_result.id) is not None
-            assert backend.client.exists(
-                backend.TASK_KEY.format(
-                    prefix=backend.key_prefix, task_id=task_result.id
-                )
-            )
         finally:
             backend.close()
 
-    def test_reap__raise_for_unknown_status(self):
-        """A payload with an unknown status fails the reaper pass."""
+    def test_reap__discards_task_with_unknown_status(self):
+        """A payload with an unknown status is logged and removed."""
         backend = _make_backend(
             "reap_unknown_status_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -434,11 +449,9 @@ class TestRedisBrokerReap:
             _corrupt_payload(backend, task_result.id, status="CANCELLED")
             _expire_lease(backend, task_result.id)
 
-            with pytest.raises(ValueError, match="not a valid TaskResultStatus"):
-                RedisBroker(backend)._reap_running_queue("default")
+            RedisBroker(backend)._reap_running_queue("default")
 
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, task_result.id) is not None
+            _assert_discarded(backend, task_result.id)
         finally:
             backend.close()
 
@@ -499,20 +512,24 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def test_acquire__raise_for_malformed_payload(self):
-        """A malformed payload fails loudly instead of being discarded."""
+    def test_acquire__discards_malformed_payload_and_keeps_batch(self, caplog):
+        """A malformed payload is logged and removed while the batch continues."""
         backend = _make_backend("acquire_malformed_test")
         try:
             malformed = backend.enqueue(echo, args=[1])
+            healthy = backend.enqueue(echo, args=[2])
             _corrupt_payload(backend, malformed.id, data="{not json")
 
-            with pytest.raises(json.JSONDecodeError):
-                backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="malformed-test"
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
+                acquired = backend.acquire(
+                    count=2,
+                    timeout=datetime.timedelta(seconds=1),
+                    worker="malformed-test",
                 )
 
-            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
-            assert backend.client.zscore(running_key, malformed.id) is not None
+            assert [result.id for result in acquired] == [healthy.id]
+            assert "payload cannot be read" in caplog.text
+            _assert_discarded(backend, malformed.id)
         finally:
             backend.close()
 
