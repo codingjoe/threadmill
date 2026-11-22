@@ -20,7 +20,6 @@ from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
 from django.utils import timezone
-from django.utils.module_loading import import_string
 
 from threadmill.backends.base import (
     BackendTelemetry,
@@ -28,7 +27,6 @@ from threadmill.backends.base import (
     QueueCounts,
     QueueRates,
     QueueStats,
-    StaleTaskReference,
     TelemetryDirection,
     TelemetryEvent,
     ThreadmillTaskBackend,
@@ -124,32 +122,16 @@ class RedisBroker(Broker):
             self._reap_task(task_id, queue_name)
 
     def _reap_task(self, task_id: str, queue_name: str) -> None:
-        """Requeue or fail it, and finalize it when the payload cannot be read."""
-        task_key = self.backend.TASK_KEY.format(
-            prefix=self.backend.key_prefix, task_id=task_id
-        )
-        data, lease_worker, lease_started_at, lease_token = self.backend.client.hmget(
-            task_key, "data", *self.backend.LEASE_FIELDS
-        )
-        if data is None:
-            logger.warning("Claimed task %r has no task data; skipping", task_id)
-            return
-        worker = lease_worker or None
-        started_at = _parse_lease_started_at(lease_started_at)
+        """Requeue or fail it, and remove it when the payload cannot be read."""
         try:
-            task_result = self.backend._apply_lease(
-                self.backend.deserialize_task_result(data),
-                worker=worker,
-                lease_started_at=started_at,
-                lease_token=lease_token,
-            )
+            task_result = self.backend.get_leased_task(task_id)
         except Exception as exception:  # noqa: BLE001
             self.backend.discard_unreadable_task(
-                task_id,
-                queue_name=queue_name,
-                error=exception,
-                data=data,
+                task_id, queue_name=queue_name, error=exception
             )
+            return
+        if task_result is None:
+            logger.warning("Claimed task %r has no task data; skipping", task_id)
             return
         now = timezone.now()
         task_result = dataclasses.replace(
@@ -280,14 +262,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
         self._dequeue_script = self.client.register_script(self.DEQUEUE_SCRIPT)
         self._purge_script = self.client.register_script(self.PURGE_SCRIPT)
-        handler_path = self.options.get("stale_task_reference_handler")
-        self.stale_task_reference_handler: collections.abc.Callable[
-            [StaleTaskReference], None
-        ] = (
-            import_string(handler_path)
-            if handler_path
-            else self._log_stale_task_reference
-        )
 
     @property
     def _idle_backoff(self) -> _IdleBackoff:
@@ -430,7 +404,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                             task_id,
                             queue_name=queue_names[int(queue_index)],
                             error=exception,
-                            data=data,
                         )
                     else:
                         task_results.append(
@@ -495,60 +468,21 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             ),
         )
 
-    @staticmethod
-    def is_stale_task_reference(exception: BaseException) -> bool:
-        """Return True when a stored task no longer imports its task function."""
-        return isinstance(exception, ValueError) and isinstance(
-            exception.__cause__, (ImportError, AttributeError)
-        )
-
-    @staticmethod
-    def _log_stale_task_reference(stale: StaleTaskReference) -> None:
-        """Report a task whose function no longer imports."""
-        logger.error(
-            "Task %r is a stale task reference: %s",
-            stale.task_id,
-            stale.error,
-            exc_info=stale.error,
-        )
-
-    def _run_stale_task_reference_handler(self, stale: StaleTaskReference) -> None:
-        """Call the configured handler, keeping a handler failure from stranding the task."""
-        try:
-            self.stale_task_reference_handler(stale)
-        except Exception:
-            logger.exception(
-                "Stale task reference handler failed for task %r", stale.task_id
-            )
-
     def discard_unreadable_task(
         self,
         task_id: str,
         *,
         queue_name: str,
         error: BaseException,
-        data: str,
     ) -> None:
-        """Report and remove a task whose stored payload cannot be read."""
-        if self.is_stale_task_reference(error):
-            self._run_stale_task_reference_handler(
-                StaleTaskReference(
-                    task_id=task_id, queue_name=queue_name, payload=data, error=error
-                )
-            )
-            logger.warning(
-                "Task %r is a stale task reference; removing it from queue %r",
-                task_id,
-                queue_name,
-            )
-        else:
-            logger.warning(
-                "Task %r payload cannot be read: %s; removing it from queue %r",
-                task_id,
-                error,
-                queue_name,
-                exc_info=error,
-            )
+        """Remove a task whose stored payload cannot be read."""
+        logger.error(
+            "Task %r payload cannot be read: %s; removing it from queue %r",
+            task_id,
+            error,
+            queue_name,
+            exc_info=error,
+        )
         self._dequeue_script(
             keys=[
                 self._segment_key(TaskResultStatus.RUNNING, queue_name),
@@ -702,28 +636,21 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 pipe.hmget(task_key, "data", *self.LEASE_FIELDS)
             else:
                 pipe.hget(task_key, "data")
-        for task_id, stored in zip(task_ids, pipe.execute(), strict=True):
+        for stored in pipe.execute():
             if not stored:
                 continue
-            try:
-                if leased:
-                    data, lease_worker, lease_started_at, lease_token = stored
-                    if not data:
-                        continue
-                    yield self._apply_lease(
-                        self.deserialize_task_result(data),
-                        worker=lease_worker or None,
-                        lease_started_at=_parse_lease_started_at(lease_started_at),
-                        lease_token=lease_token,
-                    )
-                else:
-                    yield self.deserialize_task_result(stored)
-            except Exception:
-                logger.warning(
-                    "Task %r payload cannot be read; skipping it",
-                    task_id,
-                    exc_info=True,
+            if leased:
+                data, lease_worker, lease_started_at, lease_token = stored
+                if not data:
+                    continue
+                yield self._apply_lease(
+                    self.deserialize_task_result(data),
+                    worker=lease_worker or None,
+                    lease_started_at=_parse_lease_started_at(lease_started_at),
+                    lease_token=lease_token,
                 )
+            else:
+                yield self.deserialize_task_result(stored)
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
         result_ids = self.client.zrange(zset_key, 0, count - 1, desc=True)
@@ -733,17 +660,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 prefix=self.key_prefix, result_id=result_id
             )
             pipe.get(result_key)
-        for result_id, stored in zip(result_ids, pipe.execute(), strict=True):
-            if not stored:
-                continue
-            try:
+        for stored in pipe.execute():
+            if stored:
                 yield self.deserialize_task_result(stored)
-            except Exception:
-                logger.warning(
-                    "Result %r payload cannot be read; skipping it",
-                    result_id,
-                    exc_info=True,
-                )
 
     def get_result(self, result_id: str) -> TaskResult:
         if data := self.client.get(

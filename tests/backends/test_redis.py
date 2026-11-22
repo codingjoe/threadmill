@@ -31,7 +31,6 @@ from threadmill.backends.base import (
     QueueCounts,
     QueueRates,
     QueueStats,
-    StaleTaskReference,
     TelemetryDirection,
     TelemetryEvent,
 )
@@ -140,20 +139,6 @@ def _assert_discarded(
         backend.DEFERRED_KEY.format(prefix=backend.key_prefix, queue_name=queue_name),
     ):
         assert backend.client.zscore(key, task_id) is None
-
-
-RECEIVED_STALE_TASKS: list[StaleTaskReference] = []
-
-
-def _record_stale_task(stale: StaleTaskReference) -> None:
-    """Record a handler call for assertions."""
-    RECEIVED_STALE_TASKS.append(stale)
-
-
-def _raise_stale_task(stale: StaleTaskReference) -> None:
-    """Raise from the handler to exercise the error path."""
-    message = "handler failed"
-    raise RuntimeError(message)
 
 
 _STALE_TASK_PATH = "tests.testapp.tasks.gone_from_the_code_base"
@@ -367,10 +352,10 @@ class TestRedisBrokerReap:
             _corrupt_payload(backend, task_result.id, task={"func": _STALE_TASK_PATH})
             _expire_lease(backend, task_result.id)
 
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 RedisBroker(backend)._reap_running_queue("default")
 
-            assert "is a stale task reference" in caplog.text
+            assert "payload cannot be read" in caplog.text
             _assert_discarded(backend, task_result.id)
             with pytest.raises(TaskResultDoesNotExist):
                 backend.get_result(task_result.id)
@@ -503,7 +488,7 @@ class TestRedisTaskBackend:
                 )
 
             assert [result.id for result in acquired] == [first.id, last.id]
-            assert "is a stale task reference" in caplog.text
+            assert "payload cannot be read" in caplog.text
             _assert_discarded(backend, stale.id)
             with pytest.raises(TaskResultDoesNotExist):
                 backend.get_result(stale.id)
@@ -512,15 +497,13 @@ class TestRedisTaskBackend:
 
     def test_acquire__discards_malformed_payload_and_keeps_batch(self, caplog):
         """A malformed payload is logged and removed while the batch continues."""
-        RECEIVED_STALE_TASKS.clear()
         backend = _make_backend("acquire_malformed_test")
-        backend.stale_task_reference_handler = _record_stale_task
         try:
             malformed = backend.enqueue(echo, args=[1])
             healthy = backend.enqueue(echo, args=[2])
             _corrupt_payload(backend, malformed.id, data="{not json")
 
-            with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
+            with caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"):
                 acquired = backend.acquire(
                     count=2,
                     timeout=datetime.timedelta(seconds=1),
@@ -529,10 +512,8 @@ class TestRedisTaskBackend:
 
             assert [result.id for result in acquired] == [healthy.id]
             assert "payload cannot be read" in caplog.text
-            assert RECEIVED_STALE_TASKS == []
             _assert_discarded(backend, malformed.id)
         finally:
-            RECEIVED_STALE_TASKS.clear()
             backend.close()
 
     def test_acquire__polls_again_when_whole_batch_cannot_be_read(self):
@@ -548,60 +529,6 @@ class TestRedisTaskBackend:
                 )
 
             _assert_discarded(backend, malformed.id)
-        finally:
-            backend.close()
-
-    def test_acquire__runs_stale_task_reference_handler(self):
-        """A configured handler receives the record of a stale task reference."""
-        RECEIVED_STALE_TASKS.clear()
-        backend = _make_backend(
-            "acquire_handler_test",
-            stale_task_reference_handler=(
-                "tests.backends.test_redis._record_stale_task"
-            ),
-        )
-        try:
-            assert backend.stale_task_reference_handler is _record_stale_task
-            stale = backend.enqueue(echo, args=[1])
-            _corrupt_payload(backend, stale.id, task={"func": _STALE_TASK_PATH})
-            expected_payload = backend.client.hget(
-                backend.TASK_KEY.format(prefix=backend.key_prefix, task_id=stale.id),
-                "data",
-            )
-
-            with pytest.raises(TimeoutError):
-                backend.acquire(
-                    timeout=datetime.timedelta(seconds=1), worker="handler-test"
-                )
-
-            (reference,) = RECEIVED_STALE_TASKS
-            assert reference.task_id == stale.id
-            assert reference.queue_name == "default"
-            assert reference.payload == expected_payload
-            assert isinstance(reference.error, ValueError)
-        finally:
-            RECEIVED_STALE_TASKS.clear()
-            backend.close()
-
-    def test_acquire__discards_when_stale_task_reference_handler_raises(self, caplog):
-        """A handler failure is logged and the task is still removed."""
-        backend = _make_backend("acquire_handler_error_test")
-        backend.stale_task_reference_handler = _raise_stale_task
-        try:
-            stale = backend.enqueue(echo, args=[1])
-            _corrupt_payload(backend, stale.id, task={"func": _STALE_TASK_PATH})
-
-            with (
-                caplog.at_level(logging.ERROR, logger="threadmill.backends.redis"),
-                pytest.raises(TimeoutError),
-            ):
-                backend.acquire(
-                    timeout=datetime.timedelta(seconds=1),
-                    worker="handler-error-test",
-                )
-
-            assert "Stale task reference handler failed" in caplog.text
-            _assert_discarded(backend, stale.id)
         finally:
             backend.close()
 
@@ -1310,24 +1237,21 @@ class TestRedisTaskBackend:
         )
         assert [r.args for r in results] == [[1], [2]]
 
-    def test_peek__ready_skips_unreadable_payload(self, caplog):
-        """Peek READY skips a payload it cannot read and yields the rest."""
+    def test_peek__ready_raises_for_unreadable_payload(self):
+        """Peek READY raises when a payload cannot be read."""
         malformed = default_task_backend.enqueue(echo, args=[1])
         default_task_backend.enqueue(echo, args=[2])
         _corrupt_payload(default_task_backend, malformed.id, data="{not json")
 
-        with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-            results = list(
+        with pytest.raises(json.JSONDecodeError):
+            list(
                 default_task_backend.peek(
                     queue_name="default", status=TaskResultStatus.READY, count=10
                 )
             )
 
-        assert [r.args for r in results] == [[2]]
-        assert "payload cannot be read; skipping it" in caplog.text
-
-    def test_peek__failed_skips_unreadable_result(self, caplog):
-        """Peek FAILED skips a stored result it cannot read."""
+    def test_peek__failed_raises_for_unreadable_result(self):
+        """Peek FAILED raises when a stored result cannot be read."""
         task_result = default_task_backend.enqueue(echo, args=[1])
         (acquired,) = default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="peek-failed-test"
@@ -1346,15 +1270,12 @@ class TestRedisTaskBackend:
             "{not json",
         )
 
-        with caplog.at_level(logging.WARNING, logger="threadmill.backends.redis"):
-            results = list(
+        with pytest.raises(json.JSONDecodeError):
+            list(
                 default_task_backend.peek(
                     queue_name="default", status=TaskResultStatus.FAILED, count=10
                 )
             )
-
-        assert results == []
-        assert "payload cannot be read; skipping it" in caplog.text
 
     def test_peek__running_tasks(self):
         """Peek RUNNING returns acquired tasks with the lease's worker info."""

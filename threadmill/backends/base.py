@@ -1,4 +1,5 @@
 import collections.abc
+import contextlib
 import dataclasses
 import datetime
 import enum
@@ -52,30 +53,14 @@ class RetryTask(Task):
 
     @classmethod
     def _reconstruct(cls, kwargs):
-        func_path = kwargs.pop("func")
-        try:
-            task = import_string(func_path)
-            kwargs["func"] = task.func
-        except (ImportError, AttributeError) as exception:
-            message = f"Expected {func_path!r} to point to a Task instance."
-            raise ValueError(message) from exception
-        kwargs["retry"] = getattr(task, "retry", None)
-        return cls(**kwargs)
+        with contextlib.suppress(ImportError):
+            kwargs["retry"] = getattr(import_string(kwargs["func"]), "retry", None)
+        return super()._reconstruct(kwargs)
 
     def __reduce__(self):
         reconstructor, (kwargs,) = super().__reduce__()
         kwargs["retry"] = self.retry_path
         return (reconstructor, (kwargs,))
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class StaleTaskReference:
-    """A stored task whose function no longer imports after a deploy."""
-
-    task_id: str
-    queue_name: str
-    payload: str
-    error: BaseException
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)

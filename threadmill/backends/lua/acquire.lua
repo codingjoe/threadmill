@@ -50,7 +50,7 @@ while #tasks < max_count and misses < num_queues do
       'lease_worker', ARGV[5],
       'lease_started_at', ARGV[2],
       'lease_token', lease_token)
-    table.insert(tasks, { popped[1], data, lease_token, tostring(queue_index - 1) })
+    table.insert(tasks, { popped[1], data, lease_token, queue_index - 1 })
   end
   misses = data and 0 or (misses + 1)
   queue_index = queue_index % num_queues + 1
