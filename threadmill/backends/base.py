@@ -210,8 +210,6 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
 
     @classmethod
     def deserialize_task_result(cls, data: str) -> TaskResult:
-        """Read a stored payload back into a task result."""
-
         def _object_hook(d: dict) -> dict | TaskResult:
             if "task" in d and isinstance(d["task"], dict) and "func" in d["task"]:
                 task_data = d["task"]
