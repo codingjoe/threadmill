@@ -29,6 +29,8 @@ from threadmill.backends.base import (
 )
 from threadmill.exceptions import AcknowledgementTimeoutError
 
+_STALE_TASK_PATH = "tests.testapp.tasks.gone_from_the_code_base"
+
 
 class BackendDouble(ThreadmillTaskBackend):
     def enqueue(self, task, args, kwargs):
@@ -216,15 +218,6 @@ class TestThreadmillTaskBackend:
         restored = ThreadmillTaskBackend.deserialize_task_result(data)
         assert restored.task.retry is None
 
-    def test_deserialize_task_result__roundtrips_deconstructible_retry(self) -> None:
-        """deserialize_task_result restores a deconstructible retry callable."""
-        task = RetryTask(func=echo.func, retry=DeconstructibleRetry(seconds=5))
-        result = _task_result_with_retry(task)
-        data = ThreadmillTaskBackend.serialize_task_result(result)
-        restored = ThreadmillTaskBackend.deserialize_task_result(data)
-        assert isinstance(restored.task.retry, DeconstructibleRetry)
-        assert restored.task.retry.seconds == 5
-
     def test_deserialize_task_result__preserves_errors(self) -> None:
         """deserialize_task_result preserves accumulated errors."""
         error = TaskError(
@@ -244,6 +237,28 @@ class TestThreadmillTaskBackend:
         data = ThreadmillTaskBackend.serialize_task_result(result)
         restored = ThreadmillTaskBackend.deserialize_task_result(data)
         assert restored._return_value == 42
+
+    def test_deserialize_task_result__raise_for_stale_retry_path(self) -> None:
+        """Raise when the stored retry callback no longer imports."""
+        data = json.loads(
+            ThreadmillTaskBackend.serialize_task_result(
+                _task_result_with_retry(boom_with_retry)
+            )
+        )
+        data["task"]["retry"] = _STALE_TASK_PATH
+        with pytest.raises(ImportError):
+            ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
+
+    def test_deserialize_task_result__raise_for_stale_task_reference(self) -> None:
+        """Raise for a stored task whose function no longer imports."""
+        data = json.loads(
+            ThreadmillTaskBackend.serialize_task_result(
+                _task_result_with_retry(boom_with_retry)
+            )
+        )
+        data["task"]["func"] = _STALE_TASK_PATH
+        with pytest.raises(ValueError, match="to point to a Task instance"):
+            ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
 
 
 class TestRetryTask:

@@ -182,12 +182,12 @@ class CountingFuture(Future):
 
 
 def _make_prefetcher(
-    backend: StubPrefetchBackend,
+    backend: ThreadmillTaskBackend | StubPrefetchBackend,
     *,
     prefetch_count: int = 4,
     exit_empty: bool = False,
 ) -> TaskPrefetcher:
-    """Build a prefetcher over a scripted stub backend and worker."""
+    """Build a prefetcher over the given backend and a stub worker."""
     return TaskPrefetcher(
         worker=StubPrefetchWorker(exit_empty=exit_empty),
         backend=backend,
@@ -1280,6 +1280,24 @@ class TestTaskPrefetcher:
             second.id,
         ]
         assert all(call["count"] == 4 for call in backend.calls)
+
+    def test_run__continue_after_stale_task_reference(self):
+        """A stale task reference is discarded without stopping the prefetcher."""
+        stale = default_task_backend.enqueue(echo, args=[1])
+        healthy = default_task_backend.enqueue(echo, args=[2])
+        task_key = default_task_backend.TASK_KEY.format(
+            prefix=default_task_backend.key_prefix, task_id=stale.id
+        )
+        payload = json.loads(default_task_backend.client.hget(task_key, "data"))
+        payload["task"]["func"] = "tests.testapp.tasks.gone_from_the_code_base"
+        default_task_backend.client.hset(task_key, "data", json.dumps(payload))
+
+        prefetcher = _make_prefetcher(default_task_backend, prefetch_count=2)
+        prefetcher.worker.shutdown_requested.set()
+        prefetcher.run()
+
+        assert prefetcher.completion.exception() is None
+        assert prefetcher.task_buffer.get_nowait().id == healthy.id
 
     def test_run__stops_on_expired(self):
         """Return immediately when the worker has already expired."""

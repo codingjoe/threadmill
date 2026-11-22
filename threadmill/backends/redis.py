@@ -119,22 +119,15 @@ class RedisBroker(Broker):
             ],
         )
         for task_id in claimed_ids:
-            self._reap_task(task_id)
+            self._reap_task(task_id, queue_name)
 
-    def _reap_task(self, task_id: str) -> None:
-        """Requeue or fail it, and drop it when the payload cannot be read."""
+    def _reap_task(self, task_id: str, queue_name: str) -> None:
+        """Requeue or fail it, and remove it when the payload cannot be read."""
         try:
             task_result = self.backend.get_leased_task(task_id)
-        except ImportError, ValueError, KeyError, TypeError, AttributeError:
-            logger.exception(
-                "Task %r payload cannot be read; dropping the task", task_id
-            )
-            # Drop only the payload: the running entry stays for a lease holder's
-            # late acknowledge, and the reaper script sweeps it once the hash is gone.
-            self.backend.client.delete(
-                self.backend.TASK_KEY.format(
-                    prefix=self.backend.key_prefix, task_id=task_id
-                )
+        except (ImportError, ValueError) as exception:
+            self.backend.discard_unreadable_task(
+                task_id, queue_name=queue_name, error=exception
             )
             return
         if task_result is None:
@@ -400,15 +393,27 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 idle_backoff.rotation_offset = (idle_backoff.rotation_offset + 1) % len(
                     queue_names
                 )
-                return [
-                    self._apply_lease(
-                        self.deserialize_task_result(data),
-                        worker=worker,
-                        lease_started_at=now,
-                        lease_token=lease_token,
-                    )
-                    for data, lease_token in result
-                ]
+                task_results: list[ThreadmillTaskResult] = []
+                for task_id, data, lease_token, queue_index in result:
+                    try:
+                        task_result = self.deserialize_task_result(data)
+                    except (ImportError, ValueError) as exception:
+                        self.discard_unreadable_task(
+                            task_id,
+                            queue_name=queue_names[int(queue_index)],
+                            error=exception,
+                        )
+                    else:
+                        task_results.append(
+                            self._apply_lease(
+                                task_result,
+                                worker=worker,
+                                lease_started_at=now,
+                                lease_token=lease_token,
+                            )
+                        )
+                if task_results:
+                    return task_results
 
             try:
                 remaining = deadline - time.monotonic()
@@ -458,6 +463,31 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 else task_result.worker_ids
             ),
         )
+
+    def discard_unreadable_task(
+        self,
+        task_id: str,
+        *,
+        queue_name: str,
+        error: BaseException,
+    ) -> None:
+        """Remove a task whose stored payload cannot be read."""
+        logger.error(
+            "Task %r payload cannot be read: %s; removing it from queue %r",
+            task_id,
+            error,
+            queue_name,
+            exc_info=error,
+        )
+        self._dequeue_script(
+            keys=[
+                self._segment_key(TaskResultStatus.RUNNING, queue_name),
+                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id),
+                self.RESULT_KEY.format(prefix=self.key_prefix, result_id=task_id),
+            ],
+            args=[task_id],
+        )
+        self.client.publish(self.telemetry_channel, f"egress:{queue_name}")
 
     def acknowledge(self, task_result: TaskResult) -> None:
         serialized = self.serialize_task_result(task_result)

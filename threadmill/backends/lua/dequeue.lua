@@ -9,5 +9,8 @@
 -- ARGV[1]  -- task ID
 -- Returns: 1 when the segment entry was removed, 0 otherwise
 
-redis.call('DEL', KEYS[2], KEYS[3])
-return redis.call('ZREM', KEYS[1], ARGV[1])
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if removed == 1 then
+  redis.call('DEL', KEYS[2], KEYS[3])
+end
+return removed

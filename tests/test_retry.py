@@ -126,24 +126,12 @@ class TestExponentialBackoff:
         assert backoff == reconstructed
 
     def test_serialize__roundtrips_through_task_result(self) -> None:
-        """ExponentialBackoff survives JSON serialization as a retry callback."""
-        import uuid
+        """A deconstructible retry from the task definition survives serialization."""
+        from tests.testapp.tasks import echo_with_backoff
+        from threadmill.backends.base import ThreadmillTaskBackend
 
-        from django.tasks import TaskResult, TaskResultStatus
-        from django.utils import timezone
-
-        from threadmill.backends.base import RetryTask, ThreadmillTaskBackend
-
-        backoff = retry.ExponentialBackoff(
-            base_delay=datetime.timedelta(seconds=2),
-            max_delay=datetime.timedelta(minutes=5),
-            max_retries=3,
-        )
-        from tests.testapp.tasks import echo
-
-        task = RetryTask(func=echo.func, retry=backoff)
         result = TaskResult(
-            task=task,
+            task=echo_with_backoff,
             id=str(uuid.uuid7()),
             status=TaskResultStatus.FAILED,
             enqueued_at=timezone.now(),
@@ -159,4 +147,4 @@ class TestExponentialBackoff:
         data = ThreadmillTaskBackend.serialize_task_result(result)
         restored = ThreadmillTaskBackend.deserialize_task_result(data)
         assert isinstance(restored.task.retry, retry.ExponentialBackoff)
-        assert restored.task.retry == backoff
+        assert restored.task.retry == echo_with_backoff.retry

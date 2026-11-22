@@ -1,8 +1,8 @@
 -- Lease up to ARGV[8] ready tasks for the calling worker in one round-trip:
--- each task's stored payload comes back beside the lease token stamped for it.
--- Queues are tried round-robin from ARGV[7], one queue per pop, so a batch
--- spreads across queues instead of draining one and a backlogged queue cannot
--- starve its neighbours.
+-- each task's stored payload comes back beside its id, the lease token stamped
+-- for it, and the queue pair it came from. Queues are tried round-robin from
+-- ARGV[7], one queue per pop, so a batch spreads across queues instead of
+-- draining one and a backlogged queue cannot starve its neighbours.
 --
 -- The payload comes back as it was enqueued. Apply the lease stamped beside it
 -- (lease_worker, lease_started_at, lease_token) to report the task as RUNNING.
@@ -19,9 +19,10 @@
 -- ARGV[7]     -- start_index; 0-based index of the queue pair to scan first, so
 --                start_index 0 is the pair at KEYS[1] and KEYS[2]
 -- ARGV[8]     -- maximum number of tasks to lease
--- Returns: array of {payload, lease_token} pairs, empty when no queue yields a
--- task. A queue whose head entry holds no payload yields nothing for that pop
--- and the scan moves on.
+-- Returns: array of {task_id, payload, lease_token, queue_index} tuples, empty
+-- when no queue yields a task. The queue index is 0-based, so index 0 is the
+-- pair at KEYS[1] and KEYS[2]. A queue whose head entry holds no payload yields
+-- nothing for that pop and the scan moves on.
 
 local num_queues = tonumber(ARGV[4])
 local lease_ttl_ms = tonumber(ARGV[6])
@@ -49,7 +50,7 @@ while #tasks < max_count and misses < num_queues do
       'lease_worker', ARGV[5],
       'lease_started_at', ARGV[2],
       'lease_token', lease_token)
-    table.insert(tasks, { data, lease_token })
+    table.insert(tasks, { popped[1], data, lease_token, queue_index - 1 })
   end
   misses = data and 0 or (misses + 1)
   queue_index = queue_index % num_queues + 1
