@@ -1,9 +1,7 @@
 -- Delete one task and its stored payload atomically.
 --
 -- The task hash covers pending tasks and the result key covers finished tasks,
--- so both are deleted and the missing one is a no-op. Payloads are deleted only
--- when this call removed the segment entry, so a late acknowledge that finished
--- first keeps its result.
+-- so both are deleted and the missing one is a no-op.
 --
 -- KEYS[1]  -- status segment (ZSET, ready, running, successful, or failed)
 -- KEYS[2]  -- task data key (HASH)

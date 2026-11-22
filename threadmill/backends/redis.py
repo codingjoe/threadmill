@@ -397,7 +397,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 for task_id, data, lease_token, queue_index in result:
                     try:
                         task_result = self.deserialize_task_result(data)
-                    # A gone task reference or a malformed document is dropped.
                     except (ImportError, ValueError) as exception:
                         self.discard_unreadable_task(
                             task_id,
@@ -415,7 +414,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                         )
                 if task_results:
                     return task_results
-                # Every leased payload was unreadable. Poll again for work.
 
             try:
                 remaining = deadline - time.monotonic()
