@@ -37,6 +37,7 @@ from threadmill.backends.base import (
 from threadmill.backends.redis import (
     RedisBroker,
     RedisTaskBackend,
+    ThreadmillFunctionCommands,
     _IdleBackoff,
 )
 
@@ -60,28 +61,28 @@ def _stats(**overrides: int | datetime.timedelta) -> QueueStats:
     return QueueStats(counts=counts, rates=rates)
 
 
-class CountingAcquireScript:
-    """Delegate to the real acquire script while recording each invocation."""
+class CountingAcquire:
+    """Delegate to the client's acquire while recording each invocation."""
 
-    def __init__(self, script: collections.abc.Callable[..., typing.Any]) -> None:
-        self.script: collections.abc.Callable[..., typing.Any] = script
+    def __init__(self, acquire: collections.abc.Callable[..., typing.Any]) -> None:
+        self.acquire: collections.abc.Callable[..., typing.Any] = acquire
         self.calls: list[float] = []
 
     def __call__(self, **kwargs: typing.Any) -> typing.Any:
         self.calls.append(time.monotonic())
-        return self.script(**kwargs)
+        return self.acquire(**kwargs)
 
 
-class RecordingAcquireScript:
-    """Delegate to the real acquire script while recording each argument list."""
+class RecordingAcquire:
+    """Delegate to the client's acquire while recording each call."""
 
-    def __init__(self, script: collections.abc.Callable[..., typing.Any]) -> None:
-        self.script: collections.abc.Callable[..., typing.Any] = script
-        self.sent_args: list[list[str]] = []
+    def __init__(self, acquire: collections.abc.Callable[..., typing.Any]) -> None:
+        self.acquire: collections.abc.Callable[..., typing.Any] = acquire
+        self.calls: list[dict[str, typing.Any]] = []
 
     def __call__(self, **kwargs: typing.Any) -> typing.Any:
-        self.sent_args.append(kwargs["args"])
-        return self.script(**kwargs)
+        self.calls.append(kwargs)
+        return self.acquire(**kwargs)
 
 
 def _make_backend(
@@ -105,7 +106,7 @@ def _make_backend(
 
 
 def _measure_wait_deltas(calls: list[float]) -> list[float]:
-    """Return the seconds elapsed between consecutive recorded script calls."""
+    """Return the seconds elapsed between consecutive recorded function calls."""
     return [calls[index + 1] - calls[index] for index in range(len(calls) - 1)]
 
 
@@ -161,16 +162,29 @@ def _claim_expired(
     *,
     queue_name: str = "default",
 ) -> list[str]:
-    """Run the reaper claim script and return the claimed IDs."""
-    claimed = broker._reaper_script(
-        keys=[backend._segment_key(TaskResultStatus.RUNNING, queue_name)],
-        args=[
-            str(int(RedisBroker.CLAIM_TTL.total_seconds() * 1000)),
-            str(backend.batch_size),
-            f"{backend.key_prefix}:task:",
-        ],
+    """Run the reaper claim function and return the claimed IDs."""
+    claimed = broker.backend.client.reaper(
+        running_key=backend._segment_key(TaskResultStatus.RUNNING, queue_name),
+        claim_ttl_ms=int(RedisBroker.CLAIM_TTL.total_seconds() * 1000),
+        max_count=backend.batch_size,
+        task_key_prefix=backend.task_key_prefix,
     )
     return list(claimed)
+
+
+class TestThreadmillFunctionCommands:
+    def test_source__declares_python_schema(self):
+        """Declare every stored field with the value Python reads."""
+        expected = {
+            "TASK_DATA_FIELD": ThreadmillFunctionCommands.DATA,
+            "TASK_SCORE_FIELD": ThreadmillFunctionCommands.SCORE,
+            "LEASE_WORKER_FIELD": ThreadmillFunctionCommands.LEASE_WORKER,
+            "LEASE_STARTED_AT_FIELD": ThreadmillFunctionCommands.LEASE_STARTED_AT,
+            "LEASE_TOKEN_FIELD": ThreadmillFunctionCommands.LEASE_TOKEN,
+            "STATUS_SUCCESSFUL": TaskResultStatus.SUCCESSFUL.name,
+        }
+        for name, value in expected.items():
+            assert f"local {name} = '{value}'" in ThreadmillFunctionCommands.SOURCE
 
 
 class TestRedisBroker:
@@ -1129,7 +1143,9 @@ class TestRedisTaskBackend:
         task_key = default_task_backend.TASK_KEY.format(
             prefix=default_task_backend.key_prefix, task_id=task_result.id
         )
-        default_task_backend.client.hdel(task_key, *default_task_backend.LEASE_FIELDS)
+        default_task_backend.client.hdel(
+            task_key, *ThreadmillFunctionCommands.LEASE_FIELDS
+        )
 
         (result,) = default_task_backend.peek(
             queue_name="default", status=TaskResultStatus.RUNNING, count=10
@@ -1699,13 +1715,13 @@ class TestRedisTaskBackend:
     def test_acquire__backs_off_when_idle(self):
         """Idle waits grow so a one-second acquire polls far less than every 10ms."""
         backend = _make_backend("acquire_backoff_test")
-        backend._acquire_script = CountingAcquireScript(backend._acquire_script)
+        backend.client.acquire = CountingAcquire(backend.client.acquire)
         try:
             started_at = time.monotonic()
             with pytest.raises(TimeoutError):
                 backend.acquire(timeout=datetime.timedelta(seconds=1))
             elapsed_secs = time.monotonic() - started_at
-            poll_count = len(backend._acquire_script.calls)
+            poll_count = len(backend.client.acquire.calls)
             assert elapsed_secs >= 0.99
             assert 1 < poll_count <= 20
         finally:
@@ -1720,11 +1736,11 @@ class TestRedisTaskBackend:
             poll_interval=datetime.timedelta(seconds=poll_interval_secs),
             poll_max_interval=datetime.timedelta(seconds=poll_max_secs),
         )
-        backend._acquire_script = CountingAcquireScript(backend._acquire_script)
+        backend.client.acquire = CountingAcquire(backend.client.acquire)
         try:
             with pytest.raises(TimeoutError):
                 backend.acquire(timeout=datetime.timedelta(seconds=1.5))
-            deltas = _measure_wait_deltas(backend._acquire_script.calls)
+            deltas = _measure_wait_deltas(backend.client.acquire.calls)
             assert len(deltas) >= 4
             assert deltas[0] >= poll_interval_secs * 0.8
             assert deltas[1] >= poll_interval_secs * 1.6
@@ -1740,24 +1756,24 @@ class TestRedisTaskBackend:
             "acquire_reset_test",
             poll_interval=datetime.timedelta(seconds=poll_interval_secs),
         )
-        script = CountingAcquireScript(backend._acquire_script)
-        backend._acquire_script = script
+        counter = CountingAcquire(backend.client.acquire)
+        backend.client.acquire = counter
         try:
             with pytest.raises(TimeoutError):
                 backend.acquire(timeout=datetime.timedelta(seconds=1))
-            buildup_end = len(script.calls)
-            buildup_deltas = _measure_wait_deltas(script.calls)
+            buildup_end = len(counter.calls)
+            buildup_deltas = _measure_wait_deltas(counter.calls)
             # Slow runners inflate deltas, so only bind timing with slack.
             if len(buildup_deltas) > 2:
                 assert buildup_deltas[2] >= 0.15
 
             backend.enqueue(echo, args=[1])
             (_acquired,) = backend.acquire(timeout=datetime.timedelta(seconds=1))
-            assert len(script.calls) == buildup_end + 1
+            assert len(counter.calls) == buildup_end + 1
 
             with pytest.raises(TimeoutError):
                 backend.acquire(timeout=datetime.timedelta(seconds=0.5))
-            reset_deltas = _measure_wait_deltas(script.calls[buildup_end + 1 :])
+            reset_deltas = _measure_wait_deltas(counter.calls[buildup_end + 1 :])
             # Slow runners may only fit the first wait into the budget.
             assert reset_deltas[0] < max(buildup_deltas)
             if len(reset_deltas) > 1:
@@ -1781,11 +1797,11 @@ class TestRedisTaskBackend:
     def test_acquire__raise_queue_empty_when_timeout_is_none(self):
         """Acquire without a timeout raises queue.Empty after a single attempt."""
         backend = _make_backend("acquire_empty_test")
-        backend._acquire_script = CountingAcquireScript(backend._acquire_script)
+        backend.client.acquire = CountingAcquire(backend.client.acquire)
         try:
             with pytest.raises(queue.Empty):
                 backend.acquire()
-            assert len(backend._acquire_script.calls) == 1
+            assert len(backend.client.acquire.calls) == 1
         finally:
             backend.close()
 
@@ -1864,8 +1880,8 @@ class TestRedisTaskBackend:
             "acquire_rotation_wrap_test",
             queues=list(queue_names),
         )
-        recorder = RecordingAcquireScript(backend._acquire_script)
-        backend._acquire_script = recorder
+        recorder = RecordingAcquire(backend.client.acquire)
+        backend.client.acquire = recorder
         backend._idle_backoff.rotation_offset = 2
         try:
             for repeat in range(2):
@@ -1885,12 +1901,8 @@ class TestRedisTaskBackend:
                 "default",
                 "compute",
             ] * 2
-            assert [sent_args[-2] for sent_args in recorder.sent_args] == [
-                "2",
-                "0",
-                "1",
-            ] * 2
-            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"1"}
+            assert [call["start_index"] for call in recorder.calls] == [2, 0, 1] * 2
+            assert {call["max_count"] for call in recorder.calls} == {1}
         finally:
             backend.close()
 
@@ -1900,8 +1912,8 @@ class TestRedisTaskBackend:
             "acquire_idle_rotation_test",
             queues=["default", "compute"],
         )
-        recorder = RecordingAcquireScript(backend._acquire_script)
-        backend._acquire_script = recorder
+        recorder = RecordingAcquire(backend.client.acquire)
+        backend.client.acquire = recorder
         backend._idle_backoff.rotation_offset = 5
         try:
             with pytest.raises(TimeoutError):
@@ -1910,24 +1922,24 @@ class TestRedisTaskBackend:
                     "compute",
                     timeout=datetime.timedelta(seconds=0.3),
                 )
-            assert len(recorder.sent_args) > 1
-            assert {sent_args[-2] for sent_args in recorder.sent_args} == {"5"}
-            assert {sent_args[-1] for sent_args in recorder.sent_args} == {"1"}
+            assert len(recorder.calls) > 1
+            assert {call["start_index"] for call in recorder.calls} == {5}
+            assert {call["max_count"] for call in recorder.calls} == {1}
             assert backend._idle_backoff.rotation_offset == 5
         finally:
             backend.close()
 
-    def test_acquire__passes_count_to_script(self):
-        """acquire() sends the requested count as the last script argument."""
+    def test_acquire__passes_count(self):
+        """acquire() sends the requested count to the function."""
         backend = _make_backend("acquire_count_arg_test")
-        recorder = RecordingAcquireScript(backend._acquire_script)
-        backend._acquire_script = recorder
+        recorder = RecordingAcquire(backend.client.acquire)
+        backend.client.acquire = recorder
         try:
             backend.enqueue(echo, args=[1])
             (acquired,) = backend.acquire(
                 count=3, timeout=datetime.timedelta(seconds=1), worker="count-test"
             )
-            assert recorder.sent_args[-1][-1] == "3"
+            assert recorder.calls[-1]["max_count"] == 3
             assert acquired.worker_ids == ["count-test"]
         finally:
             backend.close()
@@ -2067,6 +2079,23 @@ class TestRedisTaskBackend:
             pipe.client_kill_filter(_id=await client.client_id(), skipme=False)
             pipe.ping()
             assert await pipe.execute() == [0, True]
+
+    async def test_async_client__call_function(self):
+        """Load the library on the async client and invoke a function."""
+        backend = _make_backend("async_function_test")
+        try:
+            async with backend.async_client() as client:
+                claimed = await client.reaper(
+                    running_key=backend._segment_key(
+                        TaskResultStatus.RUNNING, "default"
+                    ),
+                    claim_ttl_ms=60_000,
+                    max_count=10,
+                    task_key_prefix=backend.task_key_prefix,
+                )
+            assert claimed == []
+        finally:
+            backend.close()
 
     async def test_init__default_redis_connection_retries(self):
         """Retry commands three times on both clients without the option."""
