@@ -35,7 +35,7 @@ local function acquire_tasks(queue_keys, now_ms, lease_started_at_iso,
           LEASE_WORKER_FIELD, worker,
           LEASE_STARTED_AT_FIELD, lease_started_at_iso,
           LEASE_TOKEN_FIELD, lease_token)
-        table.insert(tasks, { data, lease_token })
+        table.insert(tasks, { popped[1], data, lease_token, queue_index - 1 })
       end
     end
     misses = data and 0 or (misses + 1)
@@ -71,8 +71,11 @@ local function acknowledge_task(running_key, result_key, task_data_key,
 end
 
 local function delete_task(segment_key, task_data_key, result_key, task_id)
-  redis.call('DEL', task_data_key, result_key)
-  return redis.call('ZREM', segment_key, task_id)
+  local removed = redis.call('ZREM', segment_key, task_id)
+  if removed == 1 then
+    redis.call('DEL', task_data_key, result_key)
+  end
+  return removed
 end
 
 local function move_due_tasks(deferred_key, ready_key, now_ms,
