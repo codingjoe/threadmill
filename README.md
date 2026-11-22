@@ -194,7 +194,8 @@ Set `targetValue` to the ready backlog one replica can drain during your scale-u
 ### Redis Backend Options
 
 > [!IMPORTANT]
-> Threadmill requires a persistent Redis without eviction.
+> Threadmill requires Redis 7 or newer and a persistent configuration without eviction.
+> The backend loads its atomic operations as a Redis Functions library on first use.
 
 The `RedisTaskBackend` accepts the following options under `OPTIONS` in your
 `TASKS` configuration:

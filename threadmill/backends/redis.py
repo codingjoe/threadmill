@@ -9,8 +9,9 @@ import random
 import threading
 import time
 import uuid
-from collections.abc import Generator, Sequence
+from collections.abc import Awaitable, Generator, Sequence
 from pathlib import Path
+from typing import Any
 
 import redis
 import redis.asyncio
@@ -36,12 +37,270 @@ from threadmill.exceptions import AcknowledgementTimeoutError
 
 logger = logging.getLogger(__name__)
 
-_LUA_DIR = Path(__file__).resolve().parent / "lua"
+
+class ThreadmillFunctionCommands:
+    """
+    Functions of the threadmill Redis Functions library.
+
+    The constants mirror the locals declared at the top of the Lua library.
+    The methods are shared by the sync and async clients, so on an async client
+    they return an awaitable instead of a result.
+    """
+
+    LIBRARY = "threadmill"
+    DATA = "data"
+    SCORE = "score"
+    LEASE_WORKER = "lease_worker"
+    LEASE_STARTED_AT = "lease_started_at"
+    LEASE_TOKEN = "lease_token"  # noqa: S105
+    LEASE_FIELDS = (LEASE_WORKER, LEASE_STARTED_AT, LEASE_TOKEN)
+    SOURCE = (Path(__file__).resolve().parent / "lua" / "threadmill.lua").read_text()
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._functions_loaded = False
+
+    def acquire(
+        self,
+        *,
+        queue_keys: Sequence[str],
+        now_ms: float,
+        lease_started_at_iso: str,
+        task_key_prefix: str,
+        worker: str,
+        lease_ttl_ms: int,
+        start_index: int,
+        max_count: int,
+    ) -> list[list[str | int]] | Awaitable[list[list[str | int]]]:
+        """
+        Lease up to `max_count` ready tasks, one round-robin pop per queue.
+
+        Args:
+            queue_keys: Interleaved running and ready set keys, one pair per queue.
+            now_ms: Current time in milliseconds since the UNIX epoch.
+            lease_started_at_iso: Current time as an ISO 8601 string, stamped
+                as the lease start.
+            task_key_prefix: Prefix of the stored task hashes.
+            worker: Worker name stamped as the lease holder.
+            lease_ttl_ms: Lease duration in milliseconds.
+            start_index: Index of the queue pair to scan first.
+            max_count: Maximum number of tasks to lease.
+
+        Returns:
+            `[task_id, payload, lease_token, queue_index]` tuples, empty when
+            no queue yields a task.
+        """
+        return self._call(
+            "acquire",
+            queue_keys,
+            [
+                str(now_ms),
+                lease_started_at_iso,
+                task_key_prefix,
+                str(len(queue_keys) // 2),
+                worker,
+                str(lease_ttl_ms),
+                str(start_index),
+                str(max_count),
+            ],
+        )
+
+    def acknowledge(
+        self,
+        *,
+        running_key: str,
+        result_key: str,
+        task_data_key: str,
+        successful_results_key: str,
+        failed_results_key: str,
+        task_id: str,
+        serialized_result: str,
+        result_ttl_secs: int,
+        finished_at_ms: float,
+        status: str,
+        telemetry_channel: str,
+        queue_name: str,
+        lease_token: str,
+    ) -> int | Awaitable[int]:
+        """
+        Finalize a running task.
+
+        Removes the running entry, stores the result for `result_ttl_secs`,
+        deletes the task hash, records the result in its status history, and
+        publishes an egress event.
+
+        Args:
+            running_key: Running set of the task's queue.
+            result_key: Result key that receives the serialized result.
+            task_data_key: Task hash that holds the payload and lease.
+            successful_results_key: Result history for successful tasks.
+            failed_results_key: Result history for failed tasks.
+            task_id: Task identifier.
+            serialized_result: Serialized task result to store.
+            result_ttl_secs: Result retention in seconds.
+            finished_at_ms: Finish time in milliseconds since the UNIX epoch.
+            status: Status name of the finished task.
+            telemetry_channel: Pub/sub channel for the egress event.
+            queue_name: Queue that the task belongs to.
+            lease_token: Token of the lease holder, or an empty string.
+
+        Returns:
+            1 when the task was finalized, 0 when it was no longer running.
+        """
+        return self._call(
+            "acknowledge",
+            [
+                running_key,
+                result_key,
+                task_data_key,
+                successful_results_key,
+                failed_results_key,
+            ],
+            [
+                task_id,
+                serialized_result,
+                str(result_ttl_secs),
+                str(finished_at_ms),
+                status,
+                telemetry_channel,
+                queue_name,
+                lease_token,
+            ],
+        )
+
+    def dequeue(
+        self, *, segment_key: str, task_data_key: str, result_key: str, task_id: str
+    ) -> int | Awaitable[int]:
+        """
+        Delete a task from its segment together with its payload.
+
+        The payload is kept when the segment entry is already gone, so a late
+        result or a requeued task survives.
+
+        Args:
+            segment_key: Status segment that holds the task ID.
+            task_data_key: Task hash to delete.
+            result_key: Result key to delete.
+            task_id: Task identifier.
+
+        Returns:
+            1 when the segment entry existed, 0 otherwise.
+        """
+        return self._call(
+            "dequeue", [segment_key, task_data_key, result_key], [task_id]
+        )
+
+    def mover(
+        self,
+        *,
+        deferred_key: str,
+        ready_key: str,
+        now_ms: float,
+        task_key_prefix: str,
+        max_count: int,
+    ) -> list[str] | Awaitable[list[str]]:
+        """
+        Move due deferred tasks to the ready queue.
+
+        Args:
+            deferred_key: Deferred set scored by scheduled time.
+            ready_key: Ready queue that receives the due tasks.
+            now_ms: Current time in milliseconds since the UNIX epoch.
+            task_key_prefix: Prefix of the stored task hashes.
+            max_count: Maximum number of tasks to move.
+
+        Returns:
+            IDs dropped because their stored payload is missing.
+        """
+        return self._call(
+            "mover",
+            [deferred_key, ready_key],
+            [str(now_ms), task_key_prefix, str(max_count)],
+        )
+
+    def purge(
+        self,
+        *,
+        ready_key: str,
+        running_key: str,
+        deferred_key: str,
+        successful_results_key: str,
+        failed_results_key: str,
+        task_key_prefix: str,
+        result_key_prefix: str,
+    ) -> int | Awaitable[int]:
+        """
+        Delete every task and payload of one queue.
+
+        Args:
+            ready_key: Ready set of the queue.
+            running_key: Running set of the queue.
+            deferred_key: Deferred set of the queue.
+            successful_results_key: Successful result history of the queue.
+            failed_results_key: Failed result history of the queue.
+            task_key_prefix: Prefix of the stored task hashes.
+            result_key_prefix: Prefix of the stored results.
+
+        Returns:
+            Number of deleted payloads.
+        """
+        return self._call(
+            "purge",
+            [
+                ready_key,
+                running_key,
+                deferred_key,
+                successful_results_key,
+                failed_results_key,
+            ],
+            [task_key_prefix, result_key_prefix],
+        )
+
+    def reaper(
+        self,
+        *,
+        running_key: str,
+        claim_ttl_ms: int,
+        max_count: int,
+        task_key_prefix: str,
+    ) -> list[str] | Awaitable[list[str]]:
+        """
+        Claim tasks whose lease expired.
+
+        Args:
+            running_key: Running set scored by lease deadline.
+            claim_ttl_ms: How long a claim is held, in milliseconds.
+            max_count: Maximum number of tasks to claim.
+            task_key_prefix: Prefix of the stored task hashes.
+
+        Returns:
+            IDs of the claimed tasks.
+        """
+        return self._call(
+            "reaper",
+            [running_key],
+            [str(claim_ttl_ms), str(max_count), task_key_prefix],
+        )
 
 
-def _load_lua(name: str) -> str:
-    """Load a Lua script from the lua directory."""
-    return (_LUA_DIR / f"{name}.lua").read_text()
+class ThreadmillRedis(ThreadmillFunctionCommands, redis.Redis):
+    """Synchronous Redis client with the threadmill function commands."""
+
+    def _call(self, name: str, keys: Sequence[str], args: Sequence[str]) -> Any:
+        if not self._functions_loaded:
+            self.function_load(self.SOURCE, replace=True)
+            self._functions_loaded = True
+        return self.fcall(f"{self.LIBRARY}_{name}", len(keys), *keys, *args)
+
+
+class ThreadmillAsyncRedis(ThreadmillFunctionCommands, redis.asyncio.Redis):
+    """Asynchronous Redis client with the threadmill function commands."""
+
+    async def _call(self, name: str, keys: Sequence[str], args: Sequence[str]) -> Any:
+        if not self._functions_loaded:
+            await self.function_load(self.SOURCE, replace=True)
+            self._functions_loaded = True
+        return await self.fcall(f"{self.LIBRARY}_{name}", len(keys), *keys, *args)
 
 
 def _parse_lease_started_at(value: str | None) -> datetime.datetime | None:
@@ -72,19 +331,12 @@ class RedisBroker(Broker):
 
     backend: RedisTaskBackend
 
-    MOVER_SCRIPT = _load_lua("mover")
-    """Move tasks whose scheduled time has passed from the deferred to the active queue."""
-    REAPER_SCRIPT = _load_lua("reaper")
-    """Claim tasks whose processing lease has expired for the broker to decide their fate."""
-
     CLAIM_TTL = datetime.timedelta(seconds=60)
     """How long a reaper claim is held before another broker pass may take it over."""
 
     def __init__(self, backend: RedisTaskBackend) -> None:
         interval = backend.options.get("broker_interval", datetime.timedelta(seconds=1))
         super().__init__(backend, interval=interval)
-        self._mover_script = self.backend.client.register_script(self.MOVER_SCRIPT)
-        self._reaper_script = self.backend.client.register_script(self.REAPER_SCRIPT)
 
     def _move_queue(self, queue_name: str) -> None:
         """Move due deferred tasks from a single deferred set."""
@@ -92,13 +344,12 @@ class RedisBroker(Broker):
             prefix=self.backend.key_prefix, queue_name=queue_name
         )
         queue_key = self.backend._segment_key(TaskResultStatus.READY, queue_name)
-        if dropped := self._mover_script(
-            keys=[deferred_key, queue_key],
-            args=[
-                str(time.time() * 1000),
-                f"{self.backend.key_prefix}:task:",
-                str(self.backend.batch_size),
-            ],
+        if dropped := self.backend.client.mover(
+            deferred_key=deferred_key,
+            ready_key=queue_key,
+            now_ms=time.time() * 1000,
+            task_key_prefix=self.backend.task_key_prefix,
+            max_count=self.backend.batch_size,
         ):
             logger.warning(
                 "Dropped %d deferred task(s) of queue %r without a stored payload: %s",
@@ -110,13 +361,11 @@ class RedisBroker(Broker):
     def _reap_running_queue(self, queue_name: str) -> None:
         """Claim tasks whose processing lease has expired from the running set."""
         running_key = self.backend._segment_key(TaskResultStatus.RUNNING, queue_name)
-        claimed_ids = self._reaper_script(
-            keys=[running_key],
-            args=[
-                str(int(self.CLAIM_TTL.total_seconds() * 1000)),
-                str(self.backend.batch_size),
-                f"{self.backend.key_prefix}:task:",
-            ],
+        claimed_ids = self.backend.client.reaper(
+            running_key=running_key,
+            claim_ttl_ms=int(self.CLAIM_TTL.total_seconds() * 1000),
+            max_count=self.backend.batch_size,
+            task_key_prefix=self.backend.task_key_prefix,
         )
         for task_id in claimed_ids:
             self._reap_task(task_id, queue_name)
@@ -176,7 +425,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
 
     Uses sorted sets for priority ordering, a running set for in-flight
     tracking, and a deferred set for scheduled tasks. All multi-step operations
-    are atomic via Lua scripts.
+    are atomic via Redis Functions, loaded on first use.
     """
 
     supports_async_task = True
@@ -186,23 +435,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
 
     broker_class = RedisBroker
 
-    TASK_KEY = "{prefix}:task:{task_id}"
-    RESULT_KEY = "{prefix}:result:{result_id}"
+    TASK_KEY_PREFIX = "{prefix}:task:"
+    TASK_KEY = TASK_KEY_PREFIX + "{task_id}"
+    RESULT_KEY_PREFIX = "{prefix}:result:"
+    RESULT_KEY = RESULT_KEY_PREFIX + "{result_id}"
     SEGMENT_KEY = "{prefix}:{queue_name}:{status}"
     DEFERRED_KEY = "{prefix}:{queue_name}:deferred"
 
-    LEASE_FIELDS = ("lease_worker", "lease_started_at", "lease_token")
-
     TELEMETRY_CHANNEL = "{prefix}:telemetry"
-
-    ACQUIRE_SCRIPT = _load_lua("acquire")
-    """Lease up to a given number of tasks from the priority queues in one broker call."""
-    ACKNOWLEDGE_SCRIPT = _load_lua("acknowledge")
-    """Remove from running, persist the result, and clean up."""
-    DEQUEUE_SCRIPT = _load_lua("dequeue")
-    """Delete one task together with its payload."""
-    PURGE_SCRIPT = _load_lua("purge")
-    """Delete every task and its payload for one queue."""
 
     def _segment_key(self, status: TaskResultStatus, queue_name: str) -> str:
         return self.SEGMENT_KEY.format(
@@ -215,7 +455,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         """Return a running task as its lease holds it, or None when its hash is gone."""
         task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
         data, lease_worker, lease_started_at, lease_token = self.client.hmget(
-            task_key, "data", *self.LEASE_FIELDS
+            task_key,
+            ThreadmillFunctionCommands.DATA,
+            *ThreadmillFunctionCommands.LEASE_FIELDS,
         )
         if data is None:
             return None
@@ -238,7 +480,7 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             )
             raise ValueError(message) from e
         self.redis_connection_retries = self.options.get("redis_connection_retries", 3)
-        self.client = redis.from_url(
+        self.client = ThreadmillRedis.from_url(
             redis_url,
             decode_responses=True,
             retry=redis.retry.Retry(
@@ -247,6 +489,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         )
         self.redis_url = redis_url
         self.key_prefix = f"threadmill:{{{alias}}}"
+        self.task_key_prefix = self.TASK_KEY_PREFIX.format(prefix=self.key_prefix)
+        self.result_key_prefix = self.RESULT_KEY_PREFIX.format(prefix=self.key_prefix)
         self.telemetry_channel = self.TELEMETRY_CHANNEL.format(prefix=self.key_prefix)
         self.lease_ttl = self.options.get("lease_ttl", datetime.timedelta(hours=1))
         self.result_ttl = self.options.get("result_ttl", datetime.timedelta(days=1))
@@ -258,10 +502,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             "poll_max_interval", datetime.timedelta(seconds=1)
         )
         self._idle_backoffs = threading.local()
-        self._acquire_script = self.client.register_script(self.ACQUIRE_SCRIPT)
-        self._acknowledge_script = self.client.register_script(self.ACKNOWLEDGE_SCRIPT)
-        self._dequeue_script = self.client.register_script(self.DEQUEUE_SCRIPT)
-        self._purge_script = self.client.register_script(self.PURGE_SCRIPT)
 
     @property
     def _idle_backoff(self) -> _IdleBackoff:
@@ -274,8 +514,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             self._idle_backoffs.backoff = backoff
         return backoff
 
-    def async_client(self) -> redis.asyncio.Redis:
-        return redis.asyncio.Redis.from_url(
+    def async_client(self) -> ThreadmillAsyncRedis:
+        return ThreadmillAsyncRedis.from_url(
             self.redis_url,
             decode_responses=True,
             retry=redis.asyncio.retry.Retry(
@@ -331,8 +571,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe.hset(
             task_key,
             mapping={
-                "data": serialized,
-                "score": str(score),
+                ThreadmillFunctionCommands.DATA: serialized,
+                ThreadmillFunctionCommands.SCORE: str(score),
             },
         )
         pipe.publish(self.telemetry_channel, f"ingress:{task.queue_name}")
@@ -376,18 +616,15 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             now_ms = now.timestamp() * 1000
             now_iso = now.isoformat()
 
-            if result := self._acquire_script(
-                keys=keys,
-                args=[
-                    str(now_ms),
-                    now_iso,
-                    f"{self.key_prefix}:task:",
-                    str(len(queue_names)),
-                    worker,
-                    str(int(self.lease_ttl.total_seconds() * 1000)),
-                    str(idle_backoff.rotation_offset),
-                    str(count),
-                ],
+            if result := self.client.acquire(
+                queue_keys=keys,
+                now_ms=now_ms,
+                lease_started_at_iso=now_iso,
+                task_key_prefix=self.task_key_prefix,
+                worker=worker,
+                lease_ttl_ms=int(self.lease_ttl.total_seconds() * 1000),
+                start_index=idle_backoff.rotation_offset,
+                max_count=count,
             ):
                 idle_backoff.miss_count = 0
                 idle_backoff.rotation_offset = (idle_backoff.rotation_offset + 1) % len(
@@ -479,13 +716,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             queue_name,
             exc_info=error,
         )
-        self._dequeue_script(
-            keys=[
-                self._segment_key(TaskResultStatus.RUNNING, queue_name),
-                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id),
-                self.RESULT_KEY.format(prefix=self.key_prefix, result_id=task_id),
-            ],
-            args=[task_id],
+        self.client.dequeue(
+            segment_key=self._segment_key(TaskResultStatus.RUNNING, queue_name),
+            task_data_key=self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id),
+            result_key=self.RESULT_KEY.format(
+                prefix=self.key_prefix, result_id=task_id
+            ),
+            task_id=task_id,
         )
         self.client.publish(self.telemetry_channel, f"egress:{queue_name}")
 
@@ -512,24 +749,20 @@ class RedisTaskBackend(ThreadmillTaskBackend):
             else None
         )
 
-        self._acknowledge_script(
-            keys=[
-                running_key,
-                result_key,
-                task_key,
-                successful_results_key,
-                failed_results_key,
-            ],
-            args=[
-                task_result.id,
-                serialized,
-                str(int(self.result_ttl.total_seconds())),
-                str(finish_score),
-                task_result.status.name,
-                self.telemetry_channel,
-                task_result.task.queue_name,
-                lease_token or "",
-            ],
+        self.client.acknowledge(
+            running_key=running_key,
+            result_key=result_key,
+            task_data_key=task_key,
+            successful_results_key=successful_results_key,
+            failed_results_key=failed_results_key,
+            task_id=task_result.id,
+            serialized_result=serialized,
+            result_ttl_secs=int(self.result_ttl.total_seconds()),
+            finished_at_ms=finish_score,
+            status=task_result.status.name,
+            telemetry_channel=self.telemetry_channel,
+            queue_name=task_result.task.queue_name,
+            lease_token=lease_token or "",
         )
 
     def requeue(self, task_result: TaskResult, run_after: datetime.datetime) -> None:
@@ -564,9 +797,9 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         pipe.hset(
             task_key,
             mapping={
-                "data": serialized,
-                "score": str(score),
-                **dict.fromkeys(self.LEASE_FIELDS, ""),
+                ThreadmillFunctionCommands.DATA: serialized,
+                ThreadmillFunctionCommands.SCORE: str(score),
+                **dict.fromkeys(ThreadmillFunctionCommands.LEASE_FIELDS, ""),
             },
         )
         pipe.zadd(deferred_key, {task_result.id: run_after_ms})
@@ -576,30 +809,32 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         task_enqueued.send(self.__class__, task_result=task_result)
 
     def dequeue(self, task_result: TaskResult) -> None:
-        self._dequeue_script(
-            keys=[
-                self._segment_key(task_result.status, task_result.task.queue_name),
-                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_result.id),
-                self.RESULT_KEY.format(
-                    prefix=self.key_prefix, result_id=task_result.id
-                ),
-            ],
-            args=[task_result.id],
+        self.client.dequeue(
+            segment_key=self._segment_key(
+                task_result.status, task_result.task.queue_name
+            ),
+            task_data_key=self.TASK_KEY.format(
+                prefix=self.key_prefix, task_id=task_result.id
+            ),
+            result_key=self.RESULT_KEY.format(
+                prefix=self.key_prefix, result_id=task_result.id
+            ),
+            task_id=task_result.id,
         )
 
     def purge(self, queue_name: str) -> None:
-        self._purge_script(
-            keys=[
-                self._segment_key(TaskResultStatus.READY, queue_name),
-                self._segment_key(TaskResultStatus.RUNNING, queue_name),
-                self.DEFERRED_KEY.format(prefix=self.key_prefix, queue_name=queue_name),
-                self._segment_key(TaskResultStatus.SUCCESSFUL, queue_name),
-                self._segment_key(TaskResultStatus.FAILED, queue_name),
-            ],
-            args=[
-                f"{self.key_prefix}:task:",
-                f"{self.key_prefix}:result:",
-            ],
+        self.client.purge(
+            ready_key=self._segment_key(TaskResultStatus.READY, queue_name),
+            running_key=self._segment_key(TaskResultStatus.RUNNING, queue_name),
+            deferred_key=self.DEFERRED_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            ),
+            successful_results_key=self._segment_key(
+                TaskResultStatus.SUCCESSFUL, queue_name
+            ),
+            failed_results_key=self._segment_key(TaskResultStatus.FAILED, queue_name),
+            task_key_prefix=self.task_key_prefix,
+            result_key_prefix=self.result_key_prefix,
         )
 
     def peek(
@@ -628,9 +863,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         for task_id in self.client.zrange(zset_key, 0, count - 1):
             task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
             if leased:
-                pipe.hmget(task_key, "data", *self.LEASE_FIELDS)
+                pipe.hmget(
+                    task_key,
+                    ThreadmillFunctionCommands.DATA,
+                    *ThreadmillFunctionCommands.LEASE_FIELDS,
+                )
             else:
-                pipe.hget(task_key, "data")
+                pipe.hget(task_key, ThreadmillFunctionCommands.DATA)
         for stored in pipe.execute():
             if not stored:
                 continue
