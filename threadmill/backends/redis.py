@@ -71,7 +71,7 @@ class ThreadmillFunctionCommands:
         lease_ttl_ms: int,
         start_index: int,
         max_count: int,
-    ) -> list[list[str]] | Awaitable[list[list[str]]]:
+    ) -> list[list[str | int]] | Awaitable[list[list[str | int]]]:
         """
         Lease up to `max_count` ready tasks, one round-robin pop per queue.
 
@@ -172,7 +172,7 @@ class ThreadmillFunctionCommands:
         self, *, segment_key: str, task_data_key: str, result_key: str, task_id: str
     ) -> int | Awaitable[int]:
         """
-        Delete a task and its payload.
+        Delete a task and its payload when its segment entry is removed.
 
         Args:
             segment_key: Status segment that holds the task ID.
