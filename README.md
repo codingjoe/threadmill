@@ -213,7 +213,7 @@ A task whose lease expired reaches the `retry` callback as an
 `AcknowledgementTimeoutError` error, or is marked FAILED when nothing retries it.
 A claimed task whose stored payload cannot be read any more is dropped with the
 read error logged. A dropped task records no result, so it leaves the inspector
-and cannot be requeued. A payload read never stops the worker process.
+and cannot be requeued.
 Keep `lease_ttl` above your worst-case runtime and above the time a task waits in a
 prefetch buffer. A task that outlives its lease can still run, so a retry can run
 at the same time. The acknowledgement of the lease holder wins. The late result
