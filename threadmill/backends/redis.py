@@ -125,7 +125,13 @@ class RedisBroker(Broker):
         """Requeue or fail it, and remove it when the payload cannot be read."""
         try:
             task_result = self.backend.get_leased_task(task_id)
-        except Exception as exception:  # noqa: BLE001
+        except (
+            ImportError,
+            KeyError,
+            TypeError,
+            ValueError,
+            AttributeError,
+        ) as exception:
             self.backend.discard_unreadable_task(
                 task_id, queue_name=queue_name, error=exception
             )
@@ -399,7 +405,13 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                         task_result = self.deserialize_task_result(data)
                     # Reading a stored payload is one rule: a gone task function,
                     # a malformed document, or a document from another version.
-                    except Exception as exception:  # noqa: BLE001
+                    except (
+                        ImportError,
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                        AttributeError,
+                    ) as exception:
                         self.discard_unreadable_task(
                             task_id,
                             queue_name=queue_names[int(queue_index)],
