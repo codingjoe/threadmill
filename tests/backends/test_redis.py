@@ -362,8 +362,8 @@ class TestRedisBrokerReap:
         finally:
             backend.close()
 
-    def test_reap__reads_retry_from_task_definition(self):
-        """A stale retry path is read from the task definition and still retries."""
+    def test_reap__discards_task_with_stale_retry_path(self):
+        """A stale retry path makes the payload unreadable, so the task is removed."""
         backend = _make_backend(
             "reap_stale_retry_test", lease_ttl=datetime.timedelta(seconds=1)
         )
@@ -378,10 +378,9 @@ class TestRedisBrokerReap:
 
             RedisBroker(backend)._reap_running_queue("default")
 
-            deferred_key = backend.DEFERRED_KEY.format(
-                prefix=backend.key_prefix, queue_name="default"
-            )
-            assert backend.client.zscore(deferred_key, task_result.id) is not None
+            _assert_discarded(backend, task_result.id)
+            with pytest.raises(TaskResultDoesNotExist):
+                backend.get_result(task_result.id)
         finally:
             backend.close()
 

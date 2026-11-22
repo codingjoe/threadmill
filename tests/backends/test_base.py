@@ -238,16 +238,16 @@ class TestThreadmillTaskBackend:
         restored = ThreadmillTaskBackend.deserialize_task_result(data)
         assert restored._return_value == 42
 
-    def test_deserialize_task_result__reads_retry_from_task_definition(self) -> None:
-        """Read the retry callback from the task definition, ignoring the stored path."""
+    def test_deserialize_task_result__raise_for_stale_retry_path(self) -> None:
+        """Raise when the stored retry callback no longer imports."""
         data = json.loads(
             ThreadmillTaskBackend.serialize_task_result(
                 _task_result_with_retry(boom_with_retry)
             )
         )
         data["task"]["retry"] = _STALE_TASK_PATH
-        restored = ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
-        assert restored.task.retry is retry_always
+        with pytest.raises(ImportError):
+            ThreadmillTaskBackend.deserialize_task_result(json.dumps(data))
 
     def test_deserialize_task_result__raise_for_stale_task_reference(self) -> None:
         """Raise for a stored task whose function no longer imports."""

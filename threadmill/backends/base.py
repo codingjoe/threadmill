@@ -1,5 +1,4 @@
 import collections.abc
-import contextlib
 import dataclasses
 import datetime
 import enum
@@ -53,8 +52,13 @@ class RetryTask(Task):
 
     @classmethod
     def _reconstruct(cls, kwargs):
-        with contextlib.suppress(ImportError):
-            kwargs["retry"] = getattr(import_string(kwargs["func"]), "retry", None)
+        if retry_path := kwargs.pop("retry", None):
+            try:
+                path, pos_args, kw_args = retry_path
+            except ValueError:
+                kwargs["retry"] = import_string(retry_path)
+            else:
+                kwargs["retry"] = import_string(path)(*pos_args, **kw_args)
         return super()._reconstruct(kwargs)
 
     def __reduce__(self):
