@@ -1693,6 +1693,27 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
+    def test_dequeue__keeps_result_when_segment_entry_is_gone(self) -> None:
+        """dequeue() leaves a result written after the segment entry vanished."""
+        backend = _make_backend("dequeue_late_result_test")
+        try:
+            task_result = backend.enqueue(echo, args=[1])
+            (acquired,) = backend.acquire(
+                timeout=datetime.timedelta(seconds=1), worker="late-result-test"
+            )
+            result_key = backend.RESULT_KEY.format(
+                prefix=backend.key_prefix, result_id=task_result.id
+            )
+            backend.client.set(result_key, "late result")
+            running_key = backend._segment_key(TaskResultStatus.RUNNING, "default")
+            backend.client.zrem(running_key, task_result.id)
+
+            backend.dequeue(acquired)
+
+            assert backend.client.get(result_key) == "late result"
+        finally:
+            backend.close()
+
     def test_dequeue__removes_failed_task_from_results(self) -> None:
         """dequeue() removes a failed task from the failed zset."""
         backend = RedisTaskBackend(

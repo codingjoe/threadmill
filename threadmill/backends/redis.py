@@ -416,7 +416,6 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 if task_results:
                     return task_results
                 # Every leased payload was unreadable. Poll again for work.
-                continue
 
             try:
                 remaining = deadline - time.monotonic()
@@ -627,9 +626,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
     def _peek_tasks(
         self, zset_key: str, count: int, *, leased: bool
     ) -> Generator[TaskResult]:
-        task_ids = self.client.zrange(zset_key, 0, count - 1)
         pipe = self.client.pipeline()
-        for task_id in task_ids:
+        for task_id in self.client.zrange(zset_key, 0, count - 1):
             task_key = self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id)
             if leased:
                 pipe.hmget(task_key, "data", *self.LEASE_FIELDS)
@@ -652,9 +650,8 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                 yield self.deserialize_task_result(stored)
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:
-        result_ids = self.client.zrange(zset_key, 0, count - 1, desc=True)
         pipe = self.client.pipeline()
-        for result_id in result_ids:
+        for result_id in self.client.zrange(zset_key, 0, count - 1, desc=True):
             result_key = self.RESULT_KEY.format(
                 prefix=self.key_prefix, result_id=result_id
             )
