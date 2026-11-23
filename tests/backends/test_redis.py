@@ -1792,8 +1792,8 @@ class TestRedisTaskBackend:
         finally:
             backend.close()
 
-    def test_dequeue__leaves_deferred_task_scheduled(self) -> None:
-        """dequeue() leaves a deferred task and its payload scheduled."""
+    def test_dequeue__removes_deferred_task(self) -> None:
+        """dequeue() removes a deferred task and its payload."""
         backend = _make_backend("dequeue_deferred_test")
         try:
             task_result = backend.enqueue(
@@ -1809,9 +1809,9 @@ class TestRedisTaskBackend:
 
             removed = backend.dequeue(task_result)
 
-            assert removed is False
-            assert backend.client.zscore(deferred_key, task_result.id) is not None
-            assert backend.client.exists(task_key)
+            assert removed is True
+            assert backend.client.zscore(deferred_key, task_result.id) is None
+            assert not backend.client.exists(task_key)
         finally:
             backend.close()
 

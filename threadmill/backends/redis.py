@@ -810,17 +810,27 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         task_enqueued.send(self.__class__, task_result=task_result)
 
     def dequeue(self, task_result: TaskResult) -> bool:
+        queue_name = task_result.task.queue_name
+        task_data_key = self.TASK_KEY.format(
+            prefix=self.key_prefix, task_id=task_result.id
+        )
+        result_key = self.RESULT_KEY.format(
+            prefix=self.key_prefix, result_id=task_result.id
+        )
+        if self.client.dequeue(
+            segment_key=self.DEFERRED_KEY.format(
+                prefix=self.key_prefix, queue_name=queue_name
+            ),
+            task_data_key=task_data_key,
+            result_key=result_key,
+            task_id=task_result.id,
+        ):
+            return True
         return bool(
             self.client.dequeue(
-                segment_key=self._segment_key(
-                    task_result.status, task_result.task.queue_name
-                ),
-                task_data_key=self.TASK_KEY.format(
-                    prefix=self.key_prefix, task_id=task_result.id
-                ),
-                result_key=self.RESULT_KEY.format(
-                    prefix=self.key_prefix, result_id=task_result.id
-                ),
+                segment_key=self._segment_key(task_result.status, queue_name),
+                task_data_key=task_data_key,
+                result_key=result_key,
                 task_id=task_result.id,
             )
         )

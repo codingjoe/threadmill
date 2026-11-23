@@ -353,12 +353,10 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
 
     def dequeue(self, task_result: TaskResult) -> bool:
         """
-        Delete a task from its current status segment together with its payload.
+        Delete a task from the deferred set or its status segment, with its payload.
 
         Returns:
-            True when the task was removed, False when the status segment does
-            not hold it. Deferred tasks are not in a status segment and stay
-            scheduled.
+            True when the task was removed, False when neither set holds it.
         """
         raise NotImplementedError
 
