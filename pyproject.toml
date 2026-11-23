@@ -32,7 +32,7 @@ classifiers = [
   "Topic :: Text Processing :: Markup :: Markdown",
 ]
 dynamic = [ "description", "version" ]
-dependencies = [ "django>=6.1" ]
+dependencies = [ "django>=6.1", "typing-extensions>=4.16" ]
 optional-dependencies.inspector = [
   "textual>=8.2.7",
 ]

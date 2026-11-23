@@ -21,6 +21,7 @@ from django.tasks import DEFAULT_TASK_QUEUE_NAME, TaskResult, TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
 from django.tasks.signals import task_enqueued
 from django.utils import timezone
+from typing_extensions import sentinel
 
 from threadmill.backends.base import (
     BackendTelemetry,
@@ -808,18 +809,20 @@ class RedisTaskBackend(ThreadmillTaskBackend):
 
         task_enqueued.send(self.__class__, task_result=task_result)
 
-    def dequeue(self, task_result: TaskResult) -> None:
-        self.client.dequeue(
-            segment_key=self._segment_key(
-                task_result.status, task_result.task.queue_name
-            ),
-            task_data_key=self.TASK_KEY.format(
-                prefix=self.key_prefix, task_id=task_result.id
-            ),
-            result_key=self.RESULT_KEY.format(
-                prefix=self.key_prefix, result_id=task_result.id
-            ),
-            task_id=task_result.id,
+    def dequeue(self, task_result: TaskResult) -> bool:
+        return bool(
+            self.client.dequeue(
+                segment_key=self._segment_key(
+                    task_result.status, task_result.task.queue_name
+                ),
+                task_data_key=self.TASK_KEY.format(
+                    prefix=self.key_prefix, task_id=task_result.id
+                ),
+                result_key=self.RESULT_KEY.format(
+                    prefix=self.key_prefix, result_id=task_result.id
+                ),
+                task_id=task_result.id,
+            )
         )
 
     def purge(self, queue_name: str) -> None:
@@ -842,14 +845,29 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         queue_name: str = DEFAULT_TASK_QUEUE_NAME,
         *,
         status: TaskResultStatus,
+        run_before: datetime.datetime | sentinel = ThreadmillTaskBackend.FOREVER,
         count: int = 1,
     ) -> Generator[TaskResult]:
+        if run_before is not ThreadmillTaskBackend.FOREVER and timezone.is_naive(
+            run_before
+        ):
+            message = "run_before must be timezone-aware."
+            raise ValueError(message)
         match status:
-            case TaskResultStatus.READY | TaskResultStatus.RUNNING:
+            case TaskResultStatus.READY:
+                ready = list(
+                    self._peek_tasks(
+                        self._segment_key(status, queue_name), count, leased=False
+                    )
+                )
+                yield from ready
+                if not count or len(ready) < count:
+                    yield from self._peek_deferred(
+                        queue_name, run_before, max(count - len(ready), 0)
+                    )
+            case TaskResultStatus.RUNNING:
                 yield from self._peek_tasks(
-                    self._segment_key(status, queue_name),
-                    count,
-                    leased=status is TaskResultStatus.RUNNING,
+                    self._segment_key(status, queue_name), count, leased=True
                 )
             case TaskResultStatus.SUCCESSFUL | TaskResultStatus.FAILED:
                 yield from self._peek_results(
@@ -884,6 +902,29 @@ class RedisTaskBackend(ThreadmillTaskBackend):
                     lease_token=lease_token,
                 )
             else:
+                yield self.deserialize_task_result(stored)
+
+    def _peek_deferred(
+        self, queue_name: str, run_before: datetime.datetime | sentinel, count: int
+    ) -> Generator[TaskResult]:
+        deferred_key = self.DEFERRED_KEY.format(
+            prefix=self.key_prefix, queue_name=queue_name
+        )
+        max_score: float | str = (
+            "+inf"
+            if run_before is ThreadmillTaskBackend.FOREVER
+            else run_before.timestamp() * 1000
+        )
+        pipe = self.client.pipeline()
+        for task_id in self.client.zrangebyscore(
+            deferred_key, "-inf", max_score, start=0, num=count or -1
+        ):
+            pipe.hget(
+                self.TASK_KEY.format(prefix=self.key_prefix, task_id=task_id),
+                ThreadmillFunctionCommands.DATA,
+            )
+        for stored in pipe.execute():
+            if stored:
                 yield self.deserialize_task_result(stored)
 
     def _peek_results(self, zset_key: str, count: int) -> Generator[TaskResult]:

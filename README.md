@@ -70,6 +70,13 @@ Then launch the worker pool:
 uv run manage.py threadmill worker
 ```
 
+The repository's test app bundles a `manage.py` that runs the same commands
+against `tests.testapp.settings`:
+
+```console
+uv run tests/testapp/manage.py threadmill worker
+```
+
 ## Usage
 
 ### Workers
@@ -130,6 +137,11 @@ Install it with the `inspector` extra and launch it from a separate terminal:
 uv add "threadmill[inspector]"
 uv run manage.py threadmill inspector
 ```
+
+The Ready tab lists tasks that a worker can pick up now, followed by deferred
+tasks in due order. The Scheduled column shows when each deferred task becomes
+due, and the Ready tab count includes both groups. Dropping a deferred task
+leaves it scheduled and reports that nothing was deleted.
 
 ### Sentry Metrics
 

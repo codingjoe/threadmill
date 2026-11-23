@@ -33,6 +33,7 @@ from threadmill.backends.base import (
     QueueStats,
     TelemetryDirection,
     TelemetryEvent,
+    ThreadmillTaskBackend,
 )
 from threadmill.backends.redis import (
     RedisBroker,
@@ -1475,6 +1476,88 @@ class TestRedisTaskBackend:
         assert successful == []
         assert failed == []
 
+    def test_peek__ready_then_deferred_before_run_before(self):
+        """Peek READY yields ready tasks first, then deferred tasks due before the cutoff."""
+        now = timezone.now()
+        ready = default_task_backend.enqueue(echo, args=[0])
+        later = default_task_backend.enqueue(
+            replace(echo, run_after=now + datetime.timedelta(minutes=10)), args=[2]
+        )
+        sooner = default_task_backend.enqueue(
+            replace(echo, run_after=now + datetime.timedelta(minutes=5)), args=[1]
+        )
+
+        all_pending = list(
+            default_task_backend.peek(
+                status=TaskResultStatus.READY,
+                run_before=ThreadmillTaskBackend.FOREVER,
+                count=10,
+            )
+        )
+        bounded = list(
+            default_task_backend.peek(
+                status=TaskResultStatus.READY,
+                run_before=now + datetime.timedelta(minutes=7),
+                count=10,
+            )
+        )
+        default_window = list(
+            default_task_backend.peek(status=TaskResultStatus.READY, count=10)
+        )
+        capped = list(
+            default_task_backend.peek(
+                status=TaskResultStatus.READY,
+                run_before=ThreadmillTaskBackend.FOREVER,
+                count=1,
+            )
+        )
+        unbounded = list(
+            default_task_backend.peek(
+                status=TaskResultStatus.READY,
+                run_before=ThreadmillTaskBackend.FOREVER,
+                count=0,
+            )
+        )
+
+        assert [r.id for r in all_pending] == [ready.id, sooner.id, later.id]
+        assert [r.id for r in bounded] == [ready.id, sooner.id]
+        assert [r.id for r in default_window] == [ready.id, sooner.id, later.id]
+        assert [r.id for r in capped] == [ready.id]
+        assert [r.id for r in unbounded] == [ready.id, sooner.id, later.id]
+
+    def test_peek__deferred_skips_expired_task_data(self):
+        """Peek READY skips deferred entries whose task data hash has expired."""
+        task_result = default_task_backend.enqueue(
+            replace(echo, run_after=timezone.now() + datetime.timedelta(minutes=5)),
+            args=[1],
+        )
+        default_task_backend.client.delete(
+            default_task_backend.TASK_KEY.format(
+                prefix=default_task_backend.key_prefix, task_id=task_result.id
+            )
+        )
+
+        results = list(
+            default_task_backend.peek(
+                status=TaskResultStatus.READY,
+                run_before=timezone.now() + datetime.timedelta(minutes=10),
+                count=10,
+            )
+        )
+
+        assert results == []
+
+    def test_peek__ready_rejects_naive_run_before(self):
+        """Peek READY rejects a naive run_before instead of reading it as local time."""
+        with pytest.raises(ValueError, match="timezone-aware"):
+            list(
+                default_task_backend.peek(
+                    status=TaskResultStatus.READY,
+                    run_before=datetime.datetime.now(),
+                    count=10,
+                )
+            )
+
     def test_requeue__moves_from_running_to_deferred(self) -> None:
         """requeue() removes from running set and adds to deferred set."""
         backend = RedisTaskBackend(
@@ -1706,6 +1789,29 @@ class TestRedisTaskBackend:
             backend.dequeue(task_result)
 
             assert not backend.client.exists(task_key)
+        finally:
+            backend.close()
+
+    def test_dequeue__leaves_deferred_task_scheduled(self) -> None:
+        """dequeue() leaves a deferred task and its payload scheduled."""
+        backend = _make_backend("dequeue_deferred_test")
+        try:
+            task_result = backend.enqueue(
+                replace(echo, run_after=timezone.now() + datetime.timedelta(hours=1)),
+                args=[1],
+            )
+            deferred_key = backend.DEFERRED_KEY.format(
+                prefix=backend.key_prefix, queue_name="default"
+            )
+            task_key = backend.TASK_KEY.format(
+                prefix=backend.key_prefix, task_id=task_result.id
+            )
+
+            removed = backend.dequeue(task_result)
+
+            assert removed is False
+            assert backend.client.zscore(deferred_key, task_result.id) is not None
+            assert backend.client.exists(task_key)
         finally:
             backend.close()
 
