@@ -199,7 +199,7 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     """Interface for task queues to be processed by the executor."""
 
     FOREVER = sentinel("FOREVER")
-    """Include every deferred task in `peek()` results, regardless of when it is due."""
+    """Include every deferred task in a READY `peek()`, regardless of when it is due."""
 
     task_class = RetryTask
     supports_async_task = True
@@ -335,7 +335,7 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
             count: The maximum number of tasks to yield. If 0, yield all available tasks.
 
         Raises:
-            ValueError: `run_before` is not timezone-aware.
+            ValueError: A READY `peek` receives a naive `run_before`.
         """
         raise NotImplementedError
 

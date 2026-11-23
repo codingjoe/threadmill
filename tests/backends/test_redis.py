@@ -1558,6 +1558,23 @@ class TestRedisTaskBackend:
                 )
             )
 
+    def test_peek__running_ignores_run_before(self):
+        """Peek RUNNING ignores run_before, including a naive value."""
+        default_task_backend.enqueue(echo, args=[1])
+        (acquired,) = default_task_backend.acquire(
+            timeout=datetime.timedelta(seconds=1), worker="peek-ignore-test"
+        )
+
+        results = list(
+            default_task_backend.peek(
+                status=TaskResultStatus.RUNNING,
+                run_before=datetime.datetime.now(),
+                count=10,
+            )
+        )
+
+        assert [r.id for r in results] == [acquired.id]
+
     def test_requeue__moves_from_running_to_deferred(self) -> None:
         """requeue() removes from running set and adds to deferred set."""
         backend = RedisTaskBackend(

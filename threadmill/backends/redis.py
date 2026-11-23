@@ -817,13 +817,15 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         result_key = self.RESULT_KEY.format(
             prefix=self.key_prefix, result_id=task_result.id
         )
-        if self.client.dequeue(
-            segment_key=self.DEFERRED_KEY.format(
-                prefix=self.key_prefix, queue_name=queue_name
-            ),
-            task_data_key=task_data_key,
-            result_key=result_key,
-            task_id=task_result.id,
+        if bool(
+            self.client.dequeue(
+                segment_key=self.DEFERRED_KEY.format(
+                    prefix=self.key_prefix, queue_name=queue_name
+                ),
+                task_data_key=task_data_key,
+                result_key=result_key,
+                task_id=task_result.id,
+            )
         ):
             return True
         return bool(
@@ -858,13 +860,14 @@ class RedisTaskBackend(ThreadmillTaskBackend):
         run_before: datetime.datetime | sentinel = ThreadmillTaskBackend.FOREVER,
         count: int = 1,
     ) -> Generator[TaskResult]:
-        if run_before is not ThreadmillTaskBackend.FOREVER and timezone.is_naive(
-            run_before
-        ):
-            message = "run_before must be timezone-aware."
-            raise ValueError(message)
         match status:
             case TaskResultStatus.READY:
+                if (
+                    run_before is not ThreadmillTaskBackend.FOREVER
+                    and timezone.is_naive(run_before)
+                ):
+                    message = "run_before must be timezone-aware."
+                    raise ValueError(message)
                 ready = list(
                     self._peek_tasks(
                         self._segment_key(status, queue_name), count, leased=False
