@@ -19,8 +19,8 @@ uv run pytest -m "integration and benchmark"
 uv run pytest --benchmark-compare          # compare vs main baseline (run main first)
 uv run pytest benchmarks/test_scaling.py -m benchmark   # process vs thread scaling; run on 3.14 and 3.14t
 uvx prek run --all-files
-uv run manage.py threadmill worker         # run the worker pool
-uv run manage.py threadmill inspector    # launch the textual TUI inspector
+uv run tests/testapp/manage.py threadmill worker         # run the worker pool
+uv run tests/testapp/manage.py threadmill inspector    # launch the textual TUI inspector
 ```
 
 CI additionally pins Django per matrix step: `uv run --with django~=6.1.0 pytest -m "not benchmark"`.

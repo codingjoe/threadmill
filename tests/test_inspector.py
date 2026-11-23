@@ -182,6 +182,29 @@ class TestInspectorApp:
             assert table.row_count == 1
             assert not table.disabled
 
+    async def test_ready_tab_lists_deferred_tasks(self):
+        """The ready tab lists scheduled tasks that are not due yet."""
+        task_result = default_task_backend.enqueue(
+            dataclasses.replace(
+                echo, run_after=timezone.now() + datetime.timedelta(hours=1)
+            ),
+            args=[1],
+        )
+        app = InspectorApp(backend=default_task_backend)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            task_list = app.query_one("#task-list", TaskList)
+            task_list.queue_name = "default"
+            await pilot.pause()
+            await pilot.pause()
+            table = app.query_one("#table-ready", DataTable)
+            assert table.row_count == 1
+            assert task_list._current_results[0].id == task_result.id
+            assert str(table.get_row_at(0)[3]) != "-"
+            detail = app.query_one("#task-detail", TaskDetail)
+            detail.task_result = task_result
+            assert task_result.task.run_after.isoformat() in str(detail.render())
+
     async def test_selected_task_detail_updates(self):
         """The detail view reflects the first task of the selected queue."""
         task_result = default_task_backend.enqueue(echo, args=[42])
@@ -265,7 +288,7 @@ class TestInspectorApp:
     async def test_queue_stats_counts_are_scoped_to_selected_queue(self):
         """Tab counts reflect the selected queue, not backend-wide totals."""
         default_task_backend.enqueue(echo, args=[1])
-        stats = _stats(ready=1)
+        stats = _stats(ready=1, deferred=2)
         app = InspectorApp(backend=default_task_backend, auto_refresh=False)
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -278,7 +301,7 @@ class TestInspectorApp:
             await pilot.pause()
             assert task_list.counts == {
                 "running": 0,
-                "ready": 1,
+                "ready": 3,
                 "successful": 0,
                 "failed": 0,
             }
@@ -291,7 +314,9 @@ class TestInspectorApp:
             task_list = app.query_one("#task-list", TaskList)
             task_list.queue_name = "default"
             await pilot.pause()
-            app.telemetry = BackendTelemetry(queues={"default": _stats(ready=1500)})
+            app.telemetry = BackendTelemetry(
+                queues={"default": _stats(ready=1500, deferred=3)}
+            )
             await pilot.pause()
             assert task_list._tabs.get_tab("tab-ready").label.plain == "Ready (1.5k)"
 
@@ -397,6 +422,7 @@ class TestInspectorApp:
                 "ID",
                 "Function",
                 "Priority",
+                "Scheduled",
                 "Enqueued",
             ]
             assert [c.label.plain for c in running.ordered_columns] == [
@@ -810,6 +836,25 @@ class TestDequeueAction:
                 default_task_backend.peek("default", status=TaskResultStatus.READY)
             )
             assert task_result.id not in {r.id for r in ready}
+
+    async def test_do_dequeue__reports_when_nothing_removed(self):
+        """_do_dequeue tells the user when the row was already gone."""
+        task_result = default_task_backend.enqueue(echo, args=[1])
+        app = InspectorApp(backend=default_task_backend)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            task_list = app.query_one("#task-list", TaskList)
+            task_list.queue_name = "default"
+            await pilot.pause()
+            await pilot.pause()
+            stale = next(
+                (r for r in task_list._current_results if r.id == task_result.id),
+                None,
+            )
+            default_task_backend.dequeue(stale)
+            task_list._do_dequeue(True, stale)
+            await pilot.pause()
+            assert [n.message for n in app._notifications] == ["Task not deleted."]
 
     async def test_do_dequeue__noop_when_not_confirmed(self):
         """_do_dequeue leaves the task in the ready queue when not confirmed."""

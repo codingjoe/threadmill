@@ -16,6 +16,7 @@ from django.tasks.base import TaskContext, TaskError
 from django.tasks.exceptions import InvalidTask
 from django.utils.inspect import is_module_level_function
 from django.utils.module_loading import import_string
+from typing_extensions import sentinel
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,9 @@ class TaskResultEncoder(DjangoJSONEncoder):
 class ThreadmillTaskBackend(BaseTaskBackend, ABC):
     """Interface for task queues to be processed by the executor."""
 
+    FOREVER = sentinel("FOREVER")
+    """Include every deferred task in a READY `peek()`, regardless of when it is due."""
+
     task_class = RetryTask
     supports_async_task = True
     supports_get_result = True
@@ -308,19 +312,30 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         queue_name: str = DEFAULT_TASK_QUEUE_NAME,
         *,
         status: TaskResultStatus,
+        run_before: datetime.datetime | sentinel = FOREVER,
         count: int = 1,
     ) -> collections.abc.Generator[TaskResult]:
         """
         Yield up to `count` tasks from a queue in the given status segment.
 
         Pending work comes back in queue order, so the first READY task is the
-        next one a worker picks up. Finished results come back most recently
-        finished first.
+        next one a worker picks up. Deferred tasks scheduled at or before
+        `run_before` follow the READY tasks in due order. Finished results come
+        back most recently finished first.
+
+        Only READY results include deferred tasks. Every other status ignores
+        `run_before`.
 
         Args:
             queue_name: The name of the queue to peek into.
             status: The status of the tasks to yield.
+            run_before: Include deferred tasks due at or before this time.
+                The `ThreadmillTaskBackend.FOREVER` sentinel includes every
+                deferred task.
             count: The maximum number of tasks to yield. If 0, yield all available tasks.
+
+        Raises:
+            ValueError: A READY `peek` receives a naive `run_before`.
         """
         raise NotImplementedError
 
@@ -336,8 +351,13 @@ class ThreadmillTaskBackend(BaseTaskBackend, ABC):
         """Yield ingress/egress telemetry events from the backend's pub/sub stream."""
         raise NotImplementedError
 
-    def dequeue(self, task_result: TaskResult) -> None:
-        """Delete a single task from its current status segment."""
+    def dequeue(self, task_result: TaskResult) -> bool:
+        """
+        Delete a task from the deferred set or its status segment, with its payload.
+
+        Returns:
+            True when the task was removed, False when neither set holds it.
+        """
         raise NotImplementedError
 
     def purge(self, queue_name: str) -> None:

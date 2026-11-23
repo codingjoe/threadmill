@@ -92,6 +92,7 @@ COLUMN_LABELS: dict[str, str] = {
     "priority": "Priority",
     "function": "Function",
     "enqueued": "Enqueued",
+    "scheduled": "Scheduled",
     "started": "Started",
     "finished": "Finished",
     "workers": "Workers",
@@ -99,7 +100,7 @@ COLUMN_LABELS: dict[str, str] = {
 
 TAB_COLUMNS: dict[str, tuple[str, ...]] = {
     "running": ("id", "function", "enqueued", "started", "workers"),
-    "ready": ("id", "function", "priority", "enqueued"),
+    "ready": ("id", "function", "priority", "scheduled", "enqueued"),
     "successful": ("id", "function", "enqueued", "started", "finished", "workers"),
     "failed": ("id", "function", "enqueued", "started", "finished", "workers"),
 }
@@ -119,6 +120,8 @@ def _cell(result: TaskResult, column: str) -> str:
             return str(result.task.priority)
         case "enqueued":
             return naturaltime(result.enqueued_at)
+        case "scheduled":
+            return naturaltime(result.task.run_after) if result.task.run_after else "-"
         case "started":
             return naturaltime(result.started_at)
         case "finished":
@@ -151,6 +154,7 @@ class TaskDetail(Static):
             f"[b]Queue:[/b] {result.task.queue_name}",
             f"[b]Priority:[/b] {result.task.priority}",
             f"[b]Enqueued:[/b] {_format_dt(result.enqueued_at)}",
+            f"[b]Scheduled:[/b] {_format_dt(result.task.run_after) or '-'}",
             f"[b]Started:[/b] {_format_dt(result.started_at)}",
             f"[b]Finished:[/b] {_format_dt(result.finished_at)}",
             f"[b]Last attempted:[/b] {_format_dt(result.last_attempted_at)}",
@@ -183,7 +187,7 @@ class TaskList(Vertical):
     ]
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Show requeue only on the Failed tab, dequeue on non-Running tabs."""
+        """Show requeue only on Failed, dequeue on non-Running tabs."""
         status = self.active_status()
         if action == "requeue":
             return status == TaskResultStatus.FAILED
@@ -214,7 +218,10 @@ class TaskList(Vertical):
             return {label.lower(): 0 for label, _ in TAB_STATUSES}
         counts = self.telemetry.queues[self.queue_name].counts
         return {
-            label.lower(): getattr(counts, label.lower()) for label, _ in TAB_STATUSES
+            "running": counts.running,
+            "ready": counts.ready + counts.deferred,
+            "successful": counts.successful,
+            "failed": counts.failed,
         }
 
     def watch_counts(self, counts: dict[str, int]) -> None:
@@ -270,7 +277,7 @@ class TaskList(Vertical):
         )
 
     def active_status(self) -> TaskResultStatus | None:
-        """Return the status segment of the currently active task tab."""
+        """Return the status segment of the active task tab."""
         tab_id = self._tabs.active.removeprefix("tab-")
         return next(
             (status for label, status in TAB_STATUSES if label.lower() == tab_id),
@@ -311,12 +318,14 @@ class TaskList(Vertical):
     def _do_dequeue(self, confirmed: bool, task: TaskResult) -> None:
         if confirmed:
             try:
-                self.backend.dequeue(task)
+                removed = self.backend.dequeue(task)
             except Exception:
                 logger.exception("Delete failed for task %s", task.id)
                 self.app.notify("Delete failed.", severity="error")
             else:
-                self.app._after_action("Task deleted.")
+                self.app._after_action(
+                    "Task deleted." if removed else "Task not deleted."
+                )
 
     def _refresh_data(self) -> None:
         """Fetch and display tasks for the current queue and active tab."""
@@ -338,7 +347,12 @@ class TaskList(Vertical):
         table.disabled = False
         try:
             self._current_results = list(
-                backend.peek(queue_name=queue_name, status=status, count=100)
+                backend.peek(
+                    queue_name=queue_name,
+                    status=status,
+                    run_before=ThreadmillTaskBackend.FOREVER,
+                    count=100,
+                )
             )
         except Exception:
             logger.exception("Failed to peek tasks for %r", queue_name)
