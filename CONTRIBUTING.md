@@ -79,28 +79,15 @@ due time.
 
 ```mermaid
 block-beta
-  columns 1
-  block:prefix["threadmill:{alias} · one hash slot, updated atomically"]:1
-    columns 3
-    block:task["task:{id} · hash"]:1
-      columns 1
-      data["data<br/>serialized task"]
-      score["score<br/>order number"]
-      lease["lease_worker<br/>lease_started_at<br/>lease_token"]
-    end
-    block:queues["{queue}:… · sorted sets"]:1
-      columns 1
-      ready["READY<br/>member id, score order"]
-      running["RUNNING<br/>member id, score lease deadline"]
-      deferred["deferred<br/>member id, score due time"]
-      finished["SUCCESSFUL, FAILED<br/>member id, score finish time"]
-    end
-    block:result["result:{id} · string"]:1
-      columns 1
-      payload["serialized result"]
-      expiry["result TTL"]
-    end
-  end
+  columns 5
+  prefix["threadmill:{alias} · one hash slot, updated atomically"]:5
+  task["task:{id} · hash"]:5
+  data["data"] score["score"] worker["lease_worker"] started["lease_started_at"] token["lease_token"]
+  queues["{queue}:… · sorted sets"]:5
+  ready["READY"] running["RUNNING"] deferred["deferred"] ok["SUCCESSFUL"] failed["FAILED"]
+  s1["score: order"] s2["score: lease deadline"] s3["score: due time"] s4["score: finish time"] s5["score: finish time"]
+  result["result:{id} · string"]:5
+  payload["serialized result"] expiry["result TTL"] space space space
 ```
 
 | Part        | Written when                 | Removed when                |
