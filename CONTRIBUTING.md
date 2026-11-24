@@ -28,27 +28,55 @@ results.
 ```mermaid
 stateDiagram-v2
     direction LR
-    [*] --> Deferred: enqueue with run_after
+    state "Successful (terminal)" as Successful
+
     [*] --> Ready: enqueue
+    [*] --> Deferred: enqueue with run_after
     Deferred --> Ready: run_after reached (broker)
     Ready --> Running: acquired with a lease
-    Running --> Successful: task returned
-    Running --> Failed: task raised without a retry delay
-    Running --> Deferred: task raised with a retry delay
-    Running --> Deferred: lease expired with a retry delay
-    Running --> Failed: lease expired without a retry delay
+
+    Running --> Deferred: raised, retry delay returned
+    Running --> Deferred: lease expired, retry delay returned
+    Deferred --> Ready: retry delay elapsed (broker)
+
+    Running --> Successful: returned
+    Running --> Failed: raised, retry returns None or raises
+    Running --> Failed: lease expired, retry returns None or raises
+
     Failed --> Deferred: requeued from the inspector
     Ready --> [*]: dequeued from the inspector
     Deferred --> [*]: dequeued from the inspector
-    Successful --> [*]: dequeued from the inspector
-    Failed --> [*]: dequeued from the inspector
     Running --> [*]: unreadable payload discarded
+
+    note right of Successful
+        Result stays until the result TTL.
+        Dequeuing only removes it early.
+    end note
+
+    note right of Failed
+        Result stays until the result TTL.
+        Purge removes every state.
+    end note
 ```
 
-The Ready tab shows READY and DEFERRED tasks. Requeue and the worker retry
-both store the task in DEFERRED. The broker moves it to READY when it is due.
-Result payloads expire after the result TTL. The SUCCESSFUL and FAILED sets are
-trimmed on later acknowledgements.
+SUCCESSFUL is terminal for the task. A successful result stays in Redis for
+the result TTL, so `get_result()` can read it. The task never returns to the
+queue. Dequeuing or the TTL reaper only removes the stored result.
+
+FAILED ends the worker's lifecycle. An operator can still requeue it from the
+inspector, which starts a new attempt immediately and skips the retry callback.
+
+A retry never enters FAILED. When the task raises, the worker calls the task's
+retry callback. A returned `datetime.timedelta` moves the task to DEFERRED with
+that delay. The broker moves it to READY when the delay elapses, and the next
+lease increments `attempts`, which is `len(worker_ids)`. The callback reads the
+count through `TaskContext.attempt`. `ExponentialBackoff` keeps returning a
+delay until `max_retries`. A callback that returns `None` or raises ends
+retrying, and the task is acknowledged as FAILED.
+
+The Ready tab shows READY and DEFERRED tasks. Result payloads expire after the
+result TTL. The SUCCESSFUL and FAILED sets are trimmed on later
+acknowledgements.
 
 ## Task flow
 
@@ -76,34 +104,45 @@ sequenceDiagram
     Backend-)Redis: PUBLISH ingress
 
     loop Every broker interval
-        Broker->>Redis: read due deferred tasks
-        Broker->>Redis: ZADD ready (drop missing payloads)
+        Broker->>Redis: ZADD due deferred tasks to ready
+        opt A running lease expired
+            Broker->>Backend: get_leased_task(task_id)
+            Broker->>Backend: retry_delay(failed result)
+            alt retry delay returned
+                Backend->>Redis: ZREM running, restore payload, ZADD deferred
+            else retry returns None or raises
+                Backend->>Redis: ZREM running, SET result, DEL payload, ZADD failed
+            end
+        end
     end
 
-    Worker->>Backend: acquire(queues, count, worker)
-    Backend->>Redis: ZPOPMIN ready
-    Backend->>Redis: ZADD running with lease deadline
-    Backend->>Redis: HSET lease worker, start time, token
-    Redis-->>Backend: leased task data
-    Backend-->>Worker: task results with lease tokens
-    Worker->>Worker: call task function
+    loop Until the task succeeds, fails without a retry, or is discarded
+        Worker->>Backend: acquire(queues, count, worker)
+        Backend->>Redis: ZPOPMIN ready
+        Backend->>Redis: ZADD running with lease deadline
+        Backend->>Redis: HSET lease worker, start time, token
+        Redis-->>Backend: task data and lease token
+        Backend-->>Worker: task result with attempt count
+        Worker->>Worker: call task function
 
-    alt task returned
-        Worker->>Backend: acknowledge(successful result)
-        Backend->>Redis: ZREM running, SET result, DEL payload, ZADD successful
-        Backend-)Redis: PUBLISH egress
-    else task raised with a retry delay
-        Worker->>Backend: requeue(result, run_after)
-        Backend->>Redis: ZREM running, DEL result, restore payload, ZADD deferred
-        Backend-)Redis: PUBLISH ingress
-    else task raised without a retry delay
-        Worker->>Backend: acknowledge(failed result)
-        Backend->>Redis: ZREM running, SET result, DEL payload, ZADD failed
-        Backend-)Redis: PUBLISH egress
+        alt task returned
+            Worker->>Backend: acknowledge(successful result)
+            Backend->>Redis: ZREM running, SET result, DEL payload, ZADD successful
+            Backend-)Redis: PUBLISH egress
+        else task raised, retry delay returned
+            Worker->>Backend: requeue(result, now + delay)
+            Backend->>Redis: ZREM running, DEL result, restore payload, ZADD deferred
+            Backend-)Redis: PUBLISH ingress
+            Note over Worker,Redis: The broker returns the task to ready after the delay.
+        else task raised, retry returns None or raises
+            Worker->>Backend: acknowledge(failed result)
+            Backend->>Redis: ZREM running, SET result, DEL payload, ZADD failed
+            Backend-)Redis: PUBLISH egress
+        end
     end
 ```
 
-Acknowledge only removes the RUNNING entry when the lease token matches. A worker that lost its lease cannot publish a result.
+Acknowledge only removes the RUNNING entry when the lease token matches. A worker that lost its lease cannot publish a result. The broker then owns the retry decision for that task.
 
 ## Inspector actions
 
@@ -139,6 +178,7 @@ sequenceDiagram
     Operator-->>Inspector: Enter
     Inspector->>Backend: requeue(task, now)
     Backend->>Redis: ZREM failed, DEL result, restore payload, ZADD deferred
+    Note over Inspector,Redis: The retry callback is skipped.
     Broker->>Redis: move due task to ready on the next pass
     Inspector->>Inspector: refresh telemetry and task list
 
