@@ -104,54 +104,74 @@ one server operation changes both.
 
 The worker process leases `READY` tasks, runs them, and acknowledges the
 result. The broker thread moves due `DEFERRED` tasks to `READY` and recovers
-tasks with an expired lease. An expired lease marks the task as `FAILED` with
-an `AcknowledgementTimeoutError`. The retry rule then decides between a retry
-and a failure.
+tasks with an expired lease. All queues and records live in Redis. An expired
+lease marks the task as `FAILED` with an `AcknowledgementTimeoutError`. The
+retry rule then decides between a retry and a failure.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Producer
-    participant Worker as Worker process
-    participant Backend as Task backend
-    participant Broker as Broker thread
-
-    Producer->>Backend: enqueue(task)
-    alt run_after is set
-        Backend->>Backend: queue the task for later
-    else task is due now
-        Backend->>Backend: queue the task as ready
+    box Threadmill
+        participant Worker@{ "type": "control" } as Worker process
+        participant Backend@{ "type": "control" } as Task backend
+        participant Broker@{ "type": "control" } as Broker thread
+    end
+    box Storage
+        participant Redis@{ "type": "database" } as Redis
     end
 
+    Note over Redis: Task record: work, order score, lease fields.<br/>Queue entry: task id and score.
+
+    Producer->>+Backend: enqueue(task)
+    Backend->>Redis: store the task record and its order score
+    alt the task has a delay
+        Backend->>Redis: add the id to the deferred set
+    else the task is due now
+        Backend->>Redis: add the id to the ready set
+    end
+    Backend-)Redis: emit an ingress event
+    deactivate Backend
+
     loop Every broker interval
-        Broker->>Backend: move due tasks to ready
+        Broker->>Redis: move due ids to the ready set with their order scores
+        Note over Broker,Redis: An id with no task record is dropped.
         opt A lease expired
             Broker->>Backend: load the expired task
             Broker->>Backend: get the retry delay
-            alt retry delay returned
-                Backend->>Backend: queue the task for a later retry
-            else retry returns None or raises
-                Backend->>Backend: mark the task failed
+            alt a retry delay is returned
+                Backend->>Redis: clear the running id, restore the task, and schedule the retry
+                Backend-)Redis: emit an ingress event
+            else the retry stops
+                Backend->>Redis: clear the running id, save the failed result, and mark the task failed
+                Backend-)Redis: emit an egress event
             end
         end
     end
 
     loop Until the task succeeds, fails without a retry, or is discarded
-        Worker->>Backend: acquire tasks
-        Backend->>Backend: claim the task and set the lease
-        Backend-->>Worker: task and lease
+        Worker->>+Backend: acquire tasks
+        Backend->>Redis: claim the next ready id, mark it running, and write the lease
+        Redis-->>Backend: task record and lease token
+        Backend-->>-Worker: task result with the attempt count
         Worker->>Worker: run the task
 
-        alt task returned
-            Worker->>Backend: acknowledge the result
-            Backend->>Backend: save the result
-        else task raised and a retry is set
-            Worker->>Backend: requeue with a delay
-            Backend->>Backend: queue the task for a later retry
-            Note over Worker,Backend: The broker makes the task ready after the delay.
-        else task raised without a retry
-            Worker->>Backend: acknowledge the failure
-            Backend->>Backend: save the failed result
+        alt the task returned
+            Worker->>+Backend: acknowledge the result
+            Backend->>Redis: clear the running id, save the result with the TTL, and mark the task successful
+            Backend-)Redis: emit an egress event
+            deactivate Backend
+        else the task raised and a retry is set
+            Worker->>+Backend: requeue the task with a delay
+            Backend->>Redis: clear the running id, drop the old result, restore the task, and schedule the retry
+            Backend-)Redis: emit an ingress event
+            Note over Worker,Redis: The broker moves the id to the ready set<br/>when the delay is over.
+            deactivate Backend
+        else the task raised without a retry
+            Worker->>+Backend: acknowledge the failure
+            Backend->>Redis: clear the running id, save the failed result, and mark the task failed
+            Backend-)Redis: emit an egress event
+            deactivate Backend
         end
     end
 ```
