@@ -103,69 +103,61 @@ one server operation changes both.
 ## Task flow
 
 The worker process leases `READY` tasks, runs them, and acknowledges the
-result. The broker thread moves due `DEFERRED` tasks and reaps expired leases.
-An expired lease marks the task as `FAILED` with an `AcknowledgementTimeoutError`.
-The retry rule then selects requeue or acknowledge.
+result. The broker thread moves due `DEFERRED` tasks to `READY` and recovers
+tasks with an expired lease. An expired lease marks the task as `FAILED` with
+an `AcknowledgementTimeoutError`. The retry rule then decides between a retry
+and a failure.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Producer
     participant Worker as Worker process
-    participant Backend as RedisTaskBackend
-    participant Redis
+    participant Backend as Task backend
     participant Broker as Broker thread
 
     Producer->>Backend: enqueue(task)
-    Backend->>Redis: HSET payload and score
     alt run_after is set
-        Backend->>Redis: ZADD deferred
-    else immediate task
-        Backend->>Redis: ZADD ready
+        Backend->>Backend: queue the task for later
+    else task is due now
+        Backend->>Backend: queue the task as ready
     end
-    Backend-)Redis: PUBLISH ingress
 
     loop Every broker interval
-        Broker->>Redis: ZADD due deferred tasks to ready
-        opt A running lease expired
-            Broker->>Backend: get_leased_task(task_id)
-            Broker->>Backend: retry_delay(failed result)
+        Broker->>Backend: move due tasks to ready
+        opt A lease expired
+            Broker->>Backend: load the expired task
+            Broker->>Backend: get the retry delay
             alt retry delay returned
-                Backend->>Redis: ZREM running, restore payload, ZADD deferred
+                Backend->>Backend: queue the task for a later retry
             else retry returns None or raises
-                Backend->>Redis: ZREM running, SET result, DEL payload, ZADD failed
+                Backend->>Backend: mark the task failed
             end
         end
     end
 
     loop Until the task succeeds, fails without a retry, or is discarded
-        Worker->>Backend: acquire(queues, count, worker)
-        Backend->>Redis: ZPOPMIN ready
-        Backend->>Redis: ZADD running with lease deadline
-        Backend->>Redis: HSET lease worker, start time, token
-        Redis-->>Backend: task data and lease token
-        Backend-->>Worker: task result with attempt count
-        Worker->>Worker: call task function
+        Worker->>Backend: acquire tasks
+        Backend->>Backend: claim the task and set the lease
+        Backend-->>Worker: task and lease
+        Worker->>Worker: run the task
 
         alt task returned
-            Worker->>Backend: acknowledge(successful result)
-            Backend->>Redis: ZREM running, SET result, DEL payload, ZADD successful
-            Backend-)Redis: PUBLISH egress
-        else task raised, retry delay returned
-            Worker->>Backend: requeue(result, now + delay)
-            Backend->>Redis: ZREM running, DEL result, restore payload, ZADD deferred
-            Backend-)Redis: PUBLISH ingress
-            Note over Worker,Redis: The broker returns the task to ready after the delay.
-        else task raised, retry returns None or raises
-            Worker->>Backend: acknowledge(failed result)
-            Backend->>Redis: ZREM running, SET result, DEL payload, ZADD failed
-            Backend-)Redis: PUBLISH egress
+            Worker->>Backend: acknowledge the result
+            Backend->>Backend: save the result
+        else task raised and a retry is set
+            Worker->>Backend: requeue with a delay
+            Backend->>Backend: queue the task for a later retry
+            Note over Worker,Backend: The broker makes the task ready after the delay.
+        else task raised without a retry
+            Worker->>Backend: acknowledge the failure
+            Backend->>Backend: save the failed result
         end
     end
 ```
 
 An acknowledgement removes the `RUNNING` entry only when the lease token
-matches. A worker that lost its lease cannot publish a result. The broker then
+matches. A worker that lost its lease cannot store a result. The broker then
 owns the retry decision for that task.
 
 ## Inspector actions
