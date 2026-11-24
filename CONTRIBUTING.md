@@ -70,19 +70,24 @@ result TTL. Later acknowledgements trim the `SUCCESSFUL` and `FAILED` lists.
 
 ## Task storage
 
-A task has two parts. The work is the function and its arguments. The queue
-entry is the task id and its order number.
+A pending task has two parts. The work is the function and its arguments. The
+queue entry is the task id and its order number.
 
 Threadmill stores the work in a task record. Each queue stores only the task id
 and an order number. This keeps state changes cheap and gives the lease a home.
 
-- A state change moves the id. It does not rewrite the work.
-- The worker name, the start time, and the lease token sit in the task record.
-  One field read refuses a worker that lost its lease.
-- The record keeps the original order number. A delayed task returns to its old
-  place in the queue.
-- A result has its own record with a lifetime, the result TTL (time to live).
-  The result lists hold ids.
+| Part        | Holds                         | Written when                 | Removed when                |
+| ----------- | ----------------------------- | ---------------------------- | --------------------------- |
+| Task record | id, work, lease, order number | enqueue, lease change, retry | acknowledge, dequeue, purge |
+| Queue entry | id, order number              | enqueue, state change        | acknowledge, dequeue, purge |
+
+A state change moves the id. It does not rewrite the work. The lease sits in
+the task record, so one field read refuses a worker that lost its lease. The
+record keeps the original order number. A delayed task returns to its old place
+in the queue.
+
+A finished task also has a result record with a lifetime, the result TTL (time
+to live). The result lists hold ids.
 
 The two parts must stay in step. If the task record is missing, the queue entry
 is stale. The broker drops it and logs a warning. They share a name prefix, so
