@@ -45,13 +45,8 @@ stateDiagram-v2
 
     Running --> [*]: unreadable payload discarded
 
-    note right of Successful
-        Result stays until the result TTL.
-    end note
-
-    note right of Failed
-        Result stays until the result TTL.
-    end note
+    Successful --> [*]: result stays until the result TTL
+    Failed --> [*]: result stays until the result TTL
 ```
 
 SUCCESSFUL is terminal for the task. A successful result stays in Redis for
