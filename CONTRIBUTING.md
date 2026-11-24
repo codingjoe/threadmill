@@ -76,10 +76,23 @@ queue entry is the task id and its order number.
 Threadmill stores the work in a task record. Each queue stores only the task id
 and an order number. This keeps state changes cheap and gives the lease a home.
 
-| Part        | Holds                         | Written when                 | Removed when                |
-| ----------- | ----------------------------- | ---------------------------- | --------------------------- |
-| Task record | id, work, lease, order number | enqueue, lease change, retry | acknowledge, dequeue, purge |
-| Queue entry | id, order number              | enqueue, state change        | acknowledge, dequeue, purge |
+```mermaid
+block-beta
+  columns 3
+  block:queues["Queues"]:1
+    columns 1
+    ready["READY<br/>id + order"]
+    running["RUNNING<br/>id + lease deadline"]
+    deferred["DEFERRED<br/>id + due time"]
+  end
+  record["Task record, one per task<br/>work + lease + order number"]:2
+  queues --> record
+```
+
+| Part        | Written when                 | Removed when                |
+| ----------- | ---------------------------- | --------------------------- |
+| Task record | enqueue, lease change, retry | acknowledge, dequeue, purge |
+| Queue entry | enqueue, state change        | acknowledge, dequeue, purge |
 
 A state change moves the id. It does not rewrite the work. The lease sits in
 the task record, so one field read refuses a worker that lost its lease. The
