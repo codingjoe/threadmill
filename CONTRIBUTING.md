@@ -73,51 +73,23 @@ result TTL. Later acknowledgements trim the `SUCCESSFUL` and `FAILED` lists.
 A pending task has two parts. The work is the function and its arguments. The
 queue entry is the task id and a score.
 
-Threadmill stores the work in a task record. Each queue stores only the task id
-and a score. The score sets the order in the queue, the lease deadline, or the
-due time.
+The work lives in a task record. Each queue holds only the task id and a score.
+The score sets the order in the queue, the lease deadline, or the due time.
 
-```mermaid
-block-beta
-  columns 3
-  block:alias["threadmill:{alias} · one hash slot, updated atomically"]:3
-    columns 3
-    block:queues["Queue sets"]:1
-      columns 1
-      ready["READY"]
-      running["RUNNING"]
-      deferred["deferred"]
-      ok["SUCCESSFUL"]
-      failed["FAILED"]
-    end
-    block:task["Task record · hash"]:1
-      columns 1
-      data["data"]
-      score["score"]
-      worker["lease_worker"]
-      started["lease_started_at"]
-      token["lease_token"]
-    end
-    block:result["Result record · string"]:1
-      columns 1
-      payload["serialized result"]
-      ttl["result TTL"]
-    end
-  end
-```
+`{prefix}` is `threadmill:{alias}`. `{status}` is `ready`, `running`,
+`successful`, or `failed`.
 
-| Part        | Written when                 | Removed when                |
-| ----------- | ---------------------------- | --------------------------- |
-| Task record | enqueue, lease change, retry | acknowledge, dequeue, purge |
-| Queue entry | enqueue, state change        | acknowledge, dequeue, purge |
+| Key                         | Type       | Stored value                                                                                               |
+| --------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------- |
+| `{prefix}:task:{id}`        | hash       | `data`: serialized task. `score`: order. `lease_worker`, `lease_started_at`, `lease_token`.                |
+| `{prefix}:{queue}:{status}` | sorted set | Member: task id. Score: order (`ready`), lease deadline (`running`), finish time (`successful`, `failed`). |
+| `{prefix}:{queue}:deferred` | sorted set | Member: task id. Score: due time.                                                                          |
+| `{prefix}:result:{id}`      | string     | Serialized result. Expires after the result TTL.                                                           |
 
 A state change moves the id. It does not rewrite the work. The lease sits in
 the task record, so one field read refuses a worker that lost its lease. The
 record keeps the order score. A delayed task returns to its old place in the
 queue.
-
-A finished task also has a result record with a lifetime, the result TTL (time
-to live). The result lists hold ids.
 
 The two parts must stay in step. If the task record is missing, the queue entry
 is stale. The broker drops it and logs a warning. They share a name prefix, so
