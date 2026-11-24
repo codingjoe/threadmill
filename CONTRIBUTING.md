@@ -70,41 +70,23 @@ result TTL. Later acknowledgements trim the `SUCCESSFUL` and `FAILED` lists.
 
 ## Task storage
 
-A task has two parts. The first part is the work: the function and its
-arguments. The work also holds the result after the task runs. The second part
-is the queue entry: the task id and its order number.
+A task has two parts. The work is the function and its arguments. The queue
+entry is the task id and its order number.
 
-Threadmill stores the work in a task record. Each queue stores only the task
-id and an order number. This has four benefits.
+Threadmill stores the work in a task record. Each queue stores only the task id
+and an order number. This keeps state changes cheap and gives the lease a home.
 
-1. **State changes stay cheap.** A task moves between queues many times. Each
-   move writes the id, not the work. The work is written once at enqueue. A
-   retry writes it again.
-1. **The lease has a home.** The worker name, the start time, and the lease
-   token sit in the same record as the work. To refuse a worker that lost its
-   lease, the server reads one field.
-1. **The order can be restored.** The record keeps the original order number.
-   A delayed task returns to its old place in the queue.
-1. **Results get a time limit.** A result has its own record with a lifetime,
-   the result TTL (time to live). The result lists hold ids.
+- A state change moves the id. It does not rewrite the work.
+- The worker name, the start time, and the lease token sit in the task record.
+  One field read refuses a worker that lost its lease.
+- The record keeps the original order number. A delayed task returns to its old
+  place in the queue.
+- A result has its own record with a lifetime, the result TTL (time to live).
+  The result lists hold ids.
 
-The design has two costs.
-
-- **Two parts to keep in step.** If the task record is missing, the queue entry
-  is stale. The broker drops it and logs a warning.
-- **One update must cover both.** The task record and the queue entry share a
-  name prefix, so one server operation changes both. A partial write cannot
-  occur.
-
-Commit `d74d4e7` tested this principle on the lease. Before the commit, the
-fetch step rewrote the work to mark the task as running. The fetch step took
-34.1 microseconds at 5.4 KB and 10.3 microseconds at 447 B. After the lease
-moved beside the work, it took 12.1 microseconds and 6.0 microseconds. The work
-is the expensive part, so it belongs outside the parts that change often.
-
-The rejected alternative is to store the whole task in the queue entry. This
-removes the second part and cannot leave a stale id. But each state change must
-rewrite the whole task. Results also cannot have their own time limit.
+The two parts must stay in step. If the task record is missing, the queue entry
+is stale. The broker drops it and logs a warning. They share a name prefix, so
+one server operation changes both.
 
 ## Task flow
 
