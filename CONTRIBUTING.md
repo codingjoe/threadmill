@@ -43,28 +43,22 @@ stateDiagram-v2
     Running --> Failed: raised, retry returns None or raises
     Running --> Failed: lease expired, retry returns None or raises
 
-    Failed --> Deferred: requeued from the inspector
-    Ready --> [*]: dequeued from the inspector
-    Deferred --> [*]: dequeued from the inspector
     Running --> [*]: unreadable payload discarded
 
     note right of Successful
         Result stays until the result TTL.
-        Dequeuing only removes it early.
     end note
 
     note right of Failed
         Result stays until the result TTL.
-        Purge removes every state.
     end note
 ```
 
 SUCCESSFUL is terminal for the task. A successful result stays in Redis for
 the result TTL, so `get_result()` can read it. The task never returns to the
-queue. Dequeuing or the TTL reaper only removes the stored result.
+queue. The TTL reaper only removes the stored result.
 
-FAILED ends the worker's lifecycle. An operator can still requeue it from the
-inspector, which starts a new attempt immediately and skips the retry callback.
+FAILED is terminal for the worker.
 
 A retry never enters FAILED. When the task raises, the worker calls the task's
 retry callback. A returned `datetime.timedelta` moves the task to DEFERRED with
