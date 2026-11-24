@@ -79,15 +79,31 @@ due time.
 
 ```mermaid
 block-beta
-  columns 5
-  prefix["threadmill:{alias} · one hash slot, updated atomically"]:5
-  task["task:{id} · hash"]:5
-  data["data"] score["score"] worker["lease_worker"] started["lease_started_at"] token["lease_token"]
-  queues["{queue}:… · sorted sets"]:5
-  ready["READY"] running["RUNNING"] deferred["deferred"] ok["SUCCESSFUL"] failed["FAILED"]
-  s1["score: order"] s2["score: lease deadline"] s3["score: due time"] s4["score: finish time"] s5["score: finish time"]
-  result["result:{id} · string"]:5
-  payload["serialized result"] expiry["result TTL"] space space space
+  columns 3
+  block:alias["threadmill:{alias} · one hash slot, updated atomically"]:3
+    columns 3
+    block:queues["Queue sets"]:1
+      columns 1
+      ready["READY"]
+      running["RUNNING"]
+      deferred["deferred"]
+      ok["SUCCESSFUL"]
+      failed["FAILED"]
+    end
+    block:task["Task record · hash"]:1
+      columns 1
+      data["data"]
+      score["score"]
+      worker["lease_worker"]
+      started["lease_started_at"]
+      token["lease_token"]
+    end
+    block:result["Result record · string"]:1
+      columns 1
+      payload["serialized result"]
+      ttl["result TTL"]
+    end
+  end
 ```
 
 | Part        | Written when                 | Removed when                |
