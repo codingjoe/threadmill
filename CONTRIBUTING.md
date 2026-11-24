@@ -21,9 +21,9 @@ mid-flight. We fail loudly instead. These are deliberate design decisions.
 
 ## Task lifecycle
 
-A task lives in one of five Redis sets. READY and DEFERRED hold pending
-work. RUNNING holds leased tasks. SUCCESSFUL and FAILED hold published
-results.
+A task is stored in one of five Redis sets. `READY` and `DEFERRED` hold
+pending work. `RUNNING` holds tasks with a lease. `SUCCESSFUL` and `FAILED`
+hold results.
 
 ```mermaid
 stateDiagram-v2
@@ -49,30 +49,32 @@ stateDiagram-v2
     Failed --> [*]: result stays until the result TTL
 ```
 
-SUCCESSFUL is terminal for the task. A successful result stays in Redis for
+`SUCCESSFUL` is the last state for the task. The result stays in Redis for
 the result TTL, so `get_result()` can read it. The task never returns to the
-queue. The TTL reaper only removes the stored result.
+queue. The TTL reaper only deletes the stored result.
 
-FAILED is terminal for the worker.
+`FAILED` is the last state for the worker.
 
-A retry never enters FAILED. When the task raises, the worker calls the task's
-retry callback. A returned `datetime.timedelta` moves the task to DEFERRED with
-that delay. The broker moves it to READY when the delay elapses, and the next
-lease increments `attempts`, which is `len(worker_ids)`. The callback reads the
-count through `TaskContext.attempt`. `ExponentialBackoff` keeps returning a
-delay until `max_retries`. A callback that returns `None` or raises ends
-retrying, and the task is acknowledged as FAILED.
+A retry never enters `FAILED`. When the task raises an error, the worker calls
+the retry callback of the task. If the callback returns a
+`datetime.timedelta`, the task moves to `DEFERRED` with that delay. The broker
+moves the task to `READY` when the delay is over. The next lease increments
+`attempts`, which is `len(worker_ids)`. The callback reads the count with
+`TaskContext.attempt`.
 
-The Ready tab shows READY and DEFERRED tasks. Result payloads expire after the
-result TTL. The SUCCESSFUL and FAILED sets are trimmed on later
-acknowledgements.
+`ExponentialBackoff` returns a delay until `max_retries`. If the callback
+returns `None` or raises an error, the retry stops. The worker then
+acknowledges the task as `FAILED`.
+
+The Ready tab shows `READY` and `DEFERRED` tasks. Results expire after the
+result TTL. Later acknowledgements trim the `SUCCESSFUL` and `FAILED` sets.
 
 ## Task flow
 
-The worker process leases ready tasks, runs them, and acknowledges the result.
-The broker thread moves due deferred tasks and reaps expired leases. An expired
-lease marks the task FAILED with an `AcknowledgementTimeoutError`. The retry
-rule then decides between requeue and acknowledge.
+The worker process leases `READY` tasks, runs them, and acknowledges the
+result. The broker thread moves due `DEFERRED` tasks and reaps expired leases.
+An expired lease marks the task as `FAILED` with an `AcknowledgementTimeoutError`.
+The retry rule then selects requeue or acknowledge.
 
 ```mermaid
 sequenceDiagram
@@ -131,19 +133,22 @@ sequenceDiagram
     end
 ```
 
-Acknowledge only removes the RUNNING entry when the lease token matches. A worker that lost its lease cannot publish a result. The broker then owns the retry decision for that task.
+An acknowledgement removes the `RUNNING` entry only when the lease token
+matches. A worker that lost its lease cannot publish a result. The broker then
+owns the retry decision for that task.
 
 ## Inspector actions
 
-The inspector reads on its own and mutates only after an explicit
-confirmation. Every mutating action refreshes telemetry and the task list.
+The inspector reads data on its own. It changes data only after an explicit
+confirmation. Every action that changes data refreshes the telemetry and the
+task list.
 
-Requeue appears only on the Failed tab and skips the retry callback. Dequeue is
-hidden on the Running tab, so the inspector never races a live lease. Purge
-deletes every segment of a queue, including results.
+Requeue appears only on the Failed tab. It skips the retry callback. Dequeue is
+not available on the Running tab, so the inspector never races a live lease.
+Purge deletes every segment of a queue. It also deletes the results.
 
-The task list does not auto-refresh. It reloads on tab switch, queue change,
-F5, and after each action.
+The task list does not refresh automatically. It reloads on a tab switch, a
+queue change, F5, and after each action.
 
 ## Testing
 
