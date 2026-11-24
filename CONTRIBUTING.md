@@ -71,22 +71,36 @@ result TTL. Later acknowledgements trim the `SUCCESSFUL` and `FAILED` lists.
 ## Task storage
 
 A pending task has two parts. The work is the function and its arguments. The
-queue entry is the task id and its order number.
+queue entry is the task id and a score.
 
 Threadmill stores the work in a task record. Each queue stores only the task id
-and an order number. This keeps state changes cheap and gives the lease a home.
+and a score. The score sets the order in the queue, the lease deadline, or the
+due time.
 
 ```mermaid
 block-beta
-  columns 3
-  block:queues["Queues"]:1
-    columns 1
-    ready["READY<br/>id + order"]
-    running["RUNNING<br/>id + lease deadline"]
-    deferred["DEFERRED<br/>id + due time"]
+  columns 1
+  block:prefix["threadmill:{alias} · one hash slot, updated atomically"]:1
+    columns 3
+    block:task["task:{id} · hash"]:1
+      columns 1
+      data["data<br/>serialized task"]
+      score["score<br/>order number"]
+      lease["lease_worker<br/>lease_started_at<br/>lease_token"]
+    end
+    block:queues["{queue}:… · sorted sets"]:1
+      columns 1
+      ready["READY<br/>member id, score order"]
+      running["RUNNING<br/>member id, score lease deadline"]
+      deferred["deferred<br/>member id, score due time"]
+      finished["SUCCESSFUL, FAILED<br/>member id, score finish time"]
+    end
+    block:result["result:{id} · string"]:1
+      columns 1
+      payload["serialized result"]
+      expiry["result TTL"]
+    end
   end
-  record["Task record, one per task<br/>work + lease + order number"]:2
-  queues --> record
 ```
 
 | Part        | Written when                 | Removed when                |
@@ -96,8 +110,8 @@ block-beta
 
 A state change moves the id. It does not rewrite the work. The lease sits in
 the task record, so one field read refuses a worker that lost its lease. The
-record keeps the original order number. A delayed task returns to its old place
-in the queue.
+record keeps the order score. A delayed task returns to its old place in the
+queue.
 
 A finished task also has a result record with a lifetime, the result TTL (time
 to live). The result lists hold ids.
