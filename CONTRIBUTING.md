@@ -16,8 +16,13 @@ curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/m
 We require a persistent Redis without eviction.
 
 Redis connections explicitly load with `decode_responses=True`, so all values
-read from Redis are strings. We do not guard against Redis data altered
-mid-flight. We fail loudly instead. These are deliberate design decisions.
+read from Redis are strings.
+
+We do not repair Redis data altered mid-flight. We log the affected task at
+warning or error level, with `exc_info` when there is an exception. Sentry
+raises an issue. We drop the affected entry and keep the worker pool running.
+The pool stays available even when a task cannot be recovered. These are
+deliberate design decisions.
 
 ## Task lifecycle
 
