@@ -16,8 +16,182 @@ curl -sSL https://raw.githubusercontent.com/codingjoe/naming-things/refs/heads/m
 We require a persistent Redis without eviction.
 
 Redis connections explicitly load with `decode_responses=True`, so all values
-read from Redis are strings. We do not guard against Redis data altered
-mid-flight. We fail loudly instead. These are deliberate design decisions.
+read from Redis are strings.
+
+We do not repair Redis data altered mid-flight. We log the affected task at
+warning or error level, with `exc_info` when there is an exception. Sentry
+raises an issue. We drop the affected entry and keep the worker pool running.
+The pool stays available even when a task cannot be recovered. These are
+deliberate design decisions.
+
+## Task lifecycle
+
+A task is in one of five states. `READY` and `DEFERRED` hold pending work.
+`RUNNING` holds tasks with a lease. `SUCCESSFUL` and `FAILED` hold results.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "Successful (terminal)" as Successful
+
+    [*] --> Ready: enqueue
+    [*] --> Deferred: enqueue with run_after
+    Deferred --> Ready: run_after reached (broker)
+    Ready --> Running: acquired with a lease
+
+    Running --> Deferred: raised, retry delay returned
+    Running --> Deferred: lease expired, retry delay returned
+    Deferred --> Ready: retry delay elapsed (broker)
+
+    Running --> Successful: returned
+    Running --> Failed: raised, retry returns None or raises
+    Running --> Failed: lease expired, retry returns None or raises
+
+    Running --> [*]: unreadable payload discarded
+
+    Successful --> [*]: result stays until the result TTL
+    Failed --> [*]: result stays until the result TTL
+```
+
+`SUCCESSFUL` is the last state for the task. The result stays in Redis for
+the result TTL, so `get_result()` can read it. The task never returns to the
+queue. The TTL reaper only deletes the stored result.
+
+`FAILED` is the last state for the worker.
+
+A retry never enters `FAILED`. When the task raises an error, the worker calls
+the retry callback of the task. If the callback returns a
+`datetime.timedelta`, the task moves to `DEFERRED` with that delay. The broker
+moves the task to `READY` when the delay is over. The next lease increments
+`attempts`, which is `len(worker_ids)`. The callback reads the count with
+`TaskContext.attempt`.
+
+`ExponentialBackoff` returns a delay until `max_retries`. If the callback
+returns `None` or raises an error, the retry stops. The worker then
+acknowledges the task as `FAILED`.
+
+The Ready tab shows `READY` and `DEFERRED` tasks. Results expire after the
+result TTL. Later acknowledgements trim the `SUCCESSFUL` and `FAILED` lists.
+
+## Task storage
+
+A pending task has two parts. The work is the function and its arguments. The
+queue entry is the task id and a score.
+
+The work lives in a task record. Each queue holds only the task id and a score.
+The score sets the order in the queue, the lease deadline, or the due time.
+
+`{prefix}` is `threadmill:{alias}`. `{status}` is `ready`, `running`,
+`successful`, or `failed`.
+
+| Key                         | Type       | Stored value                                                                                               |
+| --------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------- |
+| `{prefix}:task:{id}`        | hash       | `data`: serialized task. `score`: order. `lease_worker`, `lease_started_at`, `lease_token`.                |
+| `{prefix}:{queue}:{status}` | sorted set | Member: task id. Score: order (`ready`), lease deadline (`running`), finish time (`successful`, `failed`). |
+| `{prefix}:{queue}:deferred` | sorted set | Member: task id. Score: due time.                                                                          |
+| `{prefix}:result:{id}`      | string     | Serialized result. Expires after the result TTL.                                                           |
+
+A state change moves the id. It does not rewrite the work. The lease sits in
+the task record, so one field read refuses a worker that lost its lease. The
+record keeps the order score. A delayed task returns to its old place in the
+queue.
+
+The two parts must stay in step. If the task record is missing, the queue entry
+is stale. The broker drops it and logs a warning. They share a name prefix, so
+one server operation changes both.
+
+## Task flow
+
+The worker process leases `READY` tasks, runs them, and acknowledges the
+result. The broker thread moves due `DEFERRED` tasks to `READY` and recovers
+tasks with an expired lease. All queues and records live in Redis. An expired
+lease marks the task as `FAILED` with an `AcknowledgementTimeoutError`. The
+retry rule then decides between a retry and a failure.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Producer
+    box Threadmill
+        participant Worker@{ "type": "control" } as Worker process
+        participant Backend@{ "type": "control" } as Task backend
+        participant Broker@{ "type": "control" } as Broker thread
+    end
+    box Storage
+        participant Redis@{ "type": "database" } as Redis
+    end
+
+    Note over Redis: Task record: work, order score, lease fields.<br/>Queue entry: task id and score.
+
+    Producer->>+Backend: enqueue(task)
+    Backend->>Redis: store the task record and its order score
+    alt the task has a delay
+        Backend->>Redis: add the id to the deferred set
+    else the task is due now
+        Backend->>Redis: add the id to the ready set
+    end
+    Backend-)Redis: emit an ingress event
+    deactivate Backend
+
+    loop Every broker interval
+        Broker->>Redis: move due ids to the ready set with their order scores
+        Note over Broker,Redis: An id with no task record is dropped.
+        opt A lease expired
+            Broker->>Backend: load the expired task
+            Broker->>Backend: get the retry delay
+            alt a retry delay is returned
+                Backend->>Redis: clear the running id, restore the task, and schedule the retry
+                Backend-)Redis: emit an ingress event
+            else the retry stops
+                Backend->>Redis: clear the running id, save the failed result, and mark the task failed
+                Backend-)Redis: emit an egress event
+            end
+        end
+    end
+
+    loop Until the task succeeds, fails without a retry, or is discarded
+        Worker->>+Backend: acquire tasks
+        Backend->>Redis: claim the next ready id, mark it running, and write the lease
+        Redis-->>Backend: task record and lease token
+        Backend-->>-Worker: task result with the attempt count
+        Worker->>Worker: run the task
+
+        alt the task returned
+            Worker->>+Backend: acknowledge the result
+            Backend->>Redis: clear the running id, save the result with the TTL, and mark the task successful
+            Backend-)Redis: emit an egress event
+            deactivate Backend
+        else the task raised and a retry is set
+            Worker->>+Backend: requeue the task with a delay
+            Backend->>Redis: clear the running id, drop the old result, restore the task, and schedule the retry
+            Backend-)Redis: emit an ingress event
+            Note over Worker,Redis: The broker moves the id to the ready set<br/>when the delay is over.
+            deactivate Backend
+        else the task raised without a retry
+            Worker->>+Backend: acknowledge the failure
+            Backend->>Redis: clear the running id, save the failed result, and mark the task failed
+            Backend-)Redis: emit an egress event
+            deactivate Backend
+        end
+    end
+```
+
+An acknowledgement removes the `RUNNING` entry only when the lease token
+matches. A worker that lost its lease cannot store a result. The broker then
+owns the retry decision for that task.
+
+## Inspector actions
+
+The inspector reads data on its own. It changes data only after an explicit
+confirmation. Every action that changes data refreshes the telemetry and the
+task list.
+
+Requeue appears only on the Failed tab. It skips the retry callback. Dequeue is
+not available on the Running tab, so the inspector never races a live lease.
+Purge deletes every segment of a queue. It also deletes the results.
+
+The task list does not refresh automatically. It reloads on a tab switch, a
+queue change, F5, and after each action.
 
 ## Testing
 
