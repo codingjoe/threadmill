@@ -138,58 +138,12 @@ Acknowledge only removes the RUNNING entry when the lease token matches. A worke
 The inspector reads on its own and mutates only after an explicit
 confirmation. Every mutating action refreshes telemetry and the task list.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Operator
-    participant Inspector
-    participant Backend as RedisTaskBackend
-    participant Redis
-    participant Broker as Broker thread
+Requeue appears only on the Failed tab and skips the retry callback. Dequeue is
+hidden on the Running tab, so the inspector never races a live lease. Purge
+deletes every segment of a queue, including results.
 
-    loop Every 2 seconds
-        Inspector->>Backend: queue_stats()
-        Backend->>Redis: ZCARD all five segments
-        Redis-->>Backend: counts
-        Backend-->>Inspector: telemetry
-    end
-
-    Redis--)Inspector: ingress and egress events
-
-    Operator->>Inspector: select queue and status tab
-    Inspector->>Backend: peek(queue, status, FOREVER, 100)
-    Backend->>Redis: read members and payloads
-    Redis-->>Backend: stored task results
-    Backend-->>Inspector: task results
-
-    Operator->>Inspector: press r on the Failed tab
-    Inspector->>Operator: ConfirmScreen
-    Operator-->>Inspector: Enter
-    Inspector->>Backend: requeue(task, now)
-    Backend->>Redis: ZREM failed, DEL result, restore payload, ZADD deferred
-    Note over Inspector,Redis: The retry callback is skipped.
-    Broker->>Redis: move due task to ready on the next pass
-    Inspector->>Inspector: refresh telemetry and task list
-
-    Operator->>Inspector: press d on Ready, Successful, or Failed
-    Inspector->>Operator: ConfirmScreen
-    Operator-->>Inspector: Enter
-    Inspector->>Backend: dequeue(task)
-    Backend->>Redis: ZREM deferred or status segment, DEL payload and result
-    Inspector->>Inspector: refresh telemetry and task list
-
-    Operator->>Inspector: press p on a queue
-    Inspector->>Operator: PurgeScreen asks for the queue name
-    Operator-->>Inspector: queue name and Enter
-    Inspector->>Backend: purge(queue)
-    Backend->>Redis: delete five segments with payloads and results
-    Inspector->>Inspector: refresh telemetry and task list
-```
-
-Requeue appears only on the Failed tab. Dequeue is hidden on the Running tab,
-so the inspector never races a live lease. Purge deletes every segment of a
-queue, including results. The task list does not auto-refresh. It reloads on
-tab switch, queue change, F5, and after each action.
+The task list does not auto-refresh. It reloads on tab switch, queue change,
+F5, and after each action.
 
 ## Testing
 
