@@ -981,6 +981,57 @@ class TestWorkerProcess:
         assert worker.prefetcher is not None
         assert isinstance(worker.prefetcher.completion.exception(), RuntimeError)
 
+    def test_run__waits_for_running_task_after_timed_join(self, monkeypatch):
+        """Wait for a running task when a timed join would have returned early."""
+        monkeypatch.setattr(
+            "threadmill.executor.WorkerProcess.task_wait_timeout",
+            datetime.timedelta(seconds=0.01),
+        )
+        backend = default_task_backend
+        enqueued = backend.enqueue(echo, args=["drained"])
+        worker = _make_worker()
+        consumer_threads: list[WorkerThread] = []
+        task_started = threading.Event()
+        task_release = threading.Event()
+        original_start = WorkerThread.start
+        original_join = threading.Thread.join
+        original_execute = WorkerThread.execute_task_result
+
+        def start(self):
+            original_start(self)
+            consumer_threads.append(self)
+
+        def join(self, timeout=None):
+            # Emulate a timed join that returned with the task still running.
+            if timeout is not None:
+                return
+            original_join(self, timeout)
+
+        def execute_task_result(self, task_result):
+            task_started.set()
+            task_release.wait(5)
+            return original_execute(self, task_result)
+
+        def release_task():
+            assert task_started.wait(5)
+            # Leave an early-returning run() time to return with the task in flight.
+            time.sleep(0.2)
+            task_release.set()
+            worker.shutdown_requested.set()
+
+        monkeypatch.setattr(WorkerThread, "start", start)
+        monkeypatch.setattr(threading.Thread, "join", join)
+        monkeypatch.setattr(WorkerThread, "execute_task_result", execute_task_result)
+        releaser = threading.Thread(target=release_task)
+        releaser.start()
+
+        worker.run()
+
+        assert not consumer_threads[0].is_alive()
+        original_join(releaser, 5)
+        assert task_release.is_set()
+        assert backend.get_result(enqueued.id).status is TaskResultStatus.SUCCESSFUL
+
     def test_run__child_exits_non_zero_on_prefetch_failure(self, capfd):
         """A child whose prefetcher failed exits non-zero and logs the failure."""
         original_start_method = multiprocessing.get_start_method()

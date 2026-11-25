@@ -342,13 +342,10 @@ class WorkerProcess(multiprocessing.Process):
         ]
         for consumer_thread in consumer_threads:
             consumer_thread.start()
-        join_timeout = (
-            backend.result_ttl.total_seconds() if backend.result_ttl else None
-        )
         for consumer_thread in consumer_threads:
-            consumer_thread.join(join_timeout)
+            consumer_thread.join()
         self.prefetcher.stop_requested.set()
-        self.prefetcher.join(join_timeout)
+        self.prefetcher.join()
         completion = self.prefetcher.completion
         if completion.done() and (failure := completion.exception()) is not None:
             logger.error(
