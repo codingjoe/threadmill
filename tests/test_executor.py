@@ -33,7 +33,10 @@ from tests.testapp.tasks import (
     log_message,
     record_execution,
 )
-from threadmill import executor as executor_module
+from threadmill import (
+    executor as executor_module,
+    sentry as sentry_module,
+)
 from threadmill.backends.base import (
     BackendTelemetry,
     Broker,
@@ -420,6 +423,17 @@ class StubSentryMetrics:
     def gauge(self, name, value, *, attributes=None) -> None:
         """Record one gauge value."""
         self.gauges.append((name, value, attributes))
+
+
+class StubSentryEvents:
+    """Record captured Sentry events without an initialized SDK."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    def capture_event(self, event, **kwargs) -> None:
+        """Record one captured event and its scope kwargs."""
+        self.events.append((event, kwargs))
 
 
 class StubWorker:
@@ -1098,6 +1112,13 @@ class TestWorkerThread:
             datetime.timedelta(seconds=0.01),
         )
 
+    @pytest.fixture
+    def sentry_events(self, monkeypatch):
+        """Capture Sentry events emitted while running tasks."""
+        stub = StubSentryEvents()
+        monkeypatch.setattr(sentry_module, "sentry_sdk", stub)
+        return stub
+
     def test_execute_task_result__successful_execution(self):
         """execute_task_result runs a task and returns SUCCESSFUL result."""
         result = WorkerThread(
@@ -1198,8 +1219,8 @@ class TestWorkerThread:
         result = WorkerThread.call_task(_task_result(_async_task))
         assert result == 99
 
-    def test_run__requeues_failed_task_with_retry(self) -> None:
-        """run() requeues a FAILED task when retry_delay returns a timedelta."""
+    def test_run__requeues_failed_task_with_retry(self, sentry_events) -> None:
+        """run() requeues a FAILED task and reports its retry as handled."""
         enqueued = default_task_backend.enqueue(boom_with_retry, args=[])
         (acquired,) = default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="test-worker"
@@ -1215,8 +1236,12 @@ class TestWorkerThread:
         )
         assert default_task_backend.client.zscore(deferred_key, enqueued.id) is not None
 
-    def test_run__acknowledges_failed_task_without_retry(self) -> None:
-        """run() acknowledges a FAILED task when retry_delay returns None."""
+        [(event, _)] = sentry_events.events
+        mechanism = event["exception"]["values"][-1]["mechanism"]
+        assert mechanism["handled"] is True
+
+    def test_run__acknowledges_failed_task_without_retry(self, sentry_events) -> None:
+        """run() acknowledges a FAILED task and reports it as unhandled."""
         enqueued = default_task_backend.enqueue(boom_no_retry, args=[])
         (acquired,) = default_task_backend.acquire(
             timeout=datetime.timedelta(seconds=1), worker="test-worker"
@@ -1234,6 +1259,10 @@ class TestWorkerThread:
 
         result = default_task_backend.get_result(enqueued.id)
         assert result.status == TaskResultStatus.FAILED
+
+        [(event, _)] = sentry_events.events
+        mechanism = event["exception"]["values"][-1]["mechanism"]
+        assert mechanism["handled"] is False
 
     def test_run__acknowledges_failed_task_when_callback_raises(self) -> None:
         """run() acknowledges a FAILED task when the retry callback raises."""

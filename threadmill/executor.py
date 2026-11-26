@@ -474,10 +474,7 @@ class WorkerThread(threading.Thread):
                     if result.status is TaskResultStatus.FAILED
                     else None
                 )
-                if (
-                    result.status is TaskResultStatus.FAILED
-                    and self.failure is not None
-                ):
+                if result.status is TaskResultStatus.FAILED:
                     report_failure(self.failure, result, handled=delay is not None)
                 if delay is not None:
                     self.backend.requeue(result, timezone.now() + delay)
