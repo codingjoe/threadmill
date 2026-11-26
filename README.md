@@ -131,20 +131,16 @@ uv add "threadmill[inspector]"
 uv run manage.py threadmill inspector
 ```
 
-### Sentry
+### Sentry Metrics
 
 ![Sentry Dashboard with metric graphs](https://github.com/codingjoe/threadmill/raw/main/docs/images/Sentry-metrics.png)
 
-Threadmill reports metrics and task errors to [Sentry] when
-`sentry-sdk` is installed and initialized in the worker. Install the extra:
+Threadmill emits [Sentry application metrics][sentry-metrics] when `sentry-sdk`
+is installed. Install the extra:
 
 ```console
 uv add "threadmill[sentry]"
 ```
-
-#### Metrics
-
-Threadmill emits [Sentry application metrics][sentry-metrics].
 
 | Metric                     | Type         | Attributes                                        | Meaning                                                  |
 | -------------------------- | ------------ | ------------------------------------------------- | -------------------------------------------------------- |
@@ -153,30 +149,6 @@ Threadmill emits [Sentry application metrics][sentry-metrics].
 | `threadmill.queue.egress`  | counter      | `queue`                                           | Tasks that finish an attempt                             |
 | `threadmill.worker.count`  | gauge        | `pool` (process, thread)                          | Live worker processes and threads in the pool            |
 | `threadmill.task.duration` | distribution | `task`, `outcome` (successful, failed), `attempt` | Duration of one task attempt in milliseconds             |
-
-#### Task errors
-
-Every failed attempt reaches Sentry as its own event, reported through
-the `threadmill` mechanism and tagged with the task, its queue, and the
-attempt number:
-
-| Tag       | Value                                      |
-| --------- | ------------------------------------------ |
-| `task`    | Dotted path of the task function.          |
-| `queue`   | Queue that holds the task.                 |
-| `attempt` | Number of this attempt, counting from one. |
-
-The task ID rides along as the `task_id` extra.
-
-An attempt that schedules a retry is marked handled. The last attempt, where
-no retry follows, is marked unhandled, so the issue shows that the task gave
-up. Retries stay opt-in: without a `retry` callback every error is final and
-arrives as unhandled. See [Retrying failed tasks](#retrying-failed-tasks).
-
-Local variable values are left out of the stack trace. The worker also mutes
-the `django.tasks` logger, so the framework does not send a second copy.
-Without `sentry-sdk` reporting is a no-op, and an error inside reporting is
-logged without interrupting the worker.
 
 ### Autoscaling
 
@@ -328,5 +300,4 @@ def fetch_github_api(url: str): ...
 [![Sponsors](https://django.the-box.sh/sponsors/codingjoe/threadmill.svg)](https://github.com/sponsors/codingjoe)
 
 [django-tasks]: https://docs.djangoproject.com/en/stable/topics/tasks/
-[sentry]: https://docs.sentry.io/platforms/python/
 [sentry-metrics]: https://docs.sentry.io/platforms/python/metrics/

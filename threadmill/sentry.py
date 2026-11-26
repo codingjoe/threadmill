@@ -1,5 +1,3 @@
-"""Sentry reporting for task attempts that raise."""
-
 import contextlib
 import logging
 
@@ -20,20 +18,6 @@ def report_failure(
     *,
     handled: bool,
 ) -> None:
-    """
-    Send one attempt's error to Sentry as its own event.
-
-    The event arrives with a ``threadmill`` mechanism, tags for task, queue,
-    and attempt, and the task ID as an extra. Local variable values stay out
-    of the stack trace. Mark an attempt handled when a retry follows it and
-    unhandled when it is the last one, so the issue reflects that the task
-    gave up.
-
-    Args:
-        exception: Error raised by the attempt.
-        task_result: Result of the attempt that raised it.
-        handled: Whether another attempt follows.
-    """
     if sentry_sdk is not None:
         try:
             event, hint = event_from_exception(
@@ -58,13 +42,6 @@ def report_failure(
 
 
 def ignore_django_tasks_events() -> None:
-    """
-    Mute the framework logger that repeats each raised attempt.
-
-    The task framework logs each failed attempt with its traceback, and
-    Sentry's logging integration would turn that record into a second copy,
-    always marked handled. The worker mutes it once per process.
-    """
     if sentry_sdk is not None:
         getattr(
             sentry_logging, "ignore_logger_for_events", sentry_logging.ignore_logger
