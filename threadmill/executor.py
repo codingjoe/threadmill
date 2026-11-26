@@ -27,6 +27,8 @@ from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.json import normalize_json
 
+from .sentry import ignore_django_tasks_events, report_failure
+
 sentry_metrics = None
 with contextlib.suppress(ImportError):
     from sentry_sdk import metrics as sentry_metrics
@@ -326,6 +328,7 @@ class WorkerProcess(multiprocessing.Process):
     def run(self) -> None:
         django.setup()
         configure_logging(self.log_formatter)
+        ignore_django_tasks_events()
         logger.info("Starting worker process %s", self.name)
         self.lock = threading.Lock()
         self.expired = threading.Event()
@@ -450,6 +453,7 @@ class WorkerThread(threading.Thread):
         super().__init__(name=f"{socket.gethostname()}:{worker.pid}-{index}")
         self.worker = worker
         self.backend = backend
+        self.failure: BaseException | None = None
 
     def run(self) -> None:
         prefetcher = self.worker.prefetcher
@@ -465,10 +469,17 @@ class WorkerThread(threading.Thread):
 
             try:
                 result = self.execute_task_result(task_result)
+                delay = (
+                    self.backend.retry_delay(result)
+                    if result.status is TaskResultStatus.FAILED
+                    else None
+                )
                 if (
                     result.status is TaskResultStatus.FAILED
-                    and (delay := self.backend.retry_delay(result)) is not None
+                    and self.failure is not None
                 ):
+                    report_failure(self.failure, result, handled=delay is not None)
+                if delay is not None:
                     self.backend.requeue(result, timezone.now() + delay)
                 else:
                     self.backend.acknowledge(result)
@@ -489,6 +500,7 @@ class WorkerThread(threading.Thread):
         try:
             return_value = WorkerThread.call_task(task_result)
         except Exception as exception:  # noqa: BLE001
+            self.failure = exception
             task_result = dataclasses.replace(
                 task_result,
                 status=TaskResultStatus.FAILED,
